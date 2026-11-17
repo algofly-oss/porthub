@@ -49,6 +49,22 @@ fn delete_source(index:u32,luid:u64,own:Ipv4Addr)->Result<()>{
         ensure!(unsafe{DeleteUnicastIpAddressEntry(&row)}==0,"cannot remove exact recovered source address");Ok(())
 
 }
+/// Query the same AF_INET NlMtu that tun-rs configures, not the link-layer MTU.
+/// Only a native missing-row result is a stopped observation; every other error
+/// fails closed. Exact GUID/LUID/index is checked around this read-only query.
+fn ipv4_mtu(pin:&super::native_owner::source::Pin)->Result<Option<u16>> {
+    use super::native_owner::source::Pin;
+    use windows_sys::Win32::{NetworkManagement::IpHelper::{MIB_IPINTERFACE_ROW,InitializeIpInterfaceEntry,GetIpInterfaceEntry},Networking::WinSock::AF_INET,Foundation::ERROR_NOT_FOUND};
+    let Pin::Windows{index,luid,..}=pin else{anyhow::bail!("IPv4 configuration requires exact Windows pin")};
+    ensure!(native_source_pin(*index)?==*pin,"adapter changed before IPv4 configuration read");
+    let mut row:MIB_IPINTERFACE_ROW=unsafe{std::mem::zeroed()};unsafe{InitializeIpInterfaceEntry(&mut row)};row.Family=AF_INET;row.InterfaceIndex=*index;row.InterfaceLuid.Value=*luid;
+    let status=unsafe{GetIpInterfaceEntry(&mut row)};
+    ensure!(native_source_pin(*index)?==*pin,"adapter changed during IPv4 configuration read");
+    if status==ERROR_NOT_FOUND{return Ok(None);}
+    ensure!(status==0,"cannot inspect exact IPv4 configuration (OS status {status})");
+    ensure!(row.InterfaceIndex==*index&&unsafe{row.InterfaceLuid.Value}==*luid,"IPv4 configuration belongs to a changed adapter");
+    Ok(Some(u16::try_from(row.NlMtu)?))
+}
 struct LiveSource<'a>(&'a Tun);
 impl super::native_owner::source::ShutdownIo for LiveSource<'_>{
     fn identity(&self)->Result<super::native_owner::source::Pin>{native_source_pin(self.0.index)}
@@ -104,7 +120,7 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
         let mut manager=route_manager::RouteManager::new()?;let rows=manager.list()?;
         let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|row|row.index==Some(*index)).filter_map(|row|row.address.ip_addr()).collect();
         let native=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
-        recover_record(*index,4,&record,&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
+        record.recover_ipv4_state(&record.guid,&addresses,ipv4_mtu(&current)?,&native)?;
     }
     let Pin::Windows{luid,..}=current else{unreachable!()};
     let io=RecoveredSource{pin:current.clone(),index:*index,luid};
@@ -117,8 +133,11 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
     let rows=manager.list()?;
     let native:std::collections::BTreeSet<_>=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
     let addresses=super::native_owner::source::ShutdownIo::addresses(&io)?;
-    #[cfg(test)] recover_record(*index,5,&record,&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
-    let candidates=record.recovery_routes(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
+    ensure!(native_source_pin(*index)?==current,"adapter changed during stopped-source inventory");
+    record.recover_ipv4_state(&record.guid,&addresses,ipv4_mtu(&current)?,&native)?;
+    let candidates=record.stopped_recovery_routes(&record.guid,&addresses,&native);
+    #[cfg(test)] if candidates.is_err(){fixture_recovery_failure(*index,5,&record,&addresses,u16::try_from(*mtu)?,&native);}
+    let candidates=candidates?;
     // An interrupted compound never adopts pending native rows: recover() above
     // already rejected those. Only a durable child ACK may be cleaned here.
     let interrupted:Vec<_>=record.pending.iter().filter(|r|r.prefix<32).cloned().collect();
@@ -168,6 +187,9 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
     }
     let after=manager.list()?;ensure!(native_source_pin(*index)?==current,"adapter changed after recovered route cleanup");
     let native=after.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();record.observe_missing(&native,|next|save_record(&state,next))?;
+    let addresses=super::native_owner::source::ShutdownIo::addresses(&io)?;
+    ensure!(native_source_pin(*index)?==current,"adapter changed during final source-absence proof");
+    record.stopped_recovery_routes(&record.guid,&addresses,&native)?;
     Ok(current)
 }
 #[cfg(test)]
@@ -383,6 +405,7 @@ impl Tun {
         let named:Vec<_>=native_adapters.iter().filter(|(alias,_,_,_)|alias.eq_ignore_ascii_case(name)).collect();ensure!(named.len()<=1,"ambiguous Windows adapter alias");
         ensure!(!native_adapters.iter().any(|(alias,guid,_,_)|guid==&record.guid&&alias!=name),"recorded adapter was renamed; it was not modified");
         let existing_index=named.first().map(|(_,_,i,_)|*i);
+        let prior_own=record.own;let prior_baseline=record.baseline.clone();let mut stopped_reopen=None;
         if existing_index.is_some(){
             ensure!(record.mtu==porthub_mesh::MAX_PACKET as u16,"owned adapter MTU changed before source migration");
             if record.own!=own {super::native_owner::allow_source_rebind(&profile,record.own,own,&record.guid)?;}
@@ -394,11 +417,14 @@ impl Tun {
         if let Some((_,guid,index,mtu))=named.first(){
             let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|i|i.index==Some(*index)).filter_map(|i|i.address.ip_addr()).collect();
             let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
-            recover_record(*index,2,&mut record,guid,&addresses,u16::try_from(*mtu)?,&current)?;
+            let pin=native_source_pin(*index)?;let ip_mtu=ipv4_mtu(&pin)?;
+            record.recover_ipv4_state(guid,&addresses,ip_mtu,&current)?;
             record.observe_missing(&current,|next|save_record(&path,next))?;
+            if ip_mtu.is_none(){stopped_reopen=Some(pin.clone());}
             if record.own!=own {
                 super::native_owner::allow_source_rebind(&profile,record.own,own,&record.guid)?;
-                record.rebind_cleared_source(guid,&addresses,u16::try_from(*mtu)?,&current,own,|next|save_record(&path,next))?;
+                record.rebind_cleared_source(guid,&addresses,ip_mtu,&current,own,|next|save_record(&path,next))?;
+                stopped_reopen=Some(pin);
             }
         }
         if let Some(pools)=pools{
@@ -413,7 +439,9 @@ impl Tun {
         ensure!(adapter_guid(index)?==record.guid&&device.name()?==name,"Wintun did not return the intended owned adapter; no address was assigned");
         if existing_index==Some(index){
             let current=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
-            recover_record(index,3,&mut record,&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
+            let pin=native_source_pin(index)?;let addresses=device.addresses()?;
+            if let Some(stopped)=&stopped_reopen {ensure!(pin==*stopped,"stopped adapter changed during reopen");record.stopped_recovery_routes(&record.guid,&addresses,&current)?;}
+            else {record.recover_ipv4_state(&record.guid,&addresses,ipv4_mtu(&pin)?,&current)?;}
             record.observe_missing(&current,|next|save_record(&path,next))?;
         }else if existing_index.is_some(){
             // The pinned builder may recreate an orphaned *already verified*
@@ -424,6 +452,10 @@ impl Tun {
         ensure!(source_pin.name()==name,"owned adapter name changed before source configuration");
         device.set_network_address(own,32,None)?;device.set_mtu(porthub_mesh::MAX_PACKET as u16)?;device.enabled(true)?;
         let current:std::collections::BTreeSet<_>=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
+        ensure!(native_source_pin(index)?==source_pin,"adapter changed during source configuration");
+        let addresses=device.addresses()?;let ip_mtu=ipv4_mtu(&source_pin)?.context("new IPv4 configuration was not observed")?;
+        ensure!(ip_mtu==record.mtu&&addresses.contains(&IpAddr::V4(own))&&addresses.iter().all(|ip|*ip==IpAddr::V4(own)||matches!(ip,IpAddr::V6(v6)if v6.is_unicast_link_local())),"new native configuration readback differs from owned intent");
+        if stopped_reopen.is_some(){record.confirm_reopened_source(&record.guid.clone(),&addresses,ip_mtu,&current,prior_baseline.as_ref().context("stopped reopen lacks prior verified baseline")?,prior_own,|next|save_record(&path,next))?;}
         let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
         if record.baseline.is_none(){record.baseline=Some(current.clone());}
         record.routes=present.clone();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;

@@ -261,11 +261,41 @@ impl AdapterRecord {
         ensure!(self.pending.is_disjoint(native),"live unacknowledged route intent requires exact owned recovery");
         Ok(self.routes.intersection(native).cloned().collect())
     }
+    /// Caller holds the owned lease and exact pin with a fresh stopped inventory
+    /// (stop_checked or missing native AF_INET plus source absence). A cleared
+    /// Windows IPv4 interface has no IP-layer MTU to compare; do not pretend its
+    /// link-layer MTU is the former configured IPv4 MTU. Active recover() stays
+    /// strict. Every IPv4 address (including our old source) is forbidden here.
+    pub fn stopped_recovery_routes(&self,guid:&str,addresses:&[IpAddr],native:&BTreeSet<RouteStamp>)->Result<Vec<RouteStamp>> {
+        ensure!(self.guid==guid,"stopped adapter GUID changed; preserved");
+        let baseline=self.baseline.as_ref().ok_or_else(||anyhow::anyhow!("stopped adapter lacks verified baseline"))?;
+        ensure!(addresses.iter().all(|ip|matches!(ip,IpAddr::V6(v6)if v6.is_unicast_link_local())),"stopped adapter contains a source or foreign address; preserved");
+        ensure!(native.iter().all(|row|!self.retiring.contains(row)&&(baseline.contains(row)||self.routes.contains(row))),"stopped adapter contains an unowned or retired route; preserved");
+        ensure!(self.pending.is_disjoint(native),"stopped adapter has a live unacknowledged intent; preserved");
+        Ok(self.routes.intersection(native).cloned().collect())
+    }
+    /// Native AF_INET observation: only ERROR_NOT_FOUND maps to None. A present
+    /// IPv4 interface always retains the configured-MTU check, even if addressless.
+    pub fn recover_ipv4_state(&self,guid:&str,addresses:&[IpAddr],mtu:Option<u16>,native:&BTreeSet<RouteStamp>)->Result<()> {
+        if let Some(mtu)=mtu {self.recover(guid,addresses,mtu,native)}
+        else {self.stopped_recovery_routes(guid,addresses,native).map(|_|())}
+    }
+    /// After our address/configuration Create ACK and exact-pin readback, accept
+    /// only the new own /32 or previously verified kernel-baseline templates.
+    /// Never turn arbitrary rows found during reopen into a new baseline.
+    pub fn confirm_reopened_source(&mut self,guid:&str,addresses:&[IpAddr],mtu:u16,native:&BTreeSet<RouteStamp>,prior_baseline:&BTreeSet<RouteStamp>,prior_own:Ipv4Addr,persist:impl FnOnce(&AdapterRecord)->Result<()>)->Result<()> {
+        ensure!(addresses.contains(&IpAddr::V4(self.own)),"reopened own source was not observed");
+        let own_row=RouteStamp{address:self.own.into(),prefix:32,gateway:None,metric:256};
+        let allowed=|row:&RouteStamp|self.baseline.as_ref().is_some_and(|b|b.contains(row))||row==&own_row||(prior_baseline.contains(row)&&!(prior_own!=self.own&&row.address==IpAddr::V4(prior_own)&&row.prefix==32));
+        ensure!(native.iter().all(|row|self.routes.contains(row)||allowed(row)),"reopened adapter contains an unacknowledged native row; preserved");
+        let mut next=self.clone();next.baseline=Some(native.iter().filter(|row|!self.routes.contains(*row)&&allowed(row)).cloned().collect());
+        next.recover(guid,addresses,mtu,native)?;self.commit(next,persist)
+    }
     /// Reuse an exact protected adapter only AFTER its old source is absent
     /// and every explicit owned route has disappeared. Baseline rows are merely
     /// retained from the OLD verified set, never adopted from an arbitrary row.
-    pub fn rebind_cleared_source(&mut self,guid:&str,addresses:&[IpAddr],mtu:u16,native:&BTreeSet<RouteStamp>,own:Ipv4Addr,persist:impl FnOnce(&AdapterRecord)->Result<()>)->Result<()> {
-        self.recover(guid,addresses,mtu,native)?;
+    pub fn rebind_cleared_source(&mut self,guid:&str,addresses:&[IpAddr],mtu:Option<u16>,native:&BTreeSet<RouteStamp>,own:Ipv4Addr,persist:impl FnOnce(&AdapterRecord)->Result<()>)->Result<()> {
+        self.recover_ipv4_state(guid,addresses,mtu,native)?;
         ensure!(own.is_private()&&own!=self.own,"invalid fresh native source");
         ensure!(addresses.iter().all(|ip|matches!(ip,IpAddr::V6(v6)if v6.is_unicast_link_local())),"old or foreign source remains on adapter");
         ensure!(self.pending.is_empty()&&native.iter().all(|row|self.baseline.as_ref().is_some_and(|baseline|baseline.contains(row))),"live or ambiguous explicit route prevents source rebind");
@@ -497,6 +527,41 @@ mod tests {
         let permits=r.retire_capture(parent,|_|Ok(())).unwrap();for p in permits{native.remove(&p.into_stamp());}
         r.finish_capture(parent,|_|Ok(())).unwrap();r.recover(&r.guid,&[],1380,native).unwrap();
     }
+    fn stamp(address:Ipv4Addr)->RouteStamp{RouteStamp{address:address.into(),prefix:32,gateway:None,metric:0}}
+    #[test]
+    fn native_ipv4_missing_row_is_distinct_from_present_wrong_mtu(){
+        let r=record();assert!(r.recover_ipv4_state(&r.guid,&[],None,&BTreeSet::new()).is_ok());
+        assert!(r.recover_ipv4_state(&r.guid,&[],Some(65535),&BTreeSet::new()).is_err());
+        assert!(r.recover_ipv4_state(&r.guid,&[r.own.into()],None,&BTreeSet::new()).is_err());
+    }
+    #[test]
+    fn stopped_restart_and_source_rebind_validate_real_recreated_configuration(){
+        for changed in [false,true]{let mut r=record();let old=r.own;let own_row=RouteStamp{address:old.into(),prefix:32,gateway:None,metric:256};let multicast=RouteStamp{address:"224.0.0.0".parse().unwrap(),prefix:4,gateway:None,metric:256};r.baseline=Some(BTreeSet::from([own_row,multicast.clone()]));let prior=r.baseline.clone().unwrap();let guid=r.guid.clone();
+            r.recover_ipv4_state(&guid,&[],None,&BTreeSet::new()).unwrap();
+            if changed{r.rebind_cleared_source(&guid,&[],None,&BTreeSet::new(),"10.204.0.2".parse().unwrap(),|_|Ok(())).unwrap();}
+            let born=RouteStamp{address:r.own.into(),prefix:32,gateway:None,metric:256};let native=BTreeSet::from([born,multicast]);let addresses=[r.own.into()];
+            let before=r.encode().unwrap();assert!(r.confirm_reopened_source(&guid,&addresses,65535,&native,&prior,old,|_|Ok(())).is_err());assert_eq!(r.encode().unwrap(),before);
+            let mut foreign=native.clone();foreign.insert(stamp("10.99.0.2".parse().unwrap()));assert!(r.confirm_reopened_source(&guid,&addresses,1380,&foreign,&prior,old,|_|Ok(())).is_err());assert_eq!(r.encode().unwrap(),before);
+            r.confirm_reopened_source(&guid,&addresses,1380,&native,&prior,old,|_|Ok(())).unwrap();r.recover(&guid,&addresses,1380,&native).unwrap();
+        }
+    }
+    #[test]
+    fn stopped_recovery_requires_source_absence_and_preserves_active_mtu_guard(){
+        let mut r=record();let row=stamp("10.203.1.2".parse().unwrap());r.routes.insert(row.clone());let native=BTreeSet::from([row.clone()]);
+        assert!(r.recover(&r.guid,&[],65535,&native).is_err());
+        assert_eq!(r.stopped_recovery_routes(&r.guid,&[],&native).unwrap(),vec![row]);
+        for address in [IpAddr::V4(r.own),"10.203.9.9".parse().unwrap(),"2001:db8::1".parse().unwrap(),"::1".parse().unwrap()]{assert!(r.stopped_recovery_routes(&r.guid,&[address],&native).is_err());}
+        assert!(r.stopped_recovery_routes(&r.guid,&["fe80::1".parse().unwrap()],&native).is_ok());
+        assert!(r.stopped_recovery_routes(&"f".repeat(32),&[],&native).is_err());
+        r.baseline=None;assert!(r.stopped_recovery_routes(&r.guid,&[],&native).is_err());
+    }
+    #[test]
+    fn stopped_recovery_never_adopts_changed_foreign_pending_or_retired_rows(){
+        let mut r=record();let row=stamp("10.203.1.2".parse().unwrap());r.routes.insert(row.clone());
+        for foreign in [stamp("10.203.1.3".parse().unwrap()),RouteStamp{metric:1,..row.clone()},RouteStamp{gateway:Some("10.203.1.1".parse().unwrap()),..row.clone()}]{assert!(r.stopped_recovery_routes(&r.guid,&[],&BTreeSet::from([foreign])).is_err());}
+        r.routes.clear();r.pending.insert(row.clone());assert!(r.stopped_recovery_routes(&r.guid,&[],&BTreeSet::from([row.clone()])).is_err());
+        r.pending.clear();r.retiring.insert(row.clone());assert!(r.stopped_recovery_routes(&r.guid,&[],&BTreeSet::from([row])).is_err());
+    }
     #[test]fn windows_actual_broadcast_companions_require_joint_create_acks(){
         let mut r=record();let mut native=BTreeSet::new();
         for network in ["10.254.253.0","10.254.254.0"]{let p=capture(network,24);let c=capture_child(&p).unwrap();
@@ -566,30 +631,30 @@ mod tests {
         assert!(r.recovery_routes(&guid,&[],1380,&BTreeSet::from([row.clone()])).is_err());
         assert!(r.recovery_routes(&guid,&[],1380,&BTreeSet::new()).unwrap().is_empty());
         r.cancel_route(&row,|_|Ok(())).unwrap();r.observe_missing(&BTreeSet::new(),|_|Ok(())).unwrap();
-        r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),"10.204.0.2".parse().unwrap(),|_|Ok(())).unwrap();
+        r.rebind_cleared_source(&guid,&[],Some(1380),&BTreeSet::new(),"10.204.0.2".parse().unwrap(),|_|Ok(())).unwrap();
         assert!(r.pending.is_empty()&&r.retiring.is_empty());
     }
     #[test]
     fn source_stop_crash_recovers_confirmed_routes_before_fresh_rebind_without_adopting_foreign() {
         let mut r=record();let guid=r.guid.clone();let row=RouteStamp{address:"10.203.1.2".parse().unwrap(),prefix:32,gateway:None,metric:0};r.routes.insert(row.clone());
         let mut native=BTreeSet::from([row.clone()]);let next="10.204.0.2".parse().unwrap();
-        assert!(r.rebind_cleared_source(&guid,&[],1380,&native,next,|_|Ok(())).is_err());
+        assert!(r.rebind_cleared_source(&guid,&[],Some(1380),&native,next,|_|Ok(())).is_err());
         let mut foreign=native.clone();foreign.insert(RouteStamp{metric:1,..row.clone()});
         assert!(r.recovery_routes(&guid,&[],1380,&foreign).is_err());
         for row in r.recovery_routes(&guid,&[],1380,&native).unwrap(){
             let permit=r.retire_route(&row,|_|Ok(())).unwrap();let exact=permit.into_stamp();assert!(native.remove(&exact));r.finish_retirement(&exact,|_|Ok(())).unwrap();
         }
-        r.rebind_cleared_source(&guid,&[],1380,&native,next,|_|Ok(())).unwrap();assert_eq!(r.own,next);
+        r.rebind_cleared_source(&guid,&[],Some(1380),&native,next,|_|Ok(())).unwrap();assert_eq!(r.own,next);
     }
     #[test]
     fn cleared_source_rebind_requires_exact_guid_absence_and_durable_checkpoint() {
         let mut r=record();let guid=r.guid.clone();let next="10.204.0.2".parse().unwrap();let before=r.encode().unwrap();
         for addresses in [vec![IpAddr::V4(r.own)],vec!["192.168.1.2".parse().unwrap()]] {
-            assert!(r.rebind_cleared_source(&guid,&addresses,1380,&BTreeSet::new(),next,|_|Ok(())).is_err());assert_eq!(r.encode().unwrap(),before);
+            assert!(r.rebind_cleared_source(&guid,&addresses,Some(1380),&BTreeSet::new(),next,|_|Ok(())).is_err());assert_eq!(r.encode().unwrap(),before);
         }
-        assert!(r.rebind_cleared_source(&"f".repeat(32),&[],1380,&BTreeSet::new(),next,|_|Ok(())).is_err());
-        assert!(r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),next,|_|anyhow::bail!("injected fsync failure")).is_err());assert_eq!(r.encode().unwrap(),before);
-        r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),next,|_|Ok(())).unwrap();assert_eq!(r.guid,guid);assert_eq!(r.own,next);
+        assert!(r.rebind_cleared_source(&"f".repeat(32),&[],Some(1380),&BTreeSet::new(),next,|_|Ok(())).is_err());
+        assert!(r.rebind_cleared_source(&guid,&[],Some(1380),&BTreeSet::new(),next,|_|anyhow::bail!("injected fsync failure")).is_err());assert_eq!(r.encode().unwrap(),before);
+        r.rebind_cleared_source(&guid,&[],Some(1380),&BTreeSet::new(),next,|_|Ok(())).unwrap();assert_eq!(r.guid,guid);assert_eq!(r.own,next);
     }
     #[test]
     fn stale_unshipped_schema_cannot_silently_reauthorize_old_claims() {
