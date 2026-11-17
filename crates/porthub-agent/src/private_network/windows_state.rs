@@ -335,7 +335,13 @@ pub(super) fn profile_binding(profile: &Path) -> Result<String> {
     let fields = fields.into_iter().collect::<Result<Vec<_>>>()?;
     let mut hash = Sha256::new();
     hash.update(b"porthub-windows-native-owner-v1\0");
-    for unit in profile.as_os_str().encode_wide() {
+    // Writers have always bound the canonical profile spelling. Recovery can
+    // arrive with its equivalent ordinary Win32 spelling: normalize at this
+    // shared boundary without changing the v1 path/identity hash format.
+    let canonical = profile
+        .canonicalize()
+        .context("canonical native ownership profile identity")?;
+    for unit in canonical.as_os_str().encode_wide() {
         hash.update(unit.to_le_bytes());
     }
     hash.update([0, 0]);
@@ -418,6 +424,84 @@ fn privileged_owner(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod spelling_tests {
     use super::*;
+    fn legacy_canonical_binding(canonical: &Path, fields: &[&str]) -> String {
+        use sha2::{Digest, Sha256};
+        use std::os::windows::ffi::OsStrExt;
+        // Frozen v1 writer bytes, including the original domain and separator.
+        let mut hash = Sha256::new();
+        hash.update(b"porthub-windows-native-owner-v1\0");
+        for unit in canonical.as_os_str().encode_wide() {
+            hash.update(unit.to_le_bytes());
+        }
+        hash.update([0, 0]);
+        hash.update(serde_json::to_vec(fields).unwrap());
+        format!("{:x}", hash.finalize())
+    }
+    #[test]
+    fn equivalent_profile_spellings_preserve_existing_canonical_record_binding() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let profile = root.path().join("profile.json");
+        let fields = ["https://fixture.invalid", "workspace-a", "peer-a"];
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"server":fields[0],"workspace":fields[1],"peer_id":fields[2]}),
+        )?;
+        crate::profile::write_private(&profile, &bytes, false)?;
+        let canonical = profile.canonicalize()?;
+        let text = canonical.to_str().context("fixture path Unicode")?;
+        let ordinary = std::path::PathBuf::from(
+            text.strip_prefix(r"\\?\")
+                .context("fixture canonical local Windows path")?,
+        );
+        assert_ne!(ordinary, canonical);
+        assert_eq!(std::fs::read(&ordinary)?, std::fs::read(&canonical)?);
+        let legacy = legacy_canonical_binding(&canonical, &fields);
+        assert_eq!(profile_binding(&canonical)?, legacy);
+        assert_eq!(profile_binding(&ordinary)?, legacy);
+        let record = super::super::native_ownership::AdapterRecord {
+            version: 2,
+            binding: legacy,
+            guid: "b".repeat(32),
+            name: "ph12345678".into(),
+            own: "10.203.0.2".parse()?,
+            mtu: 1380,
+            baseline: Some(Default::default()),
+            routes: Default::default(),
+            pending: Default::default(),
+            retiring: Default::default(),
+        };
+        let persisted = record.encode()?;
+        let existing = super::super::native_ownership::AdapterRecord::decode(&persisted)?;
+        existing.validate(
+            &profile_binding(&ordinary)?,
+            &record.name,
+            record.own,
+            record.mtu,
+        )?;
+        root.close()?;
+        Ok(())
+    }
+    #[test]
+    fn distinct_profile_path_or_enrollment_cannot_reuse_existing_binding() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let profile = root.path().join("profile.json");
+        let foreign = root.path().join("foreign.json");
+        let identity = serde_json::json!({"server":"https://fixture.invalid","workspace":"workspace-a","peer_id":"peer-a"});
+        let bytes = serde_json::to_vec(&identity)?;
+        crate::profile::write_private(&profile, &bytes, false)?;
+        crate::profile::write_private(&foreign, &bytes, false)?;
+        let original = profile_binding(&profile)?;
+        assert_ne!(profile_binding(&foreign)?, original);
+        for field in ["server", "workspace", "peer_id"] {
+            let mut changed = identity.clone();
+            changed[field] = serde_json::json!("different-authority");
+            crate::profile::write_private(&profile, &serde_json::to_vec(&changed)?, true)?;
+            assert_ne!(profile_binding(&profile)?, original);
+        }
+        crate::profile::write_private(&profile, b"{}", true)?;
+        assert!(profile_binding(&profile).is_err());
+        root.close()?;
+        Ok(())
+    }
     #[test]
     fn canonical_profile_keeps_exact_managed_writer_acl_branch() -> Result<()> {
         let managed = crate::service::windows_acl::managed_root()?;
