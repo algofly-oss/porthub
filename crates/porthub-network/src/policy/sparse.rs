@@ -45,6 +45,10 @@ pub struct ExitIntent {
     pub selection:porthub_mesh::exit_policy::Selection,
     pub traffic_mode:porthub_mesh::exit_policy::TrafficMode,
     pub allow_direct_fallback:bool,pub tor_enabled:bool,pub tor_circuit_groups:usize,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub lan_networks:Vec<porthub_mesh::lan_routes::Network>,
+    #[serde(default="yes")] pub masquerade:bool,
+    #[serde(default="yes")] pub block_lan_access:bool,
 }
 /// Separately negotiated exact exit authority. It never grants ordinary private
 /// ports, chooses an exit, or enables local Tor/direct fallback by itself.
@@ -106,6 +110,7 @@ impl Engine {
             let mut intent_ids=std::collections::HashSet::new();let mut clients=0;let mut routers=0;
             for intent in &sparse.exit_intents {
                 ensure!(!intent.id.is_empty()&&intent.id.len()<=60&&intent.name.len()<=256&&intent_ids.insert(&intent.id)
+                    &&intent.lan_networks.len()<=32
                     &&(1..=16).contains(&intent.tor_circuit_groups)
                     &&(!intent.tor_enabled||(intent.role==ExitRole::Client&&intent.traffic_mode.internet())),"invalid exit intent");
                 match intent.role{ExitRole::Client=>clients+=1,ExitRole::Router=>routers+=1}
@@ -402,6 +407,18 @@ mod tests {
             }],
         }
     }
+    #[test]
+    fn exit_intent_capture_is_exact_bounded_and_preserves_native_defaults(){
+        let epoch="a".repeat(64);let mut snapshot=base(&epoch);
+        let value=serde_json::json!({"id":"route","name":"LAN","role":"client","selection":"sticky","traffic_mode":"lan_only","allow_direct_fallback":false,"tor_enabled":false,"tor_circuit_groups":4,"lan_networks":["10.1.0.0/24","10.2.0.0/24"]});
+        let intent:ExitIntent=serde_json::from_value(value).unwrap();assert!(intent.masquerade&&intent.block_lan_access);
+        assert!(!intent.lan_networks.iter().any(|n|n.contains("10.3.0.1".parse().unwrap())));
+        snapshot.sparse.as_mut().unwrap().exit_epoch=Some(epoch);snapshot.sparse.as_mut().unwrap().exit_intents.push(intent);
+        Engine::default().apply(snapshot.clone()).unwrap();
+        snapshot.sparse.as_mut().unwrap().exit_intents[0].lan_networks=(0..33).map(|n|format!("10.{n}.0.0/16").parse().unwrap()).collect();
+        assert!(Engine::default().apply(snapshot).is_err());
+    }
+
     #[test]
     fn namespace_metadata_is_bounded_and_malformed_replacement_fails_closed() {
         let epoch = "a".repeat(64);
