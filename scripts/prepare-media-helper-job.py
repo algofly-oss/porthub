@@ -29,12 +29,13 @@ def prepare(root, revision, gateway, targets, previous=None, fetch=True):
     if module.media.numeric(core) < (1, 11, 34):
         raise ValueError('A release containing media helpers requires agent >=1.11.34')
     module.media.numeric(release)
+    minimum = module.minimum_core(root, core)
     if fetch:
         previous = module.media.fetch_catalog(gateway)
     plan = module.plan(root, revision, targets, previous)
     matrix = [{'target': target, 'runner': RUNNERS[target][0], 'kind': RUNNERS[target][1]}
               for target in plan['targets']] if plan['mode'] == 'build' else []
-    return dict(plan, enabled=True, core=core, release=release, matrix=matrix)
+    return dict(plan, enabled=True, core=minimum, building_core=core, release=release, matrix=matrix)
 
 
 def main():

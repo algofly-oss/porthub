@@ -42,6 +42,36 @@ class JobTests(unittest.TestCase):
         self.assertEqual(reused['matrix'], [])
         self.assertEqual(reused['manifest'], self.fixture.previous)
 
+    def test_declared_protocol_one_minimum_is_independent_of_building_core(self):
+        root = self.fixture.root
+        agent = root / 'crates/porthub-agent/Cargo.toml'
+        agent.write_text(agent.read_text().replace('1.11.34', '1.11.35'))
+        helper = root / 'crates/porthub-media-helper/Cargo.toml'
+        helper.write_text(helper.read_text().replace('version="0.1.0"', 'version="0.2.1"') + '\n[package.metadata.porthub_media]\nminimum_core="1.11.34"\n')
+        lock = root / 'Cargo.lock'
+        lock.write_text(lock.read_text().replace('name = "porthub-media-helper"\nversion = "0.1.0"', 'name = "porthub-media-helper"\nversion = "0.2.1"'))
+        self.fixture.commit()
+        plan = self.prepare()
+        self.assertEqual(plan['core'], '1.11.34')
+        self.assertEqual(plan['building_core'], '1.11.35')
+        release = load('helper_release_minimum', 'prepare-release.py')
+        self.assertEqual(release.media_build_plan(root, '1.11.35', job.RUNNERS)['media_min_core'], '1.11.34')
+
+    def test_minimum_rejects_future_malformed_and_below_protocol_floor(self):
+        root = self.fixture.root
+        helper = root / 'crates/porthub-media-helper/Cargo.toml'
+        original = helper.read_text()
+        release = load('helper_release_minimum_reject', 'prepare-release.py')
+        for minimum in ['1.11.35', '1.11.33', 'invalid', 34]:
+            with self.subTest(minimum=minimum):
+                import json
+                helper.write_text(original + '\n[package.metadata.porthub_media]\nminimum_core=' + json.dumps(minimum) + '\n')
+                self.fixture.commit()
+                with self.assertRaises(ValueError):
+                    self.prepare()
+                with self.assertRaises(ValueError):
+                    release.media_build_plan(root, '1.11.34', job.RUNNERS)
+
     def test_pre_feature_helper_release_fails_and_legacy_without_helper_needs_no_assets(self):
         root = self.fixture.root
         agent = root / 'crates/porthub-agent/Cargo.toml'

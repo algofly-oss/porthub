@@ -4,6 +4,9 @@ version = "0.2.1"
 edition.workspace = true
 publish.workspace = true
 
+[package.metadata.porthub_media]
+minimum_core = "1.11.34"
+
 [dependencies]
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }

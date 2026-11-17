@@ -26,6 +26,18 @@ package = load('media_package_plan', HERE / 'package-media-helper.py')
 media = load('media_release_plan', HERE / 'media-release.py')
 
 
+
+def minimum_core(root, building_core):
+    package = tomllib.loads((Path(root) / 'crates/porthub-media-helper/Cargo.toml').read_text())['package']
+    metadata = package.get('metadata', {})
+    if not isinstance(metadata, dict) or not isinstance(metadata.get('porthub_media', {}), dict):
+        raise ValueError('Invalid media helper compatibility metadata')
+    minimum = metadata.get('porthub_media', {}).get('minimum_core', '1.11.34')
+    if not (1, 11, 34) <= media.numeric(minimum) <= media.numeric(building_core):
+        raise ValueError('Media helper minimum core must be >=1.11.34 and <=building core')
+    return minimum
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 

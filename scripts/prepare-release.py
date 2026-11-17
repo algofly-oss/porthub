@@ -243,7 +243,10 @@ def media_build_plan(root,core_version,targets):
         raise ValueError('Production native media requires core >=1.11.34')
     if not (Path(root)/'crates/porthub-media-helper/Cargo.toml').is_file():
         raise ValueError('Requested media helper source is absent')
-    return {'media_targets':','.join(sorted(targets)),'media_min_core':core_version}
+    spec=importlib.util.spec_from_file_location('release_media_minimum',Path(__file__).with_name('media-helper-plan.py'))
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    minimum=helper.minimum_core(root,core_version)
+    return {'media_targets':','.join(sorted(targets)),'media_min_core':minimum}
 
 def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=(), previous_core_builds=(), media_targets=()):
     if not re.fullmatch(r'[0-9a-f]{40}', trigger_sha):
