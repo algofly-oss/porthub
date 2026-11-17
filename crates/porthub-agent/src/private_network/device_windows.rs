@@ -486,10 +486,9 @@ impl Tun {
         let current_peers={let mut held=self.routes.lock().await;held.retain(|ip|present(*ip,32));held.iter().copied().filter(|ip|*ip!=self.own).collect::<std::collections::BTreeSet<_>>()};
         let current_capture={let mut held=self.capture_routes.lock().await;held.retain(|p|present(p.address(),p.prefix()));held.clone()};
         if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){return Ok(audit);}
-        // Remove obsolete/now-conflicting capture and host entries before adding
-        // new ones. A safe known /32 may still work outside a conflicting subnet.
-        let retained_capture:Vec<_>=self.capture_routes.lock().await.iter().copied().filter(|p|audit.capture.accepted.contains(p)).collect();
-        self.update_capture_routes(&retained_capture).await?;
+        // Withdraw obsolete host entries first. Capture transitions are a single
+        // add-before-remove compound update below; pre-withdrawing their old
+        // cover would reopen a default-route gap during safe pool expansion.
         let retained_peers:Vec<_>=self.routes.lock().await.iter().copied().filter(|p|audit.accepted_peers.contains(p)).collect();
         self.update_routes_for(&retained_peers,HostAdmission::Sparse).await?;
         audit.capture=self.update_capture_routes(pools).await?;
