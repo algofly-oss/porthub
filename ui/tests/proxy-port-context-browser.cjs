@@ -14,12 +14,14 @@ const {launchBrowser}=require('./browser.cjs');
   const machine={...state.machines[1],name:'Clear target'},other={...state.machines[2],name:'Other machine'},template=state.connections.find(c=>c.machine_id===machine._id);
   const port=(id,host,name,external)=>({...template,_id:id.repeat(24),machine_id:host._id,machine_name:host.name,service_name:name,internal_port:80,external_port:external,enabled:true});
   const wrong=port('a',machine,'First HTTP service',46538),target=port('b',machine,'Exact BMC port',46539),foreign=port('c',other,'Other BMC port',46540);state.machines=[other,machine];state.connections=[wrong,foreign,target];state.proxies=[];
+  let releaseSnapshot,seenSnapshot,finishSnapshot,firstSnapshot;const snapshotGate=new Promise(resolve=>releaseSnapshot=resolve),snapshotStarted=new Promise(resolve=>seenSnapshot=resolve),snapshotDone=new Promise(resolve=>finishSnapshot=resolve);
   let release;const gate=new Promise(resolve=>release=resolve),writes=[],detailQueries=[];
   await context.route('**/api/**',async route=>{const request=route.request(),url=new URL(request.url()),path=url.pathname;
    // This telemetry POST is read-only; every other non-GET remains a forbidden write.
    if(request.method()!=='GET'&&!(request.method()==='POST'&&path==='/api/connections/firewall/traffic/snapshot'))writes.push({method:request.method(),path});
    if(path==='/api/inventory/connections'&&url.searchParams.get('ids')===target._id&&url.searchParams.has('options')){detailQueries.push(target._id);await gate;}
-   let data;try{data=handleDemoRequest(state,request.method(),request.url(),request.postDataJSON()||{});}catch{data={};}await route.fulfill({json:data});
+   const heldSnapshot=path==='/api/connections/firewall/traffic/snapshot'&&!firstSnapshot;if(heldSnapshot){assert.equal(request.method(),'POST');assert.deepEqual(request.postDataJSON(),{data_ids:[target._id]});firstSnapshot=request;seenSnapshot();await snapshotGate;}
+   let data;try{data=handleDemoRequest(state,request.method(),request.url(),request.postDataJSON()||{});}catch{data={};}await route.fulfill({json:data});if(heldSnapshot)finishSnapshot();
   });
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:33428'}/home?view=machines&machine=${machine._id}&machineTab=ports`);
@@ -39,6 +41,15 @@ const {launchBrowser}=require('./browser.cjs');
   await portPicker.click();await page.getByRole('option',{name:/First HTTP service/}).click();assert.equal(await selectedId(portPicker),wrong._id,'Prefilled binding remains editable');
   await dialog.getByRole('button',{name:'Standalone URL',exact:true}).click();await dialog.getByLabel('Binding 1 URL',{exact:true}).fill('https://edited.example.invalid/app');await dialog.getByRole('button',{name:'Machine port',exact:true}).click();assert.equal(await selectedId(portPicker),wrong._id);assert.equal(await dialog.getByLabel('Binding 1 label',{exact:true}).inputValue(),'Operator draft');
   await page.screenshot({path:`/tmp/porthub-proxy-context-${process.env.REVIEW_BROWSER||'chromium'}-${width}.png`});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await dialog.waitFor({state:'hidden'});assert.deepEqual(writes,[],'Cancel creates no proxy/port/policy writes');
+  // Finish the real blocking-editor lifecycle before a full document reload.
+  // Hold its read-only poll to prove UI cancellation settles in the live frame,
+  // rather than unloading an active intercepted request with the old document.
+  await Promise.race([snapshotStarted,new Promise((_,reject)=>setTimeout(()=>reject(Error('Snapshot did not start')),30000).unref())]);
+  assert.equal(firstSnapshot.failure(),null);const canceled=page.waitForEvent('requestfailed',request=>request===firstSnapshot);
+  await page.getByRole('button',{name:'All Ports',exact:true}).click();await canceled;
+  assert.match(firstSnapshot.failure().errorText,/cancel|abort/i);releaseSnapshot();await snapshotDone;
+  await page.getByRole('button',{name:'Close',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+  assert.deepEqual(errors,[],'UI closes and settles its held read in the live document');assert.deepEqual(writes,[]);
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:33428'}/home?view=proxies`);await page.getByRole('button',{name:'Create proxy',exact:true}).click();
   const global=page.getByRole('dialog').filter({has:page.getByText('Create Proxy Route',{exact:true})});await global.getByRole('button',{name:'Bindings',exact:true}).click();await global.getByLabel('Binding 1 URL',{exact:true}).waitFor({state:'visible'});assert.equal(await global.getByLabel('Binding 1 URL',{exact:true}).count(),1);assert.equal(await global.getByLabel('Binding 1 machine',{exact:true}).count(),0,'Global create still defaults to standalone');await global.getByRole('button',{name:'Cancel',exact:true}).click();assert.deepEqual(writes,[]);assert.deepEqual(errors,[]);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await context.close();console.log(`PASS proxy exact port context/lazy metadata/edit/cancel/global ${width}`);
  }}finally{await browser.close();}
