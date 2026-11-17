@@ -101,18 +101,18 @@ pub(crate) async fn watch(
         }
         let mut refresh = tokio::time::interval(Duration::from_secs(120));
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut changed = false;
+        let mut changed = super::route_debounce::Debounce::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = output.closed() => return Ok(()),
-                _ = refresh.tick() => changed = true,
+                _ = refresh.tick() => changed.notify(tokio::time::Instant::now()),
                 event = listener.listen().boxed() => {
                     if event.is_err() { break; }
-                    changed = true;
+                    changed.notify(tokio::time::Instant::now());
                 }
-                _ = async { if changed { tokio::time::sleep(Duration::from_millis(250)).await } else { std::future::pending::<()>().await } } => {
-                    changed = false;
+                _ = changed.wait() => {
+                    changed.clear();
                     if let Ok(Ok(addresses)) = tokio::time::timeout(Duration::from_secs(2), current()).await {
                         output.send_if_modified(|previous| {
                             if *previous == addresses { return false; }

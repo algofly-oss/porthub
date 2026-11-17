@@ -59,18 +59,18 @@ pub(crate) async fn watch(
         refresh(&output, &cancel).await?;
         let mut interval = tokio::time::interval(Duration::from_secs(120));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut changed = false;
+        let mut changed = super::route_debounce::Debounce::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = output.closed() => return Ok(()),
-                _ = interval.tick() => changed = true,
+                _ = interval.tick() => changed.notify(tokio::time::Instant::now()),
                 event = listener.listen().boxed() => {
                     if event.is_err() { break; }
-                    changed = true;
+                    changed.notify(tokio::time::Instant::now());
                 }
-                _ = async { if changed { tokio::time::sleep(Duration::from_millis(250)).await } else { std::future::pending::<()>().await } } => {
-                    changed = false;
+                _ = changed.wait() => {
+                    changed.clear();
                     refresh(&output, &cancel).await?;
                     backoff = Duration::from_secs(1);
                 }

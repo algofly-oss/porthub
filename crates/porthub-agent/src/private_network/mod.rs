@@ -1,3 +1,5 @@
+#[cfg(any(windows, target_os = "macos", test))]
+mod route_debounce;
 pub mod controller;
 #[cfg(target_os = "linux")]
 pub mod device;
