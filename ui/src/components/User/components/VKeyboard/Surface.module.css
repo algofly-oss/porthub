@@ -137,7 +137,6 @@
  .surface .keyboard :global(.vk){height:clamp(24px,calc((100dvh - 205px)/6 - 4px),46px)}
  .padView{grid-template-rows:44px minmax(0,1fr)}.padView .pad{display:block}.padView .caption .mic{display:grid}
 }
-@media(prefers-reduced-motion:reduce){.captionNew,.micBusy::after{animation:none}.captionViewport,.mic,.wave span{transition:none}}
 
 .keyboard :global(.mic-key){background:hsl(var(--primary));color:hsl(var(--primary-foreground))}
 .keyboard :global(.mic-key.recording){background:#dc2626}
@@ -145,3 +144,5 @@
 .keyboard :global(.mic-key.busy){background:hsl(var(--control))}
 .keyboard :global(.mic-key.busy svg){opacity:0}
 .keyboard :global(.mic-key.busy)::after{content:'';position:absolute;width:18px;height:18px;border:2px solid hsl(var(--muted-foreground)/.25);border-top-color:hsl(var(--foreground));border-radius:50%;animation:dictationSpin .8s linear infinite}
+
+@media(prefers-reduced-motion:reduce){.captionNew,.micBusy::after,.keyboard :global(.mic-key.busy)::after{animation:none}.captionViewport,.mic,.wave span{transition:none}}
