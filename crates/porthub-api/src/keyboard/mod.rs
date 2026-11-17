@@ -187,9 +187,20 @@ impl EndCause {
 }
 async fn close_with_category(socket: &mut WebSocket, phase: EndPhase, cause: EndCause) {
     tracing::info!(phase=phase.id(), cause=cause.id(), "VKeyboard connection ended");
-    // Same close handshake, with a bounded, fixed vocabulary; never an error/body.
-    let _=socket.send(Message::Close(Some(CloseFrame{code:1000,reason:format!("keyboard:{}:{}",phase.id(),cause.id()).into()}))).await;
-    let _=socket.close().await;
+    // Authority/host-stop cleanup has already happened. Drain only this closing
+    // transport: queued heartbeat replies must not turn its final category into
+    // a TCP reset. Ignore in-flight application data; never dispatch more input.
+    let _=tokio::time::timeout(Duration::from_secs(1),async {
+        if socket.send(Message::Close(Some(CloseFrame{code:1000,reason:format!("keyboard:{}:{}",phase.id(),cause.id()).into()}))).await.is_ok() {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
+                    Some(Ok(_))=>{},
+                }
+            }
+        }
+        let _=socket.close().await;
+    }).await;
 }
 async fn host_socket(
     app: Arc<App>,

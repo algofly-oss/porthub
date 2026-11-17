@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use mongodb::bson::{doc, oid::ObjectId};
@@ -100,14 +100,16 @@ async fn diagnostic_host(base: &str, id: &str, token: &str) -> Result<Socket> {
 async fn classified_close(socket:&mut Socket, answer_ping:bool, bound:Duration)->Result<(Option<Value>,String)> {
     tokio::time::timeout(bound,async {
         let mut notice=None;
+        let mut last_kind="none";let mut pongs=0;
         while let Some(frame)=socket.next().await {
-            match frame? {
+            match frame.with_context(||format!("classified close: receive frame; notice_seen={} last_kind={last_kind} pongs={pongs}",notice.is_some()))? {
                 Message::Text(text)=>{
                     let value:Value=serde_json::from_str(&text)?;
-                    if value["type"]=="ping" && answer_ping {send(socket,json!({"type":"pong"})).await?;}
+                    last_kind=if value["type"]=="ping"{"ping"}else if value["type"]=="closed"{"closed"}else{"other"};
+                    if value["type"]=="ping" && answer_ping {send(socket,json!({"type":"pong"})).await.context("classified close: send heartbeat response")?;pongs+=1;}
                     if value["type"]=="closed" {notice=Some(value);}
                 }
-                Message::Close(Some(frame))=>{ensure!(u16::from(frame.code)==1000);return Ok((notice,frame.reason.to_string()));}
+                Message::Close(Some(frame))=>{ensure!(u16::from(frame.code)==1000);socket.flush().await.context("classified close: acknowledge close handshake")?;return Ok((notice,frame.reason.to_string()));}
                 _=>{}
             }
         }
@@ -125,7 +127,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DiagnosticLog {type Writer=
 #[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn actual_control_classifies_invalid_frames_and_host_end_without_exposing_payloads()->Result<()> {
     let logs=DiagnosticLog::default();
-    let _trace=tracing::subscriber::set_default(tracing_subscriber::fmt().with_env_filter("porthub_api::keyboard=info").with_ansi(false).without_time().with_writer(logs.clone()).finish());
+    // Upgraded HTTP tasks may outlive a thread-local tracing scope. Capture the
+    // fixed keyboard target for this test process, including spawned handlers.
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_env_filter("porthub_api::keyboard=info").with_ansi(false).without_time().with_writer(logs.clone()).finish()).context("install diagnostic test-process subscriber")?;
     let case=Case::new(Default::default()).await?;
     let result:Result<()>=async {
         let (owner,cookie)=case.user("keyboard-end-categories@example.invalid","admin").await?;
@@ -147,22 +151,22 @@ async fn actual_control_classifies_invalid_frames_and_host_end_without_exposing_
                 send(&mut host,json!({"type":"ack","session":start["session"],"ack":{"id":parsed.id,"ok":true}})).await?;
                 ensure!(next(&mut client).await?["ack"]["ok"]==true);
             }
-            client.send(frame).await?;
-            let (notice,reason)=classified_close(&mut client,true,Duration::from_secs(5)).await?;
+            client.send(frame).await.with_context(||format!("controller {cause}: inject invalid frame"))?;
+            let (notice,reason)=classified_close(&mut client,true,Duration::from_secs(5)).await.with_context(||format!("controller {cause}: observe close category"))?;
             ensure!(notice.is_none()&&reason==format!("keyboard:controller:{cause}")&&!reason.contains("SECRET"));
-            ensure!(next(&mut host).await?["type"]=="stop","exact session teardown remains intact");
+            ensure!(next(&mut host).await.with_context(||format!("controller {cause}: observe host stop"))?["type"]=="stop","exact session teardown remains intact");
         }
         for mode in 0..3 {
             let mut client=controller(&base,&id,&cookie,None).await?;ensure!(next(&mut client).await?["type"]=="ready");ensure!(next(&mut host).await?["type"]=="start");
-            if mode==2 {drop(host);}else if mode==1 {host.send(Message::Text("SECRET not-json /private/path".into())).await?;}else{host.close(None).await?;}
-            let(notice,reason)=classified_close(&mut client,true,Duration::from_secs(5)).await?;
+            if mode==2 {drop(host);}else if mode==1 {host.send(Message::Text("SECRET not-json /private/path".into())).await.context("host json: inject invalid frame")?;}else{host.close(None).await.context("host closed: initiate close")?;}
+            let(notice,reason)=classified_close(&mut client,true,Duration::from_secs(5)).await.with_context(||format!("host mode {mode}: observe controller close"))?;
             let notice=notice.ok_or_else(||anyhow::anyhow!("Missing host termination notice"))?;
             ensure!(notice["phase"]=="host"&&notice["cause"]==match mode{0=>"closed",1=>"json",_=>"transport"});
             ensure!(notice.as_object().unwrap().len()==4&&notice["error"]=="VKeyboard disconnected"&&!notice.to_string().contains("SECRET")&&reason=="keyboard:controller:host_ended");
-            host=diagnostic_host(&base,&id,token).await?;
+            host=diagnostic_host(&base,&id,token).await.with_context(||format!("host mode {mode}: reconnect host"))?;
         }
         let log=String::from_utf8(logs.0.lock().unwrap().clone())?;
-        for cause in ["frame","json","closed","transport"] {ensure!(log.contains(&format!("cause=\"{cause}\"")),"Missing actual fixed termination trace");}
+        for cause in ["frame","json","closed","transport"] {ensure!(log.contains(&format!("cause=\"{cause}\"")),"Missing actual fixed termination trace {cause}; bytes={}",log.len());}
         ensure!(log.contains("VKeyboard connection ended")&&!log.contains("SECRET")&&!log.contains("private/path")&&!log.contains(token));
         Ok(())
     }.await;case.db.drop().await?;result
@@ -205,5 +209,28 @@ async fn actual_control_idle_deadline_classified_without_extending_session()->Re
         }));
         // Leave browser pings unanswered, but keep the desktop host alive.
         let(_,reason)=classified_close(&mut client,false,Duration::from_secs(85)).await?;ensure!(reason=="keyboard:controller:idle");host_task.await??;Ok(())
+    }.await;case.db.drop().await?;result
+}
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn closing_control_drains_late_heartbeat_without_replaying_post_stop_input()->Result<()> {
+    let case=Case::new(Default::default()).await?;
+    let result:Result<()>=async {
+        let(owner,cookie)=case.user("keyboard-end-drain@example.invalid","admin").await?;
+        let machine=ObjectId::new();let id=machine.to_hex();let token="owned-drain-host";
+        case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":"Owned closing desktop","token":token,"enabled":true}).await?;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let base=format!("ws://{}",listener.local_addr()?);let router=case.router.clone();let _server=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {axum::serve(listener,router).await}));
+        let mut host=diagnostic_host(&base,&id,token).await?;let mut client=controller(&base,&id,&cookie,None).await?;ensure!(next(&mut client).await?["type"]=="ready");ensure!(next(&mut host).await?["type"]=="start");
+        client.send(Message::Text("invalid-json".into())).await.context("drain: trigger existing malformed-frame rejection")?;
+        ensure!(next(&mut host).await?["type"]=="stop","termination must stop the old input session before drain");
+        // Simulate application frames already in flight while the server's
+        // close frame travels back. They must never acquire input authority.
+        send(&mut client,json!({"type":"pong"})).await.context("drain: late heartbeat")?;
+        send(&mut client,json!({"type":"input","input":{"id":uuid::Uuid::new_v4().to_string(),"command":{"type":"release_all"}}})).await.context("drain: post-stop input")?;
+        let(_,reason)=classified_close(&mut client,false,Duration::from_secs(5)).await.context("drain: typed close handshake")?;
+        ensure!(reason=="keyboard:controller:json");
+        ensure!(tokio::time::timeout(Duration::from_millis(100),next(&mut host)).await.is_err(),"post-stop input or duplicate stop was forwarded during close");
+        host.close(None).await?;Ok(())
     }.await;case.db.drop().await?;result
 }
