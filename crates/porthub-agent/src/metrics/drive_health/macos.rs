@@ -107,36 +107,46 @@ fn info(path: &Path) -> Result<Value, String> {
     }
     plist(&["info", "-plist", id])
 }
-pub(super) fn inventory() -> Vec<Device> {
-    let Ok(list) = plist(&["list", "-plist", "physical"]) else {
-        return Vec::new();
-    };
-    list["AllDisksAndPartitions"]
+pub(super) fn inventory() -> Result<Inventory, String> {
+    let list = plist(&["list", "-plist", "physical"])?;
+    let rows = list["AllDisksAndPartitions"]
         .as_array()
-        .into_iter()
-        .flatten()
-        .take(MAX_DRIVES)
-        .filter_map(|row| {
-            let path = Path::new("/dev").join(row["DeviceIdentifier"].as_str()?);
-            let data = info(&path).ok()?;
-            let name = data["MediaName"].as_str().unwrap_or("Physical drive");
-            let serial = data["SerialNumber"]
+        .ok_or("Physical inventory list unavailable")?;
+    let mut inventory = Inventory::default();
+    for row in rows.iter().take(MAX_DRIVES) {
+        let path = Path::new("/dev").join(
+            row["DeviceIdentifier"]
                 .as_str()
-                .or_else(|| data["DeviceTreePath"].as_str())
-                .unwrap_or("");
-            let capacity = data["IOKitSize"]
-                .as_u64()
-                .or_else(|| data["TotalSize"].as_u64())
-                .or_else(|| row["Size"].as_u64())?;
-            // Preserve the established hashed identity when richer OS details
-            // become available; correcting protocol must not reset history.
-            let mut device = Device::new(path, name, serial, "os_smart", capacity);
-            if super::macos_reading::has_nvme_details(&data) {
-                device.protocol = "nvme".into();
+                .ok_or("Physical inventory identity unavailable")?,
+        );
+        let data = match info(&path) {
+            Ok(data) => data,
+            Err(_) => {
+                inventory.uncertain.insert(path);
+                continue;
             }
-            Some(device)
-        })
-        .collect()
+        };
+        let name = data["MediaName"].as_str().unwrap_or("Physical drive");
+        let serial = data["SerialNumber"]
+            .as_str()
+            .or_else(|| data["DeviceTreePath"].as_str())
+            .unwrap_or("");
+        let Some(capacity) = data["IOKitSize"]
+            .as_u64()
+            .or_else(|| data["TotalSize"].as_u64())
+            .or_else(|| row["Size"].as_u64())
+            .filter(|n| *n > 0)
+        else {
+            inventory.uncertain.insert(path);
+            continue;
+        };
+        let mut device = Device::new(path, name, serial, "os_smart", capacity);
+        if super::macos_reading::has_nvme_details(&data) {
+            device.protocol = "nvme".into();
+        }
+        inventory.devices.push(device);
+    }
+    Ok(inventory)
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
     let data = info(&device.path)?;

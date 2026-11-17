@@ -224,12 +224,15 @@ fn virtual_disk_bus(path: &Path) -> bool {
             })
     })
 }
-pub(super) fn inventory() -> Vec<Device> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/block") else {
-        return Vec::new();
-    };
+pub(super) fn inventory() -> Result<Inventory, String> {
+    inventory_at(Path::new("/sys/class/block"))
+}
+fn inventory_at(root: &Path) -> Result<Inventory, String> {
+    let entries = std::fs::read_dir(root).map_err(|_| "Physical inventory unavailable")?;
     let mut devices = Vec::new();
-    for entry in entries.flatten() {
+    let mut uncertain = HashSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "Incomplete physical inventory")?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         if path.join("partition").exists()
@@ -247,6 +250,7 @@ pub(super) fn inventory() -> Vec<Device> {
             .unwrap_or_default()
             .saturating_mul(512);
         if capacity == 0 {
+            uncertain.insert(Path::new("/dev").join(&name));
             continue;
         }
         let base = path.join("device");
@@ -299,7 +303,7 @@ pub(super) fn inventory() -> Vec<Device> {
         devices.push(device);
     }
     devices.sort_by(|a, b| a.path.cmp(&b.path));
-    devices
+    Ok(Inventory { devices, uncertain })
 }
 #[repr(C)]
 #[derive(Default)]
@@ -609,5 +613,20 @@ mod held_native_object_tests {
         std::os::unix::fs::symlink(root.join("removed"), &node).unwrap();
         assert!(!held_node_matches(&held, &node).unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod inventory_failure_tests {
+    use super::*;
+    #[test]
+    fn inaccessible_inventory_is_not_confirmed_empty() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(inventory_at(&root.path().join("missing")).is_err());
+        assert!(inventory_at(root.path()).unwrap().devices.is_empty());
+        std::fs::create_dir_all(root.path().join("sda/device")).unwrap();
+        let partial = inventory_at(root.path()).unwrap();
+        assert!(partial.devices.is_empty());
+        assert!(partial.uncertain.contains(Path::new("/dev/sda")));
     }
 }

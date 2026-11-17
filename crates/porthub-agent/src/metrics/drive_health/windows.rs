@@ -115,15 +115,25 @@ fn string(data: &[u8], offset: usize) -> String {
         120,
     )
 }
-pub(super) fn inventory() -> Vec<Device> {
+pub(super) fn inventory() -> Result<Inventory, String> {
     let mut devices = Vec::new();
+    let mut uncertain = HashSet::new();
     for index in 0..128 {
         let path = PathBuf::from(format!("\\\\.\\PhysicalDrive{index}"));
-        let Ok(file) = open(&path, false) else {
-            continue;
+        let file = match OpenOptions::new().read(true).share_mode(3).open(&path) {
+            Ok(file) => file,
+            Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => continue,
+            Err(_) => {
+                uncertain.insert(path);
+                continue;
+            }
         };
-        let Ok(mut device) = identify(path, &file) else {
-            continue;
+        let mut device = match identify(path.clone(), &file) {
+            Ok(device) => device,
+            Err(_) => {
+                uncertain.insert(path);
+                continue;
+            }
         };
         let mut performance = [0u8; 88];
         if io(&file, 0x00070020, &[], &mut performance).is_ok() {
@@ -143,7 +153,7 @@ pub(super) fn inventory() -> Vec<Device> {
             break;
         }
     }
-    devices
+    Ok(Inventory { devices, uncertain })
 }
 fn nvme_log(file: &File, page: u32) -> Result<[u8; 512], String> {
     let mut request = vec![0u8; 8 + 40 + 512];

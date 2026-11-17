@@ -29,8 +29,8 @@ use windows as platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod platform {
     use super::*;
-    pub(super) fn inventory() -> Vec<Device> {
-        Vec::new()
+    pub(super) fn inventory() -> Result<Inventory, String> {
+        Err("Native inventory unavailable".into())
     }
     pub(super) fn probe(_: &Device) -> Result<Reading, String> {
         Err("Native SMART access is unavailable on this platform".into())
@@ -342,15 +342,31 @@ fn scheduled_short_test(
         || platform::short_test(device, reading, &allowed),
     )
 }
+#[derive(Default)]
+struct Inventory {
+    devices: Vec<Device>,
+    // Native paths were enumerated, but their identity/access is unavailable.
+    // They cannot authorize a new identity or removal of a previously known one.
+    uncertain: HashSet<PathBuf>,
+}
+async fn inventory_worker(
+    worker: tokio::task::JoinHandle<Result<Inventory, String>>,
+) -> Result<Inventory, String> {
+    worker
+        .await
+        .unwrap_or_else(|_| Err("Native inventory worker failed".into()))
+}
 struct Entry {
     device: Device,
     snapshot: DriveHealth,
     due: Instant,
     last_counter: Option<u64>,
+    inventory_confirmed: bool,
 }
 pub(super) struct Collector {
     entries: BTreeMap<String, Entry>,
     inventory_due: Instant,
+    inventory_available: bool,
     schedule: Schedule,
     schedule_valid: bool,
     schedule_path: PathBuf,
@@ -367,6 +383,7 @@ impl Collector {
         Self {
             entries: BTreeMap::new(),
             inventory_due: Instant::now(),
+            inventory_available: false,
             schedule,
             schedule_valid,
             schedule_path,
@@ -381,16 +398,28 @@ impl Collector {
         let instant = Instant::now();
         let at = now();
         if instant >= self.inventory_due {
-            let devices = tokio::task::spawn_blocking(platform::inventory)
-                .await
-                .unwrap_or_default();
-            self.reconcile(devices, at, instant);
+            let devices = inventory_worker(tokio::task::spawn_blocking(platform::inventory)).await;
+            let available = self.inventory_result(devices, at, instant);
+            if !available {
+                self.inventory_due = instant + INVENTORY_INTERVAL;
+                return self
+                    .entries
+                    .values()
+                    .take(MAX_DRIVES)
+                    .map(|e| e.snapshot.clone())
+                    .collect();
+            }
             self.inventory_due = instant + INVENTORY_INTERVAL;
         }
         let due = self
             .entries
             .iter()
-            .find(|(_, e)| e.snapshot.present && e.due <= instant)
+            .find(|(_, e)| {
+                self.inventory_available
+                    && e.inventory_confirmed
+                    && e.snapshot.present
+                    && e.due <= instant
+            })
             .map(|(id, _)| id.clone());
         if let Some(id) = due {
             if let Some(entry) = self.entries.get_mut(&id) {
@@ -505,14 +534,70 @@ impl Collector {
             .map(|e| e.snapshot.clone())
             .collect()
     }
+    // Enumeration failure is not evidence of physical removal. Invalidate health
+    // until a successful inventory re-establishes membership; never start tests.
+    fn inventory_result(
+        &mut self,
+        result: Result<Inventory, String>,
+        at: i64,
+        instant: Instant,
+    ) -> bool {
+        self.inventory_available = result.is_ok();
+        match result {
+            Ok(inventory) => {
+                self.reconcile_inventory(inventory.devices, &inventory.uncertain, at, instant);
+                true
+            }
+            Err(_) => {
+                for entry in self.entries.values_mut().filter(|e| e.snapshot.present) {
+                    entry.inventory_confirmed = false;
+                    entry.snapshot = entry.device.empty(at);
+                    entry.snapshot.reasons.push(
+                        "Physical drive inventory unavailable; membership not confirmed".into(),
+                    );
+                    entry.due = instant;
+                }
+                false
+            }
+        }
+    }
     fn reconcile(&mut self, devices: Vec<Device>, at: i64, instant: Instant) {
+        self.reconcile_inventory(devices, &HashSet::new(), at, instant);
+    }
+    fn reconcile_inventory(
+        &mut self,
+        devices: Vec<Device>,
+        uncertain: &HashSet<PathBuf>,
+        at: i64,
+        instant: Instant,
+    ) {
         let mut present = HashSet::new();
-        for device in devices.into_iter().take(MAX_DRIVES) {
+        // Reserve existing uncertain memberships independently of admission order.
+        // Never feed their cached identity through the confirmed-device path.
+        for (id, entry) in self
+            .entries
+            .iter_mut()
+            .filter(|(_, e)| e.snapshot.present && uncertain.contains(&e.device.path))
+        {
+            present.insert(id.clone());
+            entry.snapshot = entry.device.empty(at);
+            entry.snapshot.reasons.push(
+                "Physical drive identity or access unavailable; membership not confirmed".into(),
+            );
+            entry.inventory_confirmed = false;
+        }
+        let available = MAX_DRIVES.saturating_sub(present.len());
+        for device in devices
+            .into_iter()
+            .filter(|d| !uncertain.contains(&d.path))
+            .take(available)
+        {
             present.insert(device.id.clone());
             if let Some(entry) = self.entries.get_mut(&device.id) {
                 // Compare BEFORE replacing the cached witness. Stable hardware IDs
                 // do not authorize reusing old health after a move/replug/resize.
-                let changed = !entry.device.same_observation(&device);
+                let changed = !entry.device.same_observation(&device) || !entry.inventory_confirmed;
+                entry.inventory_confirmed = true;
                 entry.last_counter = if changed {
                     None
                 } else {
@@ -533,6 +618,7 @@ impl Collector {
                         device,
                         due: instant,
                         last_counter: None,
+                        inventory_confirmed: true,
                     },
                 );
             }
@@ -944,11 +1030,173 @@ mod tests {
     fn large_nvme_counters_stay_bson_safe() {
         assert_eq!(counter(&[255; 16]), i64::MAX as u64);
     }
+    #[test]
+    fn inventory_failure_retains_unknown_membership_then_recovers_and_removes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(&root.path().join("profile.json"));
+        let instant = Instant::now();
+        let disk = device("inventory-serial");
+        let id = disk.id.clone();
+        assert!(collector.inventory_result(
+            Ok(Inventory {
+                devices: vec![disk.clone()],
+                ..Default::default()
+            }),
+            100,
+            instant
+        ));
+        collector.entries.get_mut(&id).unwrap().snapshot.status = DriveStatus::Healthy;
+        assert!(!collector.inventory_result(Err("enumeration failed".into()), 200, instant));
+        assert!(!collector.inventory_available);
+        let snapshot = &collector.entries[&id].snapshot;
+        assert!(snapshot.present);
+        assert_eq!(snapshot.status, DriveStatus::Unavailable);
+        assert_eq!(snapshot.checked_at, None);
+        assert!(snapshot
+            .reasons
+            .iter()
+            .any(|r| r.contains("membership not confirmed")));
+        assert!(collector.inventory_result(
+            Ok(Inventory {
+                devices: vec![disk],
+                ..Default::default()
+            }),
+            300,
+            instant
+        ));
+        assert!(collector.inventory_available);
+        assert!(collector.entries[&id].snapshot.present);
+        assert_eq!(collector.entries[&id].due, instant);
+        assert!(collector.inventory_result(Ok(Inventory::default()), 400, instant));
+        assert_eq!(collector.entries[&id].snapshot.status, DriveStatus::Removed);
+        assert!(!collector.entries[&id].snapshot.present);
+    }
+    #[test]
+    fn uncertain_membership_is_reserved_at_inventory_capacity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(&root.path().join("profile.json"));
+        let instant = Instant::now();
+        let old = device("uncertain-capacity");
+        let id = old.id.clone();
+        collector.reconcile(vec![old.clone()], 100, instant);
+        let previous_counter = collector.entries[&id].last_counter;
+        let confirmed = (0..MAX_DRIVES)
+            .map(|i| {
+                let mut d = device(&format!("confirmed-{i}"));
+                d.path = PathBuf::from(format!("/native/{i}"));
+                d
+            })
+            .collect();
+        collector.inventory_result(
+            Ok(Inventory {
+                devices: confirmed,
+                uncertain: HashSet::from([old.path]),
+            }),
+            200,
+            instant,
+        );
+        assert_eq!(collector.entries.len(), MAX_DRIVES);
+        let retained = &collector.entries[&id];
+        assert!(retained.snapshot.present);
+        assert_eq!(retained.snapshot.status, DriveStatus::Unavailable);
+        assert!(!retained.inventory_confirmed);
+        assert_eq!(retained.last_counter, previous_counter);
+        assert_eq!(
+            collector
+                .entries
+                .values()
+                .filter(|e| e.inventory_confirmed)
+                .count(),
+            MAX_DRIVES - 1
+        );
+    }
+    #[tokio::test]
+    async fn inventory_worker_panic_does_not_confirm_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(&root.path().join("profile.json"));
+        let instant = Instant::now();
+        let disk = device("panic-retained");
+        let id = disk.id.clone();
+        collector.reconcile(vec![disk], 100, instant);
+        let result = inventory_worker(tokio::task::spawn_blocking(|| {
+            panic!("fixture inventory panic")
+        }))
+        .await;
+        assert!(result.is_err());
+        assert!(!collector.inventory_result(result, 200, instant));
+        assert!(collector.entries[&id].snapshot.present);
+        assert_eq!(
+            collector.entries[&id].snapshot.status,
+            DriveStatus::Unavailable
+        );
+    }
+    #[test]
+    fn one_unidentified_drive_does_not_hide_or_block_other_drives() {
+        let root = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(&root.path().join("profile.json"));
+        let instant = Instant::now();
+        let first = device("first");
+        let mut second = device("second");
+        second.path = PathBuf::from("/native/other");
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        collector.reconcile(vec![first.clone(), second.clone()], 100, instant);
+        collector
+            .entries
+            .get_mut(&second_id)
+            .unwrap()
+            .snapshot
+            .status = DriveStatus::Healthy;
+        collector.inventory_result(
+            Ok(Inventory {
+                devices: vec![second.clone()],
+                uncertain: HashSet::from([first.path.clone()]),
+            }),
+            200,
+            instant,
+        );
+        assert!(collector.entries[&first_id].snapshot.present);
+        assert_eq!(
+            collector.entries[&first_id].snapshot.status,
+            DriveStatus::Unavailable
+        );
+        assert!(!collector.entries[&first_id].inventory_confirmed);
+        assert!(collector.entries[&second_id].inventory_confirmed);
+        assert_eq!(
+            collector.entries[&second_id].snapshot.status,
+            DriveStatus::Healthy
+        );
+        collector.inventory_result(
+            Ok(Inventory {
+                devices: vec![first, second],
+                ..Default::default()
+            }),
+            300,
+            instant,
+        );
+        assert!(collector.entries[&first_id].inventory_confirmed);
+        assert_eq!(collector.entries[&first_id].due, instant);
+        let old_path = collector.entries[&first_id].device.path.clone();
+        collector.inventory_result(Ok(Inventory::default()), 400, instant);
+        collector.inventory_result(
+            Ok(Inventory {
+                uncertain: HashSet::from([old_path]),
+                ..Default::default()
+            }),
+            500,
+            instant,
+        );
+        assert!(!collector.entries[&first_id].snapshot.present);
+        assert_eq!(
+            collector.entries[&first_id].snapshot.status,
+            DriveStatus::Removed
+        );
+    }
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires native root device access; reads only, never starts a self-test"]
     fn native_readonly_physical_drives() {
-        for drive in platform::inventory() {
+        for drive in platform::inventory().expect("native inventory").devices {
             if drive.in_use || drive.path == Path::new("/dev/sdb") {
                 continue;
             }
@@ -984,7 +1232,7 @@ mod readonly_hardware_diagnostics {
             Ok("1"),
             "Explicit read-only probe opt-in required"
         );
-        for device in platform::inventory() {
+        for device in platform::inventory().expect("native inventory").devices {
             let at = now();
             let snapshot = if device.in_use {
                 let mut value = device.empty(at);
