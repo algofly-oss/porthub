@@ -144,29 +144,26 @@ assert.equal(hostConnections,1,'host input must survive pressure without a hidde
 await host.locator('.xterm-helper-textarea').focus();await host.keyboard.press('Control+d');await host.getByRole('button',{name:'Reconnect',exact:true}).waitFor();
 if(process.env.PORTHUB_TEST_NATIVE_CLI){
   await host.bringToFront();
-  await host.goto(`${origin}/home?view=dashboard&terminal_range=10m&terminal_scope=direct`);
-  const card=host.getByRole('region',{name:'Terminal traffic',exact:true});
-  const chart=card.getByRole('group',{name:/Terminal traffic chart/});
-  await chart.waitFor();
-  assert.equal(await card.getByLabel('Terminal traffic range',{exact:true}).inputValue(),'10m');
-  assert.equal(await card.getByRole('tab',{name:'Direct UDP',exact:true}).getAttribute('aria-selected'),'true');
-  await host.evaluate(()=>fetch('/__fixture/terminal-traffic/unavailable',{method:'POST'}));
-  await host.getByRole('button',{name:'Refresh dashboard',exact:true}).click();
-  await card.getByRole('alert').filter({hasText:'Showing the last successful snapshot'}).waitFor();
-  assert(await chart.isVisible(),'reporting errors must preserve the last successful graph');
-  await host.evaluate(()=>fetch('/__fixture/terminal-traffic/available',{method:'POST'}));
-  await host.getByRole('button',{name:'Refresh dashboard',exact:true}).click();
-  await card.getByRole('alert').waitFor({state:'hidden'});
-  if(process.env.REVIEW_BROWSER!=='webkit' && process.env.PORTHUB_TEST_TERMINAL_DIRECT==='1'){
-    await card.getByRole('button',{name:'Pause terminal measurements',exact:true}).click();
-    await card.getByText('Paused',{exact:true}).waitFor();
-    await host.waitForTimeout(250);
-    const requests=()=>host.evaluate(async()=> (await fetch('/__fixture/terminal-traffic/requests',{method:'POST',cache:'no-store'})).json());
-    const before=(await requests()).requests;assert(before>0,'fixture must observe actual graph requests');
-    await host.waitForTimeout(16000);
-    assert.equal((await requests()).requests,before,'paused terminal graphs must stop HTTP polling');
-  }
-  console.log('PASS real account dashboard: reported terminal intervals, URL controls, outage recovery and preserved snapshots');
+  // Terminal measurements stay available in the backend; the dashboard now
+  // shows private network traffic and must not poll the hidden terminal panel.
+  const {normalizeTerminalTraffic}=await import('../src/shared/utils/terminal-traffic.mjs');
+  const traffic=async()=>{const response=await owner.request.get(`${origin}/api/terminal/traffic?range=10m`);assert.equal(response.status(),200);return normalizeTerminalTraffic(await response.json());};
+  const beforeOutage=await traffic();
+  assert(beforeOutage.points.some(point=>point.host_reports===1&&point.pty_output>0),'actual native terminal output remains in owner history');
+  if(process.env.PORTHUB_TEST_TERMINAL_DIRECT==='1')assert(beforeOutage.points.some(point=>point.udp_sent>0&&point.udp_received>0),'actual direct bytes remain in terminal history');
+  assert.equal((await owner.request.post(`${origin}/__fixture/terminal-traffic/unavailable`)).status(),204);
+  assert.equal((await owner.request.get(`${origin}/api/terminal/traffic?range=10m`)).status(),503,'reporting outage remains observable');
+  assert.equal((await owner.request.post(`${origin}/__fixture/terminal-traffic/available`)).status(),204);
+  const recovered=await traffic();
+  assert(recovered.points.reduce((sum,point)=>sum+point.pty_output,0)>=beforeOutage.points.reduce((sum,point)=>sum+point.pty_output,0),'outage recovery preserves native terminal history');
+  const requests=async()=>{const response=await owner.request.post(`${origin}/__fixture/terminal-traffic/requests`);assert.equal(response.status(),200);return (await response.json()).requests;};
+  const beforeDashboard=await requests();assert(beforeDashboard>=3,'fixture observes the real owner history requests');
+  await host.goto(`${origin}/home?view=dashboard`);
+  await host.getByRole('region',{name:'Private network traffic',exact:true}).waitFor();
+  assert.equal(await host.getByRole('region',{name:'Terminal traffic',exact:true}).count(),0,'terminal history is hidden from the dashboard');
+  if(process.env.REVIEW_BROWSER!=='webkit' && process.env.PORTHUB_TEST_TERMINAL_DIRECT==='1')await host.waitForTimeout(16000);
+  assert.equal(await requests(),beforeDashboard,'hidden terminal measurements never poll from the dashboard');
+  console.log('PASS retained terminal owner API: native history, outage recovery, hidden dashboard panel and no background polling');
 }
 assert.deepEqual(errors,[]);console.log('PASS live browser/API/bundled tmux: anonymous browser and ordinary SSH guests, owner administration, shared shell state and SSH-disconnect persistence, safe browser and read-only SSH scrollback, concurrent recovery/history/output pressure, tab recovery despite revoked invitations, durable removal and explicit Ctrl+D teardown');
 await owner.close();await guest.close();
