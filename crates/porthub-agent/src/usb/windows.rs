@@ -692,7 +692,8 @@ impl ExportAncestry {
                 *(bytes.cast::<u32>())=if cfg!(target_pointer_width="64"){8}else{6};
                 let mut info:SP_DEVINFO_DATA=std::mem::zeroed();info.cbSize=std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
                 ensure!(SetupDiGetDeviceInterfaceDetailW(list.0,&data,bytes.cast(),required,std::ptr::null_mut(),&mut info)!=0,"Cannot identify USB receive controller");
-                ensure!(!controllers.contains(&info.DevInst),"Ambiguous USB receive controller");controllers.push(info.DevInst);
+                let node=info.DevInst;
+                ensure!(!controllers.contains(&node),"Ambiguous USB receive controller");controllers.push(node);
             }
             anyhow::bail!("USB receive controller inventory exceeds bound")
         }
