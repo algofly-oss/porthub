@@ -1,5 +1,5 @@
 //! Account-scoped private carrier history. Observations are immutable, sequenced
-//! deltas; each directed pair/bucket prefers sender evidence over receiver-only.
+//! deltas; only sender TX contributes to totals, history and rates.
 use crate::{
     error::{ApiError, ApiResult},
     store, App,
@@ -116,7 +116,7 @@ pub(crate) async fn ingest(
 }
 /// One atomic canonical pair/day update. Raw sparse minute evidence remains
 /// bounded by1440 cells. Late sender evidence corrects materialized hour/day
-/// totals by NEW canonical minus OLD canonical, including a negative correction.
+/// totals by NEW sender TX minus OLD sender TX. Receiver evidence stays separate.
 fn pipeline(row: &Row, now: DateTime, sender: bool, cursor: &str) -> Vec<Document> {
     let zero = doc! {"t":row.at,"sd":0_i64,"sr":0_i64,"rd":0_i64,"rr":0_i64,"s":false,"ds":0_i64,"dr":0_i64,"os":0_i64,"or":0_i64,"exists":false};
     let values = row.values();
@@ -148,12 +148,12 @@ fn pipeline(row: &Row, now: DateTime, sender: bool, cursor: &str) -> Vec<Documen
         "or",
         doc! {"$max":["$__old.or",if sender{0}else{row.observed_at}]},
     );
-    let canonical = |prefix: &str, direct: bool| doc! {"$cond":[format!("${prefix}.s"),format!("${prefix}.{}",if direct{"sd"}else{"sr"}),format!("${prefix}.{}",if direct{"rd"}else{"rr"})]};
+    let canonical = |prefix: &str, direct: bool| doc! {"$cond":[format!("${prefix}.s"),format!("${prefix}.{}",if direct{"sd"}else{"sr"}),0_i64]};
     let mut updates = doc! {"received_at":now,"cursors":{"$mergeObjects":["$cursors",{cursor:row.sequence as i64}]},"minutes":{"$cond":["$__old.exists",{"$map":{"input":{"$ifNull":["$minutes",[]]},"as":"m","in":{"$cond":[{"$eq":["$$m.t",row.at]},"$__new","$$m"]}}},{"$concatArrays":[{"$ifNull":["$minutes",[]]},["$__new"]]}]}};
     for (array, seconds) in [("hours", 3600_i64), ("days", 86400_i64)] {
         let at = row.at.div_euclid(seconds * 1000) * seconds * 1000;
-        let mut fresh = doc! {"at":at,"direct_bytes":"$__direct_delta","relay_bytes":"$__relay_delta","fallback_count":"$__fallback_delta","received_direct":if sender{0}else{direct},"received_relay":if sender{0}else{relay},"observed_at":{"$cond":["$__new.s","$__new.os","$__new.or"]}};
-        let mut changed = doc! {"at":"$$m.at","direct_bytes":{"$add":["$$m.direct_bytes","$__direct_delta"]},"relay_bytes":{"$add":["$$m.relay_bytes","$__relay_delta"]},"fallback_count":{"$add":["$$m.fallback_count","$__fallback_delta"]},"received_direct":{"$add":["$$m.received_direct",if sender{0}else{direct}]},"received_relay":{"$add":["$$m.received_relay",if sender{0}else{relay}]},"observed_at":{"$max":["$$m.observed_at",{"$cond":["$__new.s","$__new.os","$__new.or"]}]}};
+        let mut fresh = doc! {"at":at,"direct_bytes":"$__direct_delta","relay_bytes":"$__relay_delta","fallback_count":"$__fallback_delta","sender_count":"$__sender_delta","received_direct":if sender{0}else{direct},"received_relay":if sender{0}else{relay},"observed_at":{"$cond":["$__new.s","$__new.os","$__new.or"]}};
+        let mut changed = doc! {"at":"$$m.at","direct_bytes":{"$add":["$$m.direct_bytes","$__direct_delta"]},"relay_bytes":{"$add":["$$m.relay_bytes","$__relay_delta"]},"fallback_count":{"$add":["$$m.fallback_count","$__fallback_delta"]},"sender_count":{"$add":["$$m.sender_count","$__sender_delta"]},"received_direct":{"$add":["$$m.received_direct",if sender{0}else{direct}]},"received_relay":{"$add":["$$m.received_relay",if sender{0}else{relay}]},"observed_at":{"$max":["$$m.observed_at",{"$cond":["$__new.s","$__new.os","$__new.or"]}]}};
         // Explicit nonnegative canonical values; any impossible overflow/error
         // aborts the atomic update rather than publishing inaccurate counters.
         fresh.insert("duration_seconds", 0_i64);
@@ -168,7 +168,7 @@ fn pipeline(row: &Row, now: DateTime, sender: bool, cursor: &str) -> Vec<Documen
     }
     for (array, seconds) in [("hours", 3600_i64), ("days", 86400_i64)] {
         let at = row.at.div_euclid(seconds * 1000) * seconds * 1000;
-        let old = doc! {"$ifNull":[{"$arrayElemAt":[{"$filter":{"input":{"$ifNull":[format!("${array}"),[]]},"as":"h","cond":{"$eq":["$$h.at",at]}}},0]},{"direct_bytes":0,"relay_bytes":0}]};
+        let old = doc! {"$ifNull":[{"$arrayElemAt":[{"$filter":{"input":{"$ifNull":[format!("${array}"),[]]},"as":"h","cond":{"$eq":["$$h.at",at]}}},0]},{"direct_bytes":0,"relay_bytes":0,"received_direct":0,"received_relay":0}]};
         for (field, delta) in [
             ("direct_bytes", "$__direct_delta"),
             ("relay_bytes", "$__relay_delta"),
@@ -177,15 +177,21 @@ fn pipeline(row: &Row, now: DateTime, sender: bool, cursor: &str) -> Vec<Documen
             bounds.push(doc! {"$gte":[value.clone(),0]}.into());
             bounds.push(doc! {"$lte":[value,max]}.into());
         }
+        for (field, value) in [
+            ("received_direct", if sender { 0 } else { direct }),
+            ("received_relay", if sender { 0 } else { relay }),
+        ] {
+            bounds.push(doc!{"$let":{"vars":{"h":old.clone()},"in":{"$lte":[{"$add":[format!("$$h.{field}"),value]},max]}}}.into());
+        }
         bounds.push(doc!{"$let":{"vars":{"h":old},"in":{"$lte":[{"$add":["$$h.direct_bytes","$$h.relay_bytes","$__direct_delta","$__relay_delta"]},max]}}}.into());
     }
     vec![
         doc! {"$set":{"__old":{"$ifNull":[{"$arrayElemAt":[{"$filter":{"input":{"$ifNull":["$minutes",[]]},"as":"m","cond":{"$eq":["$$m.t",row.at]}}},0]},zero]},"__cursor":{"$getField":{"field":{"$literal":cursor},"input":{"$ifNull":["$cursors",{}]}}}}},
         doc! {"$set":{"__new":new,"__accept":{"$and":[{"$gt":[row.sequence as i64,{"$ifNull":["$__cursor",0]}]},{"$or":[{"$ne":[{"$type":"$__cursor"},"missing"]},{"$lt":[{"$size":{"$objectToArray":{"$ifNull":["$cursors",{}]}}},128]}]}]}}},
-        doc! {"$set":{"__direct_delta":{"$subtract":[canonical("__new",true),canonical("__old",true)]},"__relay_delta":{"$subtract":[canonical("__new",false),canonical("__old",false)]},"__fallback_delta":{"$subtract":[{"$cond":["$__new.s",0,1]},{"$cond":[{"$and":["$__old.exists",{"$not":["$__old.s"]}]},1,0]}]}}},
+        doc! {"$set":{"__direct_delta":{"$subtract":[canonical("__new",true),canonical("__old",true)]},"__relay_delta":{"$subtract":[canonical("__new",false),canonical("__old",false)]},"__fallback_delta":{"$subtract":[{"$cond":[{"$and":[{"$not":["$__new.s"]},{"$gt":[{"$add":["$__new.rd","$__new.rr"]},0]}]},1,0]},{"$cond":[{"$and":["$__old.exists",{"$not":["$__old.s"]},{"$gt":[{"$add":["$__old.rd","$__old.rr"]},0]}]},1,0]}]},"__sender_delta":{"$subtract":[{"$cond":["$__new.s",1,0]},{"$cond":["$__old.s",1,0]}]}}},
         doc! {"$set":{"__accept":{"$and":["$__accept",{"$and":bounds}]}}},
         doc! {"$replaceWith":{"$cond":["$__accept",{"$mergeObjects":["$$ROOT",updates]},"$$ROOT"]}},
-        doc! {"$unset":["__old","__new","__cursor","__accept","__direct_delta","__relay_delta","__fallback_delta"]},
+        doc! {"$unset":["__old","__new","__cursor","__accept","__direct_delta","__relay_delta","__fallback_delta","__sender_delta"]},
     ]
 }
 
@@ -219,7 +225,11 @@ fn range(value: &str) -> Option<(&'static str, i64, i64)> {
 }
 
 fn number(row: &Document, key: &str) -> u64 {
-    row.get_i64(key).ok().filter(|v| *v >= 0).unwrap_or(0) as u64
+    match row.get(key) {
+        Some(Bson::Int64(v)) if *v >= 0 => *v as u64,
+        Some(Bson::Int32(v)) if *v >= 0 => *v as u64,
+        _ => 0,
+    }
 }
 
 fn history_pipeline(
@@ -242,7 +252,7 @@ fn history_pipeline(
             ],
         );
     }
-    let minute_rows = doc! {"$map":{"input":{"$ifNull":["$minutes",[]]},"as":"m","in":{"at":"$$m.t","direct_bytes":{"$cond":["$$m.s","$$m.sd","$$m.rd"]},"relay_bytes":{"$cond":["$$m.s","$$m.sr","$$m.rr"]},"received_direct":"$$m.rd","received_relay":"$$m.rr","fallback_count":{"$cond":["$$m.s",0,1]},"duration_seconds":{"$cond":["$$m.s","$$m.ds","$$m.dr"]},"observed_at":{"$cond":["$$m.s","$$m.os","$$m.or"]}}}};
+    let minute_rows = doc! {"$map":{"input":{"$ifNull":["$minutes",[]]},"as":"m","in":{"at":"$$m.t","direct_bytes":{"$cond":["$$m.s","$$m.sd",0]},"relay_bytes":{"$cond":["$$m.s","$$m.sr",0]},"received_direct":"$$m.rd","received_relay":"$$m.rr","fallback_count":{"$cond":[{"$and":[{"$not":["$$m.s"]},{"$gt":[{"$add":["$$m.rd","$$m.rr"]},0]}]},1,0]},"sender_count":{"$cond":["$$m.s",1,0]},"duration_seconds":{"$cond":["$$m.s","$$m.ds",0]},"observed_at":{"$cond":["$$m.s","$$m.os",0]}}}};
     let input: Bson = if array == "minutes" {
         minute_rows.into()
     } else {
@@ -252,9 +262,9 @@ fn history_pipeline(
         doc! {"$match":filter},
         doc! {"$project":{"source":1,"destination":1,"received_at":1,"rows":{"$filter":{"input":input,"as":"r","cond":{"$and":[{"$gte":["$$r.at",start]},{"$lt":["$$r.at",end]}]}}}}},
         doc! {"$unwind":"$rows"},
-        doc! {"$group":{"_id":{"source":"$source","destination":"$destination","at":{"$subtract":["$rows.at",{"$mod":["$rows.at",step*1000]}]}},"direct":{"$sum":"$rows.direct_bytes"},"relay":{"$sum":"$rows.relay_bytes"},"received_direct":{"$sum":"$rows.received_direct"},"received_relay":{"$sum":"$rows.received_relay"},"receiver_only":{"$max":{"$gt":["$rows.fallback_count",0]}},"duration":{"$sum":"$rows.duration_seconds"},"observed_at":{"$max":"$rows.observed_at"},"received_at":{"$max":"$received_at"}}},
+        doc! {"$group":{"_id":{"source":"$source","destination":"$destination","at":{"$subtract":["$rows.at",{"$mod":["$rows.at",step*1000]}]}},"direct":{"$sum":"$rows.direct_bytes"},"relay":{"$sum":"$rows.relay_bytes"},"received_direct":{"$sum":"$rows.received_direct"},"received_relay":{"$sum":"$rows.received_relay"},"receiver_only":{"$max":{"$gt":["$rows.fallback_count",0]}},"sender_count":{"$sum":"$rows.sender_count"},"duration":{"$sum":"$rows.duration_seconds"},"observed_at":{"$max":"$rows.observed_at"},"received_at":{"$max":"$received_at"}}},
         doc! {"$sort":{"_id.at":1}},
-        doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"direct":{"$sum":"$direct"},"relay":{"$sum":"$relay"},"receiver_only":{"$max":"$receiver_only"},"received_at":{"$max":"$received_at"},"points":{"$push":{"at":"$_id.at","direct_bytes":"$direct","relay_bytes":"$relay","received_direct":"$received_direct","received_relay":"$received_relay","receiver_only":"$receiver_only","duration_seconds":"$duration","observed_at":"$observed_at"}}}},
+        doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"direct":{"$sum":"$direct"},"relay":{"$sum":"$relay"},"receiver_only":{"$max":"$receiver_only"},"sender_count":{"$sum":"$sender_count"},"received_at":{"$max":"$received_at"},"points":{"$push":{"at":"$_id.at","direct_bytes":"$direct","relay_bytes":"$relay","received_direct":"$received_direct","received_relay":"$received_relay","receiver_only":"$receiver_only","duration_seconds":"$duration","observed_at":"$observed_at","sender_count":"$sender_count"}}}},
         doc! {"$limit":4097},
     ]
 }
@@ -271,16 +281,21 @@ fn paged_pipeline(
 ) -> Vec<Document> {
     let mut pipeline = history_pipeline(workspace, ids, array, start, end, step, machine_peers);
     pipeline.truncate(4); // one pass through the bounded canonical day cells
-    let summary = doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"direct":{"$sum":"$direct"},"relay":{"$sum":"$relay"},"receiver_only":{"$max":"$receiver_only"},"received_at":{"$max":"$received_at"}}};
+    let summary = doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"direct":{"$sum":"$direct"},"relay":{"$sum":"$relay"},"receiver_only":{"$max":"$receiver_only"},"sender_count":{"$sum":"$sender_count"},"received_at":{"$max":"$received_at"},"received_direct":{"$sum":"$received_direct"},"received_relay":{"$sum":"$received_relay"}}};
     let account = vec![
+        doc! {"$match":{"sender_count":{"$gt":0}}},
         doc! {"$group":{"_id":"$_id.at","direct":{"$sum":"$direct"},"relay":{"$sum":"$relay"},"received_direct":{"$sum":"$received_direct"},"received_relay":{"$sum":"$received_relay"}}},
+        // RX-only reports also contain a zero reverse-direction TX counter.
+        // That is not an actual sent transfer and must not create a fake chart.
+        doc! {"$match":{"$expr":{"$gt":[{"$add":["$direct","$relay"]},0]}}},
         doc! {"$sort":{"_id":1}},
     ];
     let selected = if let Some((source, destination)) = selected {
         vec![
             doc! {"$match":{"_id.source":source,"_id.destination":destination}},
             doc! {"$sort":{"_id.at":1}},
-            doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"points":{"$push":{"at":"$_id.at","direct_bytes":"$direct","relay_bytes":"$relay","coverage":{"$cond":["$receiver_only","receiver_only","sender_reported"]}}}}},
+            doc! {"$group":{"_id":{"source":"$_id.source","destination":"$_id.destination"},"rows":{"$push":{"at":"$_id.at","direct_bytes":"$direct","relay_bytes":"$relay","sender_count":"$sender_count","sender_coverage_complete":{"$not":["$receiver_only"]},"direct_received":"$received_direct","relay_received":"$received_relay"}}}},
+            doc! {"$project":{"points":{"$map":{"input":{"$filter":{"input":"$rows","as":"r","cond":{"$gt":["$$r.sender_count",0]}}},"as":"r","in":{"at":"$$r.at","direct_bytes":"$$r.direct_bytes","relay_bytes":"$$r.relay_bytes","coverage":"sender_reported","sender_coverage_complete":"$$r.sender_coverage_complete"}}},"receiver_points":{"$map":{"input":{"$filter":{"input":"$rows","as":"r","cond":{"$gt":[{"$add":["$$r.direct_received","$$r.relay_received"]},0]}}},"as":"r","in":{"at":"$$r.at","direct_received":"$$r.direct_received","relay_received":"$$r.relay_received"}}}}},
         ]
     } else {
         vec![doc! {"$match":{"_id":{"$exists":false}}}]
@@ -406,7 +421,7 @@ async fn series(
             let src = metadata.get(source)?;
             let dst = metadata.get(destination)?;
             let volume = number(d, "direct").saturating_add(number(d, "relay"));
-            (volume > 0
+            ((volume > 0 || number(d, "received_direct") > 0 || number(d, "received_relay") > 0)
                 && (search.is_empty()
                     || format!("{} {}", src.1, dst.1)
                         .to_lowercase()
@@ -448,6 +463,7 @@ async fn series(
             machine_peers,
         );
         pipeline.insert(1, doc! {"$match":{"$or":rate_pairs}});
+        pipeline.insert(5, doc! {"$match":{"sender_count":{"$gt":0}}});
         collection
             .aggregate(pipeline)
             .max_time(Duration::from_secs(2))
@@ -520,14 +536,23 @@ async fn series(
         };
         let direct = number(&doc, "direct");
         let relay = number(&doc, "relay");
-        if direct == 0 && relay == 0 {
+        let received_direct = number(&doc, "received_direct");
+        let received_relay = number(&doc, "received_relay");
+        if direct == 0 && relay == 0 && received_direct == 0 && received_relay == 0 {
             continue;
         }
         let rate = recent.get(&(source.to_owned(), destination.to_owned()));
-        flows.push(json!({"source_peer_id":source,"destination_peer_id":destination,"source_machine_id":src.0.to_hex(),"destination_machine_id":dst.0.to_hex(),"source_name":src.1,"destination_name":dst.1,"direct_bytes":direct,"relay_bytes":relay,"total_bytes":direct+relay,"bytes_per_second":(direct+relay)as f64/span as f64,"recent_bytes_per_second":rate.map(|v|v.0),"recent_interval_seconds":rate.map_or(60,|v|v.1),"rate_at":rate.map(|v|v.2),"rate_stale":rate.is_none(),"latest_report_at":doc.get_datetime("received_at").map_or(0,|d|d.timestamp_millis()),"coverage":if doc.get_bool("receiver_only")==Ok(true){"receiver_only"}else{"sender_reported"}}));
+        flows.push(json!({"source_peer_id":source,"destination_peer_id":destination,"source_machine_id":src.0.to_hex(),"destination_machine_id":dst.0.to_hex(),"source_name":src.1,"destination_name":dst.1,"direct_bytes":direct,"relay_bytes":relay,"total_bytes":direct+relay,"bytes_per_second":(direct+relay)as f64/span as f64,"recent_bytes_per_second":rate.map(|v|v.0),"recent_interval_seconds":rate.map_or(60,|v|v.1),"rate_at":rate.map(|v|v.2),"rate_stale":rate.is_none(),"latest_report_at":doc.get_datetime("received_at").map_or(0,|d|d.timestamp_millis()),"coverage":if (direct+relay==0 && doc.get_bool("receiver_only")==Ok(true)) || number(&doc,"sender_count")==0 {"missing_sender"}else{"sender_reported"},"sender_coverage_complete":doc.get_bool("receiver_only")!=Ok(true),"received_direct_bytes":received_direct,"received_relay_bytes":received_relay,"received_total_bytes":received_direct+received_relay}));
     }
     for flow in &flows {
-        for key in ["direct_bytes", "relay_bytes", "total_bytes"] {
+        for key in [
+            "direct_bytes",
+            "relay_bytes",
+            "total_bytes",
+            "received_direct_bytes",
+            "received_relay_bytes",
+            "received_total_bytes",
+        ] {
             if flow[key]
                 .as_u64()
                 .is_none_or(|v| v > porthub_mesh::traffic_report::MAX_COUNTER)
@@ -586,6 +611,12 @@ async fn series(
                 .and_then(Bson::as_document)
             {
                 selected_flow = flow.clone();
+                selected_flow["receiver_points"] = json!(selected
+                    .get_array("receiver_points")
+                    .into_iter()
+                    .flatten()
+                    .map(|r| store::json(r))
+                    .collect::<Vec<_>>());
                 selected_flow["points"] = json!(selected
                     .get_array("points")
                     .into_iter()
@@ -595,6 +626,10 @@ async fn series(
             }
         }
     }
+    let missing_sender_pairs = flows
+        .iter()
+        .filter(|f| f["sender_coverage_complete"] == false)
+        .count();
     let total_pairs = flows.len();
     let search = query.search.trim().to_lowercase();
     flows.retain(|f| {
@@ -635,16 +670,17 @@ async fn series(
                 .is_ok_and(|t| t.timestamp_millis() >= now.timestamp_millis() - 90_000)
         })
         .count();
-    let dropped: u64 = peers
+    let dropped_total: u128 = peers
         .iter()
-        .map(|p| number(p, "traffic_dropped_rows"))
+        .map(|p| number(p, "traffic_dropped_rows") as u128)
         .sum();
+    let dropped = dropped_total.min(porthub_mesh::traffic_report::MAX_COUNTER as u128) as u64;
     let rejected: u64 = peers
         .iter()
         .map(|p| number(p, "traffic_rejected_rows"))
         .sum();
     let points:Vec<_>=points.into_iter().map(|(at,v)|json!({"at":at,"direct_sent":v[0],"relay_sent":v[1],"direct_received":v[2],"relay_received":v[3]})).collect();
     Ok(Json(
-        json!({"range":query.range,"start":start,"end":end,"interval_seconds":step,"points":points,"flows":flows,"selected_flow":selected_flow,"totals":{"direct_bytes":total_direct,"relay_bytes":total_relay,"total_bytes":total,"bytes_per_second":total as f64/span as f64},"pagination":{"page":query.page,"page_size":40,"total_pairs":total_pairs,"filtered_pairs":filtered_pairs},"coverage":{"reporting_peers":reported,"eligible_peers":peers.len(),"unreported_peers":peers.len()-reported,"dropped_rows":dropped,"discarded_rows":rejected,"history_incomplete":dropped>0||rejected>0},"scope":"private_peer_carrier_payload","total_scope":"sender primary per directed pair and native bucket; receiver-only fallback never added twice","path_scope":"successfully queued authenticated carrier payload; includes native stream retransmission/envelopes, excludes discovery/signaling/probes; queue acceptance is not socket delivery","retention":"24h minute,7d hour,30d day; bounded pending journal drops oldest observations explicitly"}),
+        json!({"range":query.range,"start":start,"end":end,"interval_seconds":step,"points":points,"flows":flows,"selected_flow":selected_flow,"totals":{"direct_bytes":total_direct,"relay_bytes":total_relay,"total_bytes":total,"bytes_per_second":total as f64/span as f64},"pagination":{"page":query.page,"page_size":40,"total_pairs":total_pairs,"filtered_pairs":filtered_pairs},"coverage":{"reporting_peers":reported,"eligible_peers":peers.len(),"unreported_peers":peers.len()-reported,"dropped_rows":dropped,"dropped_rows_capped":dropped_total>porthub_mesh::traffic_report::MAX_COUNTER as u128,"discarded_rows":rejected,"missing_sender_pairs":missing_sender_pairs,"history_incomplete":dropped>0||rejected>0||missing_sender_pairs>0},"scope":"private_peer_carrier_payload","total_scope":"sender TX only; receiver observations are separate diagnostics and never substituted or added","path_scope":"successfully queued authenticated carrier payload; includes native stream retransmission/envelopes, excludes discovery/signaling/probes; queue acceptance is not socket delivery","retention":"24h minute,7d hour,30d day; bounded pending journal drops oldest observations explicitly"}),
     ))
 }

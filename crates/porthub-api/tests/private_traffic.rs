@@ -50,21 +50,21 @@ async fn private_pair_history_is_account_scoped_idempotent_and_canonical_before_
   ensure!(first["snapshot"].is_object() && first["traffic_ack"]==1,"{first}");
   case.status("POST","/api/access/private/sync","",body(&peers[0],source),StatusCode::OK).await?;
   // Same coarse display interval, DIFFERENT native minute: sender evidence in
-  // minute0 must not suppress receiver-only minute1. Duplicate retries add 0.
+  // minute0 remains authoritative; receiver-only minute1 is diagnostic only. Duplicate retries add0.
   let receiver=report(vec![row(&peers[0],1,at,0,150),row(&peers[0],2,at+60_000,0,300)]);
   case.status("POST","/api/access/private/sync","",body(&peers[1],receiver.clone()),StatusCode::OK).await?;
   case.status("POST","/api/access/private/sync","",body(&peers[1],receiver),StatusCode::OK).await?;
   for range in ["1h","24h","7d","30d"] {
    let page=case.status("GET",&format!("/api/private/traffic?range={range}"),&cookie,Value::Null,StatusCode::OK).await?;
    let flow=page["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[0]&&f["destination_peer_id"]==peers[1]).unwrap();
-   ensure!(flow["total_bytes"]==400,"{range}: {page}");
+   ensure!(flow["total_bytes"]==100,"{range}: {page}");
    ensure!(flow["source_name"]=="Private machine 0"&&flow["destination_name"]=="Private machine 1");
    ensure!(flow["recent_bytes_per_second"].is_null(),"delayed upload must not become a current rate");
    ensure!(!page.to_string().contains(&peers[2])&&!page.to_string().contains(TOKEN));
   }
 
-  // Receiver arrives first; the later smaller sender must subtract50 from
-  // minute/hour/day canonical totals, and replay must not subtract twice.
+  // Receiver arrives first but never enters authoritative totals. Later sender
+  // adds exactly100 to minute/hour/day totals, and replay cannot add twice.
   let late_at=at+120_000;
   let rx=report(vec![row(&peers[0],3,late_at,0,150)]);
   case.status("POST","/api/access/private/sync","",body(&peers[1],rx),StatusCode::OK).await?;
@@ -72,14 +72,14 @@ async fn private_pair_history_is_account_scoped_idempotent_and_canonical_before_
   for _ in 0..2 {case.status("POST","/api/access/private/sync","",body(&peers[0],late.clone()),StatusCode::OK).await?;}
   for range in ["1h","24h","7d","30d"] {
     let page=case.status("GET",&format!("/api/private/traffic?range={range}"),&cookie,Value::Null,StatusCode::OK).await?;
-    ensure!(page["flows"][0]["total_bytes"]==500,"late sender correction {range}: {page}");
+    ensure!(page["flows"][0]["total_bytes"]==200,"late sender correction {range}: {page}");
   }
   // Offline delivery from two days ago retains that day, not reconnect time.
   let old_at=now.div_euclid(86400_000)*86400_000-2*86400_000+3600_000;
   case.status("POST","/api/access/private/sync","",body(&peers[0],report(vec![row(&peers[1],3,old_at,70,0)])),StatusCode::OK).await?;
   for range in ["7d","30d"] {
     let page=case.status("GET",&format!("/api/private/traffic?range={range}"),&cookie,Value::Null,StatusCode::OK).await?;
-    ensure!(page["flows"][0]["total_bytes"]==570,"offline old day {range}: {page}");
+    ensure!(page["flows"][0]["total_bytes"]==270,"offline old day {range}: {page}");
   }
   // Force ONLY the reverse directional write to fail after forward committed.
   // Retry must finish reverse while leaving forward exactly once.
@@ -90,15 +90,15 @@ async fn private_pair_history_is_account_scoped_idempotent_and_canonical_before_
   case.db.run_command(doc!{"collMod":"private_traffic","validator":{}}).await?;
   let repaired=case.status("POST","/api/access/private/sync","",body(&peers[0],partial),StatusCode::OK).await?;ensure!(repaired["traffic_ack"]==1,"{repaired}");
   let page=case.status("GET","/api/private/traffic?range=24h",&cookie,Value::Null,StatusCode::OK).await?;
-  ensure!(page["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[0]).unwrap()["total_bytes"]==520,"{page}");
-  ensure!(page["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[1]).unwrap()["total_bytes"]==30,"{page}");
+  ensure!(page["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[0]).unwrap()["total_bytes"]==220,"{page}");
+  ensure!(page["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[1]).unwrap()["total_bytes"]==0,"{page}");
   // Saturating a valid persisted counter must reject/discard telemetry visibly,
   // never promote toDouble then turn into silent0 in the API projector.
   let mut overflow=report(vec![row(&peers[1],1,at+240_000,porthub_mesh::traffic_report::MAX_COUNTER,0)]);overflow["instance"]=json!("c".repeat(32));
   let rejected=case.status("POST","/api/access/private/sync","",body(&peers[0],overflow),StatusCode::OK).await?;
   ensure!(rejected["traffic_ack"]==1 && rejected["traffic_discarded_rows"]==1,"{rejected}");
   let stable=case.status("GET","/api/private/traffic?range=24h",&cookie,Value::Null,StatusCode::OK).await?;
-  ensure!(stable["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[0]).unwrap()["total_bytes"]==520,"overflow changed canonical bytes: {stable}");
+  ensure!(stable["flows"].as_array().unwrap().iter().find(|f|f["source_peer_id"]==peers[0]).unwrap()["total_bytes"]==220,"overflow changed canonical bytes: {stable}");
   //128 remembered instances are a hard bound. A NEW identity is discarded and
   // acknowledged without eviction/replay risk or poisoning the policy queue.
   let day=at.div_euclid(86400_000)*86400_000;
@@ -115,15 +115,15 @@ async fn private_pair_history_is_account_scoped_idempotent_and_canonical_before_
   let existing=case.status("POST","/api/access/private/sync","",body(&peers[0],report(vec![row(&peers[1],4,at+300_000,1,0)])),StatusCode::OK).await?;ensure!(existing["traffic_ack"]==4&&existing["traffic_discarded_rows"]==0,"{existing}");
 
   let full=case.status("GET","/api/private/traffic?range=24h",&cookie,Value::Null,StatusCode::OK).await?;
-  ensure!(full["totals"]["total_bytes"]==551 && full["pagination"]["total_pairs"]==2,"{full}");
+  ensure!(full["totals"]["total_bytes"]==221 && full["pagination"]["total_pairs"]==2,"{full}");
   ensure!(full["flows"].as_array().unwrap().iter().all(|f|f.get("points").is_none()),"pair pages must not carry every history");
   for suffix in ["&page=2","&search=NoMatchingMachine"] {
     let empty=case.status("GET",&format!("/api/private/traffic?range=24h{suffix}"),&cookie,Value::Null,StatusCode::OK).await?;
     ensure!(empty["flows"]==json!([]) && empty["totals"]==full["totals"] && empty["points"]==full["points"],"paging/search must not change account totals/history");
   }
   let selected=case.status("GET",&format!("/api/private/traffic?range=24h&source_peer_id={}&destination_peer_id={}",peers[0],peers[1]),&cookie,Value::Null,StatusCode::OK).await?;
-  ensure!(selected["selected_flow"]["total_bytes"]==521,"{selected}");
-  let sum:u64=selected["selected_flow"]["points"].as_array().unwrap().iter().map(|p|p["direct_bytes"].as_u64().unwrap()+p["relay_bytes"].as_u64().unwrap()).sum();ensure!(sum==521);
+  ensure!(selected["selected_flow"]["total_bytes"]==221,"{selected}");
+  let sum:u64=selected["selected_flow"]["points"].as_array().unwrap().iter().map(|p|p["direct_bytes"].as_u64().unwrap()+p["relay_bytes"].as_u64().unwrap()).sum();ensure!(sum==221);
   let hidden=case.status("GET",&format!("/api/private/traffic?source_peer_id={}&destination_peer_id={}",peers[0],peers[2]),&cookie,Value::Null,StatusCode::OK).await?;ensure!(hidden["selected_flow"].is_null());
 
   // A newer receiver observation cannot refresh the selected sender's older
@@ -142,6 +142,14 @@ async fn private_pair_history_is_account_scoped_idempotent_and_canonical_before_
   let discarded=case.status("POST","/api/access/private/sync","",body(&peers[0],forged),StatusCode::OK).await?;ensure!(discarded["traffic_ack"]==6&&discarded["snapshot"].is_object());
   let malformed=case.status("POST","/api/access/private/sync","",body(&peers[0],json!({"token":"must-not-be-echoed"})),StatusCode::OK).await?;ensure!(malformed["traffic_rejected"]==true&&malformed["snapshot"].is_object()&&!malformed.to_string().contains("must-not-be-echoed"));
   let filtered=case.status("GET",&format!("/api/private/traffic?range=24h&machine_id={}",machines[2]),&cookie,Value::Null,StatusCode::OK).await?;ensure!(filtered["flows"]==json!([]));
+
+  // A real sender observation with TX0 (and opposite-direction RX) is retained
+  // as observed zero in selected history, distinct from missing-sender gaps.
+  let zero_at=at+360_000;
+  case.status("POST","/api/access/private/sync","",body(&peers[0],report(vec![row(&peers[1],7,zero_at,0,1)])),StatusCode::OK).await?;
+  let zero=case.status("GET",&format!("/api/private/traffic?range=1h&source_peer_id={}&destination_peer_id={}",peers[0],peers[1]),&cookie,Value::Null,StatusCode::OK).await?;
+  let point=zero["selected_flow"]["points"].as_array().unwrap().iter().find(|p|p["at"]==zero_at).unwrap();
+  ensure!(point["direct_bytes"]==0&&point["relay_bytes"]==0&&point["coverage"]=="sender_reported"&&point["sender_coverage_complete"]==true,"explicit observed zero lost: {point}");
   case.app.collection("machines").update_one(doc!{"_id":machines[1]},doc!{"$set":{"user_id":foreign}}).await?;
   let removed=case.status("GET","/api/private/traffic?range=24h",&cookie,Value::Null,StatusCode::OK).await?;ensure!(removed["flows"]==json!([]),"current ownership removal must remove old peer measurements");
   Ok(())
@@ -192,6 +200,42 @@ async fn private_pair_pages_keep_full_totals_and_selected_history_with_real_rece
         println!("PRIVATE_TRAFFIC_API_MEASURE pairs=85 page_rows=40 first_response_bytes={} pages_and_ranges_elapsed_ms={}",first.to_string().len(),started.elapsed().as_millis());
         Ok(())
     }.await;
+    case.db.drop().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB"]
+async fn sender_history_excludes_clock_offset_receiver_observations_in_every_range() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result=async {
+  let(owner,cookie)=case.user("sender-only-owner@test.invalid","user").await?;
+  let machines=[ObjectId::new(),ObjectId::new()];let peers:Vec<_>=machines.iter().map(|m|format!("{owner}:{m}")).collect();
+  for(index,machine)in machines.iter().enumerate(){
+   case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"enabled":true,"name":format!("Offset node {index}")}).await?;
+   case.app.collection("private_peers").insert_one(doc!{"_id":&peers[index],"workspace_id":owner,"owner_id":owner,"machine_id":machine,"enabled":true,"credential_hash":token_digest(TOKEN),"ip":format!("10.203.0.{}",index+10)}).await?;
+  }
+  let now=DateTime::now().timestamp_millis();let at=now.div_euclid(60_000)*60_000-120_000;
+  let received=report(vec![row(&peers[0],1,at+60_000,0,100)]);
+  case.status("POST","/api/access/private/sync","",body(&peers[1],received.clone()),StatusCode::OK).await?;
+  for range in ["1h","24h","7d","30d"] {
+   let page=case.status("GET",&format!("/api/private/traffic?range={range}&source_peer_id={}&destination_peer_id={}",peers[0],peers[1]),&cookie,Value::Null,StatusCode::OK).await?;
+   let flow=&page["selected_flow"];ensure!(flow["coverage"]=="missing_sender"&&flow["total_bytes"]==0&&flow["received_total_bytes"]==100&&flow["recent_bytes_per_second"].is_null()&&flow["sender_coverage_complete"]==false,"receiver-only {range}: {page}");
+   ensure!(page["totals"]["total_bytes"]==0&&page["points"]==json!([])&&flow["points"]==json!([])&&page["coverage"]["missing_sender_pairs"]==1);
+  }
+  let sent=report(vec![row(&peers[1],1,at,100,0)]);
+  for _ in 0..2 {
+   case.status("POST","/api/access/private/sync","",body(&peers[0],sent.clone()),StatusCode::OK).await?;
+   case.status("POST","/api/access/private/sync","",body(&peers[1],received.clone()),StatusCode::OK).await?;
+  }
+  for range in ["1h","24h","7d","30d"] {
+   let page=case.status("GET",&format!("/api/private/traffic?range={range}&source_peer_id={}&destination_peer_id={}",peers[0],peers[1]),&cookie,Value::Null,StatusCode::OK).await?;
+   let flow=&page["selected_flow"];ensure!(page["totals"]["total_bytes"]==100&&flow["total_bytes"]==100&&flow["received_total_bytes"]==100&&flow["coverage"]=="sender_reported"&&flow["sender_coverage_complete"]==false,"cross-minute burst doublecounted {range}: {page}");
+   ensure!(flow["points"].as_array().unwrap().iter().map(|r|r["direct_bytes"].as_u64().unwrap()).sum::<u64>()==100);
+   ensure!(flow["receiver_points"].as_array().unwrap().iter().map(|r|r["direct_received"].as_u64().unwrap()).sum::<u64>()==100);
+  }
+  Ok(())
+ }.await;
     case.db.drop().await?;
     result
 }
