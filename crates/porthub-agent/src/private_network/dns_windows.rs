@@ -78,14 +78,18 @@ mod tests {
         Ok(())
     }
     fn candidate() -> Result<(UdpSocket, TcpListener)> {
-        let mut last = None;
-        for _ in 0..32 {
-            match bind(SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0)) {
-                Ok(pair) => return Ok(pair),
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(last.unwrap())
+        super::super::native_owner::fixture_retry_socket_setup(||bind(SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST,0)))
+    }
+    fn foreign_tcp_candidate()->Result<(Socket,std::net::TcpListener,SocketAddr)> {
+        super::super::native_owner::fixture_retry_socket_setup(||{
+            // Reserve both protocols before testing TCP-only occupancy. A port
+            // selected by TCP alone may belong to an excluded UDP range.
+            let udp=exclusive(Type::DGRAM,Protocol::UDP).context("fixture reserve exclusive UDP socket")?;
+            udp.bind(&SocketAddr::from((std::net::Ipv4Addr::LOCALHOST,0)).into()).context("fixture reserve exclusive UDP endpoint")?;
+            let endpoint=udp.local_addr().context("fixture read reserved UDP endpoint")?.as_socket().context("fixture reserved endpoint missing")?;
+            let tcp=std::net::TcpListener::bind(endpoint).context("fixture reserve foreign TCP endpoint alongside UDP")?;
+            Ok((udp,tcp,endpoint))
+        })
     }
     #[tokio::test]
     #[ignore = "native disposable Windows sockets only; no NRPT/device/configuration writes"]
@@ -107,8 +111,8 @@ mod tests {
     #[ignore = "native disposable Windows sockets only; no NRPT/device/configuration writes"]
     async fn native_foreign_udp_or_tcp_listener_prevents_dns_bind_without_takeover() -> Result<()> {
         permitted()?;
-        let foreign = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        let endpoint = foreign.local_addr()?;
+        let foreign = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("fixture bind foreign UDP endpoint")?;
+        let endpoint = foreign.local_addr().context("fixture read foreign UDP endpoint")?;
         let SocketAddr::V4(address) = endpoint else {
             unreachable!()
         };
@@ -118,8 +122,8 @@ mod tests {
             "foreign UDP listener changed"
         );
         drop(foreign);
-        let foreign = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        let endpoint = foreign.local_addr()?;
+        let (reserved_udp,foreign,endpoint)=foreign_tcp_candidate()?;
+        drop(reserved_udp); // From here only the foreign TCP listener remains.
         let SocketAddr::V4(address) = endpoint else {
             unreachable!()
         };
@@ -129,8 +133,8 @@ mod tests {
             "foreign TCP listener changed"
         );
         // A failed TCP half must not leak its just-created exclusive UDP half.
-        let udp = exclusive(Type::DGRAM, Protocol::UDP)?;
-        udp.bind(&endpoint.into())?;
+        let udp = exclusive(Type::DGRAM, Protocol::UDP).context("fixture create UDP leak-check socket")?;
+        udp.bind(&endpoint.into()).context("fixture verify failed TCP bind released exclusive UDP endpoint")?;
         Ok(())
     }
 }

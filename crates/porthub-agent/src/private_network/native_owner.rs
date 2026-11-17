@@ -436,3 +436,52 @@ mod fixture_failure_chain_tests {
         assert_eq!(value["causes"].as_array().unwrap().len(),8);assert_eq!(value["truncated"],true);
     }
 }
+
+#[cfg(test)]
+pub(super) fn fixture_retry_socket_setup<T>(mut setup: impl FnMut() -> Result<T>) -> Result<T> {
+    for attempt in 0..32 {
+        match setup() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let transient = error.chain()
+                    .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                    .is_some_and(|error| matches!(error.kind(),
+                        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied));
+                if !transient || attempt == 31 { return Err(error); }
+            }
+        }
+    }
+    unreachable!("bounded setup returns on final attempt")
+}
+
+#[cfg(test)]
+mod fixture_socket_setup_tests {
+    use anyhow::Result;
+    use super::fixture_retry_socket_setup as retry_setup;
+    #[test]
+    fn fixture_setup_retries_only_bounded_address_conflicts() {
+        for kind in [std::io::ErrorKind::AddrInUse, std::io::ErrorKind::PermissionDenied] {
+            let mut attempts = 0;
+            let result: Result<()> = retry_setup(|| {
+                attempts += 1;
+                Err(anyhow::Error::from(std::io::Error::from(kind)).context("fixed setup stage"))
+            });
+            assert!(result.is_err());
+            assert_eq!(attempts, 32);
+        }
+        let mut attempts = 0;
+        let result: Result<()> = retry_setup(|| {
+            attempts += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidInput).into())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        let mut attempts = 0;
+        assert_eq!(retry_setup(|| {
+            attempts += 1;
+            if attempts < 3 { Err(std::io::Error::from(std::io::ErrorKind::AddrInUse).into()) }
+            else { Ok(7) }
+        }).unwrap(), 7);
+        assert_eq!(attempts, 3);
+    }
+}
