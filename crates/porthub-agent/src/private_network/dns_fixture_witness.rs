@@ -13,6 +13,9 @@ pub(crate) struct Counts {
     pub noerror: u64,
     pub metadata: Vec<ReplyMetadata>,
     pub metadata_dropped: u64,
+    pub malformed_replies: u64,
+    pub mismatched_ids: u64,
+    pub mismatched_types: u64,
 }
 // At most eight exact-owned exchanges; no names, addresses, or packet bytes.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -46,6 +49,7 @@ pub(crate) struct Observer {
     counts: [AtomicU64; 8],
     metadata: std::sync::Mutex<Vec<ReplyMetadata>>,
     metadata_dropped: AtomicU64,
+    rejected: [AtomicU64; 3],
 }
 impl Observer {
     pub fn new(name: String, nonce: &str, expected: Ipv4Addr) -> Result<Self> {
@@ -64,6 +68,7 @@ impl Observer {
             counts: std::array::from_fn(|_| AtomicU64::new(0)),
             metadata: std::sync::Mutex::new(Vec::new()),
             metadata_dropped: AtomicU64::new(0),
+            rejected: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
     pub fn direct_port(&self, port: u16) {
@@ -113,11 +118,18 @@ impl Observer {
             return;
         }
         let Ok(answer) = Message::from_vec(reply) else {
+            self.rejected[0].fetch_add(1, Ordering::SeqCst);
             return;
         };
-        if answer.metadata.id != q.metadata.id
-            || answer.metadata.message_type != MessageType::Response
-        {
+        let wrong_id = answer.metadata.id != q.metadata.id;
+        let wrong_type = answer.metadata.message_type != MessageType::Response;
+        if wrong_id {
+            self.rejected[1].fetch_add(1, Ordering::SeqCst);
+        }
+        if wrong_type {
+            self.rejected[2].fetch_add(1, Ordering::SeqCst);
+        }
+        if wrong_id || wrong_type {
             return;
         }
         let order = self.counts[5].fetch_add(1, Ordering::SeqCst);
@@ -193,6 +205,9 @@ impl Observer {
             noerror: a[7],
             metadata: self.metadata.lock().unwrap().clone(),
             metadata_dropped: self.metadata_dropped.load(Ordering::SeqCst),
+            malformed_replies: self.rejected[0].load(Ordering::SeqCst),
+            mismatched_ids: self.rejected[1].load(Ordering::SeqCst),
+            mismatched_types: self.rejected[2].load(Ordering::SeqCst),
         }
     }
 }
@@ -323,5 +338,33 @@ fn metadata_retains_case_mismatch_and_bounds_exact_owned_rows() -> Result<()> {
         (row.query_id, row.response_id, row.peer_port),
         (7, 7, 12345)
     );
+    Ok(())
+}
+
+#[test]
+fn rejected_response_identity_remains_visible_without_accepted_counts() -> Result<()> {
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let name = format!("peer.s{nonce}.phub.");
+    let observer = Observer::new(name.clone(), nonce, "10.254.254.2".parse()?)?;
+    let mut q = Message::new(7, MessageType::Query, OpCode::Query);
+    q.add_query(hickory_proto::op::Query::query(
+        name.parse()?,
+        RecordType::A,
+    ));
+    let query = q.to_vec()?;
+    let peer = "127.0.0.1:12345".parse()?;
+    let mut a = q.clone();
+    a.metadata.message_type = MessageType::Response;
+    a.metadata.id = 8;
+    observer.reply(&query, &a.to_vec()?, peer);
+    observer.reply(&query, &query, peer);
+    observer.reply(&query, &[0], peer);
+    let c = observer.snapshot();
+    assert_eq!(
+        (c.mismatched_ids, c.mismatched_types, c.malformed_replies),
+        (1, 1, 1)
+    );
+    assert_eq!((c.replies, c.expected_a, c.noerror), (0, 0, 0));
+    assert!(c.metadata.is_empty());
     Ok(())
 }
