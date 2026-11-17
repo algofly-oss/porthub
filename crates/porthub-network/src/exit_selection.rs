@@ -96,6 +96,15 @@ impl<K: Eq + Hash> FlowTable<K> {
         }
     }
 
+    /// Inspect an existing assignment even when its router is temporarily
+    /// unavailable. This grants no packet authority and does not renew expiry.
+    /// A cold-flow picker must not change an established flow's NAT identity.
+    pub fn assigned_peer(&self,flow:&K,now:Instant,syn_sequence:Option<u32>)->Option<&str> {
+        let entry=self.flows.get(flow)?;
+        if entry.deadline<=now || syn_sequence.is_some_and(|sequence|entry.syn_sequence!=Some(sequence)||entry.close_until.is_some()){return None;}
+        Some(&entry.peer)
+    }
+
     pub fn select(&mut self, flow: K, now: Instant, ttl: Duration) -> Option<&str> {
         self.select_with_syn(flow, now, ttl, None)
     }
@@ -179,6 +188,23 @@ mod tests {
     use super::*;
     fn peers() -> Vec<String> {
         vec!["luna".into(), "condor".into()]
+    }
+
+    #[test]
+    fn unavailable_assignment_is_not_a_cold_flow_and_inspection_never_renews_it() {
+        let mut table=FlowTable::new("client".into());let now=Instant::now();let ttl=Duration::from_secs(10);
+        table.configure(vec!["first".into()],Selection::RoundRobin);
+        assert_eq!(table.select_with_syn(1,now,ttl,Some(42)),Some("first"));
+        table.configure(vec!["second".into()],Selection::RoundRobin);
+        assert_eq!(table.assigned_peer(&1,now+Duration::from_secs(1),Some(42)),Some("first"));
+        assert_eq!(table.select_for_peer(1,now,ttl,Some(42),Some("second")),None);
+        assert_eq!(table.assigned_peer(&1,now,Some(43)),None);
+        assert_eq!(table.assigned_peer(&1,now+ttl,Some(42)),None);
+        assert_eq!(table.select_for_peer(1,now+ttl,ttl,Some(43),Some("second")),Some("second"));
+        table.observe_close(&1,"second",true,true,false,now+ttl);
+        table.observe_close(&1,"second",false,true,false,now+ttl);
+        assert_eq!(table.assigned_peer(&1,now+ttl,Some(43)),None,"closed SYN must be a fresh connection");
+        assert_eq!(table.assigned_peer(&1,now+ttl,None),Some("second"));
     }
 
     #[test]

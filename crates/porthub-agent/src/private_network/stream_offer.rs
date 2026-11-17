@@ -133,6 +133,22 @@ impl Offer {
             .and_then(|updates| updates.borrow().clone());
         self.validated(ready.as_ref(), NATIVE_LIFECYCLE_APPROVED)
     }
+    /// Discovery readiness is separate from stream transport approval. It is
+    /// backed by the current native owner and never grants packet authority.
+    pub(super) fn exit_ready(
+        &self,
+        updates: Option<&watch::Receiver<Option<NativeReady>>>,
+    ) -> bool {
+        if !cfg!(feature = "private-sparse") || self.legacy {
+            return false;
+        }
+        let ready = updates
+            .filter(|updates| updates.has_changed().is_ok())
+            .and_then(|updates| updates.borrow().clone());
+        ready.as_ref().is_some_and(|ready| {
+            ready.valid() && self.expected.as_ref() == Some(&ready.scope)
+        })
+    }
     fn validated(&self, ready: Option<&NativeReady>, approved: bool) -> &'static str {
         if !cfg!(feature = "private-stream") {
             return "";
@@ -243,6 +259,47 @@ mod tests {
                 ""
             }
         );
+    }
+    #[test]
+    fn exit_discovery_requires_live_current_native_owner_without_stream_approval() {
+        let base = base();
+        let owner = Arc::new(());
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let witness = ready(&base, clock.clone(), &owner);
+        let (sender, updates) = watch::channel(Some(witness.clone()));
+        let mut offer = Offer::new(true);
+        assert!(!offer.exit_ready(Some(&updates)));
+        offer.observe_snapshot(&base);
+        assert!(offer.exit_ready(Some(&updates)));
+        assert_eq!(offer.offered(Some(&updates)), "");
+        assert!(!offer.exit_ready(None));
+        for change in 0..5 {
+            let mut changed = base.clone();
+            match change {
+                0 => changed.workspace = "other".into(),
+                1 => changed.self_ = "other".into(),
+                2 => changed.peers[0].ip = "10.235.0.1".parse().unwrap(),
+                3 => changed.peers[0].fingerprint = "other".into(),
+                _ => changed.sparse.as_mut().unwrap().epoch = "b".repeat(64),
+            }
+            offer.observe_snapshot(&changed);
+            assert!(!offer.exit_ready(Some(&updates)));
+        }
+        offer.observe_snapshot(&base);
+        clock.0.store(15000, Ordering::SeqCst);
+        assert!(!offer.exit_ready(Some(&updates)));
+        clock.0.store(0, Ordering::SeqCst);
+        witness.owner.cancel();
+        assert!(!offer.exit_ready(Some(&updates)));
+        sender.send_replace(Some(ready(&base, clock.clone(), &owner)));
+        assert!(offer.exit_ready(Some(&updates)));
+        drop(owner);
+        assert!(!offer.exit_ready(Some(&updates)));
+        let owner = Arc::new(());
+        sender.send_replace(Some(ready(&base, clock, &owner)));
+        assert!(offer.exit_ready(Some(&updates)));
+        drop(sender);
+        assert!(!offer.exit_ready(Some(&updates)));
     }
     #[test]
     fn old_or_unknown_gateway_capability_never_causes_an_unsupported_origin_request() {
