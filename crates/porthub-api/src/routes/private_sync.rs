@@ -205,13 +205,29 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     }
     result
 }
+/// Existing exit plans require complete participant identities. Unrelated peers
+/// must not inherit that representation's fleet limit merely by sharing a tenant.
+async fn requires_complete_exit_snapshot(app:&App,owner:mongodb::bson::oid::ObjectId,peer:&Document)->ApiResult<bool> {
+    let mut routes=app.collection("private_exit_nodes")
+        .find(doc!{"workspace_id":owner,"enabled":{"$ne":false}})
+        .projection(doc!{"routing_selectors":1,"distribution_selectors":1}).await?;
+    let Some(first)=routes.try_next().await? else{return Ok(false)};
+    let Some(machine_id)=peer.get("machine_id") else{return Ok(true)};
+    let Some(machine)=crate::private_sparse::machine(app,owner,peer).await? else{return Ok(true)};
+    let id=store::id(Some(machine_id));
+    let participates=|route:&Document| ["routing_selectors","distribution_selectors"].iter()
+        .any(|key|crate::routes::exit_nodes::matches_selectors(route,key,&id,&machine));
+    if participates(&first){return Ok(true)}
+    while let Some(route)=routes.try_next().await?{if participates(&route){return Ok(true)}}
+    Ok(false)
+}
 async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64,mut observed_pairs:HashMap<String,crate::private_relay::PairPeerPin>,traffic:Option<Result<porthub_mesh::traffic_report::Report,serde_json::Error>>)->ApiResult<Response>{
     let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":hash};
     let owner = peer
         .get_object_id("workspace_id")
         .map_err(|_| forbidden("Machine or workspace membership is disabled"))?;
     let indexed=if cfg!(feature="private-sparse") && input.sparse.is_some()
-        && app.collection("private_exit_nodes").find_one(doc!{"workspace_id":owner,"enabled":{"$ne":false}}).projection(doc!{"_id":1}).await?.is_none() {
+        && !requires_complete_exit_snapshot(app,owner,&peer).await? {
         Some(crate::private_sparse::select(&app,owner,&peer,input.sparse.as_ref().expect("negotiated request")).await?)
     }else{None};
     let (mut peers,inventory)=if let Some(indexed)=&indexed{(indexed.peers.clone(),indexed.inventory.clone())}else{active(&app,owner).await?};
@@ -531,6 +547,9 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             s.strip_suffix("/api").unwrap_or(s).to_owned()
         })
         .collect();
+    if indexed.is_some() && requires_complete_exit_snapshot(app,owner,&peer).await? {
+        return Err(ApiError::new(StatusCode::CONFLICT,"Private exit assignment changed; retry sync"));
+    }
     if let Some(rules)=&sparse_rules{crate::private_sparse::verify_rules(&app,owner,rules).await?;}
     if let Some(indexed)=&indexed{if app.collection("private_name_directory_state").find_one(doc!{"_id":owner.to_hex(),"generation":&indexed.generation,"ready":true}).projection(doc!{"_id":1}).await?.is_none(){return Err(ApiError::bad_request("Private directory changed; retry discovery"));}}
     // Explicit complete legacy failure, never a truncated authorization snapshot.

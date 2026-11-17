@@ -488,3 +488,91 @@ async fn canonical_enrollment_ids_allow_cold_peer_lookup_but_never_foreign_works
     }.await;
     case.db.drop().await?;result
 }
+
+#[cfg(feature="private-sparse")]
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn unrelated_exit_plans_do_not_cap_sparse_fleets_but_participants_keep_complete_plans()->Result<()> {
+ let case=Case::new(Config::default()).await?;
+ let result=async {
+  let (owner,_)=case.user("sparse-exit-isolation@test.invalid","user").await?;
+  let (foreign,_)=case.user("sparse-exit-foreign@test.invalid","user").await?;
+  let token="fixture-token-0123456789abcdef0123456789";
+  let ids:Vec<_>=(0..4097).map(|_|ObjectId::new()).collect();
+  let machines:Vec<_>=ids.iter().enumerate().map(|(i,id)|doc!{"_id":id,"user_id":owner,"name":format!("ExitSparse{i}")}).collect();
+  let peers:Vec<_>=ids.iter().enumerate().map(|(i,id)|doc!{"_id":format!("exit-sparse-{i}"),"workspace_id":owner,"machine_id":id,"owner_id":owner,"ip":std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(10,210,0,1))+i as u32).to_string(),"enabled":true,"credential_hash":token_digest(token)}).collect();
+  case.app.collection("machines").insert_many(machines).await?;
+  case.app.collection("private_peers").insert_many(peers).await?;
+  case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.210.0.0/19","dns_suffix":"phub"}).await?;
+  let group=ObjectId::new();
+  case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
+  case.app.collection("access_rulebooks").insert_one(doc!{"_id":ObjectId::new(),"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,"rules":[{"id":"all","name":"Private reachability","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"any","ports":"","bidirectional":true,"enabled":true}]}).await?;
+  let route=ObjectId::new();
+  case.app.collection("private_exit_nodes").insert_one(doc!{"_id":route,"workspace_id":owner,"enabled":true,"name":"Other machines' exit","routing_selectors":[{"kind":"machine","id":ids[1].to_hex()}],"distribution_selectors":[{"kind":"machine","id":ids[2].to_hex()}]}).await?;
+  // An identically named/selected exit in another tenant is never authoritative.
+  case.app.collection("private_exit_nodes").insert_one(doc!{"_id":ObjectId::new(),"workspace_id":foreign,"enabled":true,"routing_selectors":[{"kind":"machine","id":ids[0].to_hex()}],"distribution_selectors":[{"kind":"machine","id":ids[4096].to_hex()}]}).await?;
+  let request=|id:&str,fp:&str,wanted:Value|{let mut b=sync(id,&fingerprint(fp),"instance-exit-0000");b["sparse"]=json!({"protocol":1,"sequence":1,"wanted":wanted});b};
+  let receiver=request("exit-sparse-4096","CD",json!([]));
+  case.status("POST","/api/access/private/sync","",receiver,StatusCode::OK).await?;
+  let sender=request("exit-sparse-0","AB",json!([{"kind":"peer","value":"exit-sparse-4096"}]));
+  let first=case.status("POST","/api/access/private/sync","",sender.clone(),StatusCode::OK).await?;
+  ensure!(first["snapshot"]["sparse"]["protocol"]==1&&first["snapshot"]["peers"].as_array().unwrap().len()==1,"unrelated enabled exit restored whole-fleet policy");
+  ensure!(first["snapshot"]["exit_routes"]==json!([])&&first["pair_responses"][0]["status"]=="allowed","private ACL was lost or unrelated exit disclosed");
+  let first_epoch=first["snapshot"]["sparse"]["epoch"].clone();
+  // Current group assignment, not an old directory/lease, determines participation.
+  case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":{"distribution_selectors":[{"kind":"group","id":group.to_hex()}]}}).await?;
+  let still=case.status("POST","/api/access/private/sync","",sender.clone(),StatusCode::OK).await?;
+  ensure!(still["snapshot"]["sparse"]["protocol"]==1,"unselected group changed authority mode");
+  case.app.collection("machines").update_one(doc!{"_id":ids[0]},doc!{"$set":{"group_ids":[group]}}).await?;
+  let (status,_,denied)=case.call("POST","/api/access/private/sync","",sender.clone(),&[]).await?;
+  ensure!(status==StatusCode::BAD_REQUEST&&denied.to_string().contains("upgrade"),"participating group was silently given incomplete exit policy: {denied}");
+  case.app.collection("machines").update_one(doc!{"_id":ids[0]},doc!{"$unset":{"group_ids":""}}).await?;
+  let restored=case.status("POST","/api/access/private/sync","",sender.clone(),StatusCode::OK).await?;
+  ensure!(restored["snapshot"]["sparse"]["epoch"]==first_epoch,"restored exact membership did not recover sparse authority");
+  for key in ["routing_selectors","distribution_selectors"] {
+   let mut change=mongodb::bson::Document::new();change.insert(key,vec![doc!{"kind":"machine","id":ids[0].to_hex()}]);
+   case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":change}).await?;
+   let (status,_,error)=case.call("POST","/api/access/private/sync","",sender.clone(),&[]).await?;
+   ensure!(status==StatusCode::BAD_REQUEST&&error.to_string().contains("upgrade"),"own {key} did not retain complete-plan guard");
+   let mut change=mongodb::bson::Document::new();change.insert(key,vec![doc!{"kind":"machine","id":ids[1].to_hex()}]);
+   case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":change}).await?;
+  }
+  Ok::<_,anyhow::Error>(())
+ }.await;
+ case.db.drop().await?;result
+}
+
+#[cfg(feature="private-sparse")]
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn sparse_exit_mode_transition_retires_complete_exit_authority_after_current_group_change()->Result<()> {
+ let case=Case::new(Config::default()).await?;
+ let result=async {
+  let (owner,_)=case.user("sparse-exit-transition@test.invalid","user").await?;
+  let ids=[ObjectId::new(),ObjectId::new()];let group=ObjectId::new();
+  case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
+  for (i,id) in ids.iter().enumerate(){
+   let mut machine=doc!{"_id":id,"user_id":owner,"name":format!("Transition{i}")};if i==0{machine.insert("group_ids",vec![group]);}
+   case.app.collection("machines").insert_one(machine).await?;
+   case.app.collection("private_peers").insert_one(doc!{"_id":format!("transition-{i}"),"workspace_id":owner,"machine_id":id,"owner_id":owner,"enabled":true,"ip":format!("10.213.0.{}",i+1),"credential_hash":token_digest("fixture-token-0123456789abcdef0123456789")}).await?;
+  }
+  case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.213.0.0/24","dns_suffix":"phub"}).await?;
+  case.app.collection("private_exit_nodes").insert_one(doc!{"_id":ObjectId::new(),"workspace_id":owner,"name":"Group exit","enabled":true,"routing_selectors":[{"kind":"machine","id":ids[1].to_hex()}],"distribution_selectors":[{"kind":"group","id":group.to_hex()}]}).await?;
+  let request=|i:usize|{let mut b=sync(&format!("transition-{i}"),&fingerprint("AB"),"instance-transition-0");b["sparse"]=json!({"protocol":1,"sequence":1,"wanted":[]});b};
+  let router=case.status("POST","/api/access/private/sync","",request(1),StatusCode::OK).await?;
+  ensure!(router["snapshot"]["sparse"].is_null()&&router["snapshot"]["exit_routes"][0]["clients"]==json!(["transition-0"]),"routing peer lost complete client policy");
+  let before=case.status("POST","/api/access/private/sync","",request(0),StatusCode::OK).await?;
+  ensure!(before["snapshot"]["sparse"].is_null()&&before["snapshot"]["exit_routes"].as_array().unwrap().len()==1,"client lost complete exit policy");
+  let mut engine=porthub_agent::private_network::policy::Engine::default();engine.apply(serde_json::from_value(before["snapshot"].clone())?)?;
+  let mut packet=[0u8;28];packet[0]=0x45;packet[2..4].copy_from_slice(&28u16.to_be_bytes());packet[8]=64;packet[9]=17;packet[12..16].copy_from_slice(&[10,213,0,1]);packet[16..20].copy_from_slice(&[8,8,8,8]);packet[20..22].copy_from_slice(&1234u16.to_be_bytes());packet[22..24].copy_from_slice(&53u16.to_be_bytes());packet[24..26].copy_from_slice(&8u16.to_be_bytes());
+  let mut sum=packet[..20].chunks_exact(2).map(|p|u32::from(u16::from_be_bytes([p[0],p[1]]))).sum::<u32>();while sum>>16!=0{sum=(sum&65535)+(sum>>16);}packet[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+  ensure!(porthub_network::policy::Packet::parse(&packet).is_some(),"fixture IPv4 UDP packet is invalid");
+  ensure!(engine.check_exit(&packet,"transition-1",false),"actual complete exit policy did not authorize client traffic");
+  case.app.collection("machines").update_one(doc!{"_id":ids[0]},doc!{"$unset":{"group_ids":""}}).await?;
+  let after=case.status("POST","/api/access/private/sync","",request(0),StatusCode::OK).await?;
+  ensure!(after["snapshot"]["sparse"]["protocol"]==1&&after["snapshot"]["exit_routes"]==json!([]),"removed group client kept old exit assignment");
+  engine.apply(serde_json::from_value(after["snapshot"].clone())?)?;
+  ensure!(!engine.check_exit(&packet,"transition-1",false),"old exit flow survived current group removal");
+  Ok::<_,anyhow::Error>(())
+ }.await;case.db.drop().await?;result
+}
