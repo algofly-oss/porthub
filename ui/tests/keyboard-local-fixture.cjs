@@ -2,6 +2,9 @@
 exports.createKeyboardFixture=async(browser,viewport,{reducedMotion='no-preference'}={})=>{
  const{makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');const state=makeDemoData(),id=state.machines[1]._id;
  const context=await browser.newContext({viewport,isMobile:viewport.width<=874,hasTouch:true,serviceWorkers:'block',reducedMotion});
+ // A blocked registration still exposes navigator.serviceWorker; Workbox expects
+ // a real registration. Explicitly model unavailable SW for mocked API tests.
+ await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});
  const records=[],errors=[];let held=false,transcription=0,releaseFirst,releaseSecond;
  const firstResponse=new Promise(resolve=>releaseFirst=resolve),secondResponse=new Promise(resolve=>releaseSecond=resolve);
  const firstText=`${'Earlier recognized context needs to scroll away. '.repeat(20)}THE NEWEST SPOKEN WORDS ARE VISIBLE`;
