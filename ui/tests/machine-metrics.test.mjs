@@ -149,3 +149,16 @@ test('condition series never invents readings for absent drives or connects long
  const history=[{at:1,snapshot:{id:'a',present:true,status:'healthy'}},{at:12*day,snapshot:{id:'a',present:true,status:'critical'}}];
  assert.equal(driveConditionSeries(history,[{id:'a'}])[0].segments.length,2);
 });
+
+test('removed drives are hidden only in the UI view and rejoin restores the same identity',async()=>{
+ const {visibleDriveEntries,driveInventoryView}=await import('../src/lib/machineMetrics.mjs');const now=1700000000000;
+ const removed={id:'removed',name:'SanDisk 3.2Gen1',present:false,status:'removed',observed_at:now};
+ const current={id:'connected',name:'System SSD',present:true,status:'healthy',checked_at:now};
+ const history=[{at:now-1000,snapshot:{...removed,present:true,status:'healthy'}},{at:now,snapshot:removed}];
+ const view=driveInventoryView({history,latest:[removed,current],reportedAt:now,enabled:true,now});
+ assert.deepEqual(visibleDriveEntries(view.entries).map(d=>d.id),['connected']);
+ assert(view.entries.some(d=>d.id==='removed'));assert.equal(history.length,2);assert.equal(history[1].snapshot.status,'removed');
+ const unknown=driveInventoryView({history,enabled:false,now});assert.deepEqual(visibleDriveEntries(unknown.entries),[]);
+ const rejoined={...removed,present:true,status:'unavailable'};assert.equal(visibleDriveEntries([rejoined])[0].id,'removed');
+ assert.equal(visibleDriveEntries([{...current,reportMembership:'unknown'}]).length,1,'Missing fresh reports do not imply removal');
+});

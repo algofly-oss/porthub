@@ -144,3 +144,8 @@ export function driveConditionSeries(history=[],drives=[]) {
   return {drive,segments};
  });
 }
+
+// Presentation only: retained removal observations remain in the catalog/API.
+export function visibleDriveEntries(entries=[]) {
+ return entries.filter(drive=>drive.present!==false&&drive.status!=='removed'&&drive.reportMembership!=='removed');
+}

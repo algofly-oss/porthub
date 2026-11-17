@@ -26,8 +26,9 @@ const {launchBrowser}=require('./browser.cjs');
    await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:3219'}/home?view=dashboard`);
    await page.getByRole('region',{name:'Machine resource utilization'}).getByRole('button').filter({hasText:machine.name}).click();
    const panel=page.getByRole('region',{name:'Physical drive health and history'});
-   await panel.getByLabel('Physical drive',{exact:true}).waitFor();
-   const picker=await panel.getByLabel('Physical drive',{exact:true}).inputValue();
+   await panel.waitFor();
+   if(scenario!=='removed')await panel.getByLabel('Physical drive',{exact:true}).waitFor();
+   const picker=scenario==='removed'?'':await panel.getByLabel('Physical drive',{exact:true}).inputValue();
    if(scenario==='fresh-empty'){
     assert(picker.includes('Historical'));await panel.getByText('Historical',{exact:true}).first().waitFor();
     await panel.getByText('No physical drives in the current report',{exact:true}).waitFor();
@@ -38,9 +39,9 @@ const {launchBrowser}=require('./browser.cjs');
    }else if(scenario==='rejoined'){
     assert(picker.includes('Rejoined physical SSD'));assert(!picker.includes('Historical'));await panel.getByText('Healthy',{exact:true}).first().waitFor();assert(!(await panel.innerText()).includes('Not in the current report.'));
    }else{
-    assert(picker.includes('Removed'));await panel.getByText('Removed',{exact:true}).first().waitFor();assert((await panel.innerText()).includes(' · Removed '));
+    await panel.getByText('No physical drives are reported by this client.',{exact:true}).waitFor();assert.equal(await panel.getByLabel('Physical drive',{exact:true}).count(),0);assert.equal(await panel.locator('dl').count(),0);assert(!(await panel.innerText()).includes('Unplugged external SSD'));
    }
-   assert.equal(await panel.getByRole('list',{name:'Drive health observations'}).locator('li').count(),1,'Raw retained history remains visible');
+   assert.equal(await panel.getByRole('list',{name:'Drive health observations'}).locator('li').count(),scenario==='removed'?0:1,'Removed observations stay in backend, not the current display');
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
    if(scenario==='fresh-empty')await panel.screenshot({path:`/tmp/porthub-drive-historical-${width}.png`});
    await context.close();console.log(`PASS drive inventory ${scenario} ${width}`);

@@ -3,7 +3,7 @@ const {launchBrowser}=require('./browser.cjs');
 (async()=>{
  const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');
  const browser=await launchBrowser();
- try{for(const width of [1440,402])for(const scenario of ['three-drives','empty','removed','disabled']){
+ try{for(const width of [1440,402])for(const scenario of ['three-drives','empty','removed','disabled','unplug-selected']){
   const context=await browser.newContext({viewport:{width,height:950},serviceWorkers:'allow'});
   const state=makeDemoData(),machine=state.machines[1],now=Date.now(),queries=[];
   const drive=(id,name,status)=>({id:id.repeat(64),name,status,present:true,protocol:'ata',capacity:512*1024**3,observed_at:now,checked_at:now,reasons:status==='critical'?['SMART failure assessment']:status==='warning'?['Pending sectors reported']:[],self_test:'unsupported'});
@@ -26,8 +26,8 @@ const {launchBrowser}=require('./browser.cjs');
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:33418'}/home?view=dashboard`);
   await page.getByRole('region',{name:'Machine resource utilization'}).getByRole('button').filter({hasText:machine.name}).click();
   const panel=page.getByRole('region',{name:'Physical drive health and history'});await panel.waitFor();
-  if(scenario==='empty'){
-   await panel.getByText('No physical drives are reported by this client.',{exact:true}).waitFor();assert.equal(await panel.getByRole('img',{name:'All-drive SMART condition history'}).count(),0);
+  if(scenario==='empty'||scenario==='removed'){
+   await panel.getByText('No physical drives are reported by this client.',{exact:true}).waitFor();assert.equal(await panel.getByRole('img',{name:'All-drive SMART condition history'}).count(),0);assert.equal(await panel.getByLabel('Physical drive',{exact:true}).count(),0);assert.equal(await panel.locator('dl').count(),0);if(scenario==='removed'){assert.equal(await panel.getByText('Removed',{exact:true}).count(),0);assert.equal(history.length,2,'Backend fixture retains removal history');}
   }else{
    const legend=panel.getByRole('list',{name:'Drive condition legend'});await legend.waitFor();
    if(scenario==='three-drives'){
@@ -35,12 +35,24 @@ const {launchBrowser}=require('./browser.cjs');
     const chart=panel.getByRole('img',{name:'All-drive SMART condition history'});assert(await panel.locator('[data-condition-axis] span,[data-condition-dates] span').evaluateAll(nodes=>nodes.length===5&&nodes.every(e=>parseFloat(getComputedStyle(e).fontSize)>=10)));assert.equal(await chart.locator('g[data-drive-id]').count(),3);assert.equal(await legend.locator('li').count(),3);assert.equal(await chart.locator(`g[data-drive-id="${a.id}"] polyline`).count(),2,'Unknown observation breaks the SSD line');assert.equal(await chart.locator(`g[data-drive-id="${c.id}"] circle`).count(),0,'Unsupported drive is not healthy or zero');
     await Promise.all([page.waitForResponse(r=>r.url().includes('drive='+b.id)),(async()=>{const picker=panel.getByLabel('Physical drive',{exact:true});await picker.click();await picker.fill('Archive HDD');await page.getByRole('option',{name:/Archive HDD/}).click();})()]);
     assert.equal(await chart.locator('g[data-drive-id]').count(),3,'Selected details never filter all-drive chart');assert.equal(await panel.getByRole('list',{name:'Drive health observations'}).locator('li').count(),12);assert(await panel.getByRole('list',{name:'Drive health observations'}).evaluate(e=>e.getBoundingClientRect().height<=209&&getComputedStyle(e).overflowY==='auto'));assert(queries.includes(null)&&queries.includes(b.id));
-   }else if(scenario==='removed'){
-    assert((await legend.innerText()).includes('Removed'));assert.equal(await panel.getByRole('status',{name:'Drives needing attention'}).count(),0);assert.equal(await panel.getByRole('img').locator('polyline').count(),0,'Removed sample cannot extend a healthy line');
+   }else if(scenario==='unplug-selected'){
+    const picker=panel.getByLabel('Physical drive',{exact:true});await picker.click();await picker.fill('Archive HDD');await page.getByRole('option',{name:/Archive HDD/}).click();
+    assert((await picker.inputValue()).includes('Archive HDD'));
+    const retained=history.length;current=[a,{...b,present:false,status:'removed'},c];sample.drive_health=current;
+    const fallbackQuery=page.waitForResponse(response=>response.url().includes('/drives?')&&response.url().includes('drive='+c.id));
+    await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+    await fallbackQuery;
+    await page.waitForFunction(()=>document.querySelector('input[aria-label="Physical drive"]')?.value.includes('External USB SSD'));
+    assert.equal(await legend.getByRole('button',{name:/Archive HDD/}).count(),0);assert.equal(await panel.getByRole('img').locator(`g[data-drive-id="${b.id}"]`).count(),0);assert(!(await panel.innerText()).includes('Archive HDD'));
+    await panel.screenshot({path:`/tmp/porthub-removed-drive-fallback-${process.env.REVIEW_BROWSER||'chromium'}-${width}.png`});
+    current=current.map(d=>({...d,present:false,status:'removed'}));sample.drive_health=current;
+    await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+    await picker.waitFor({state:'hidden'});assert.equal(await panel.locator('dl').count(),0);assert.equal(await panel.getByRole('list',{name:'Drive condition legend'}).count(),0);assert.equal(history.length,retained,'Retained history is untouched');
    }else{
     assert((await legend.innerText()).includes('Current status unknown'));assert.equal(await panel.getByRole('status',{name:'Drives needing attention'}).count(),0,'Disabled reports cannot assert current failure');await panel.getByText('Drive-health reporting is disabled on this client.',{exact:false}).waitFor();
    }
   }
+  if(scenario==='removed')await panel.screenshot({path:`/tmp/porthub-removed-drive-empty-${process.env.REVIEW_BROWSER||'chromium'}-${width}.png`});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   if(scenario==='three-drives'){await panel.getByRole('heading',{name:'Drive health',exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:`/tmp/porthub-all-drive-${process.env.REVIEW_BROWSER||'chromium'}-${width}.png`});await panel.getByLabel('All physical drives SMART condition',{exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:`/tmp/porthub-all-drive-${process.env.REVIEW_BROWSER||'chromium'}-${width}-chart.png`});}
   await context.close();console.log(`PASS all-drive SMART ${scenario} ${width}`);

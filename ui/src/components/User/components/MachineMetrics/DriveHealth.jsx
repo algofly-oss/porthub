@@ -1,6 +1,6 @@
-import {useRef} from 'react';
+import {useEffect,useRef} from 'react';
 import SearchDropdown from '@/components/ui/search-dropdown';
-import {driveTimeline,driveInventoryView,driveCatalog,driveConditionSeries} from '@/lib/machineMetrics.mjs';
+import {driveTimeline,driveInventoryView,driveCatalog,driveConditionSeries,visibleDriveEntries} from '@/lib/machineMetrics.mjs';
 import {formatBytes} from '@/shared/utils/traffic.mjs';
 const states={historical:{label:'Historical',color:'text-muted-foreground'},unknown:{label:'Current status unknown',color:'text-muted-foreground'},healthy:{label:'Healthy',color:'text-emerald-500'},warning:{label:'Needs attention',color:'text-amber-500'},critical:{label:'Critical',color:'text-red-500'},unavailable:{label:'Unavailable',color:'text-muted-foreground'},sleeping:{label:'Sleeping',color:'text-muted-foreground'},removed:{label:'Removed',color:'text-muted-foreground'}};
 const tests={not_run:'Not yet run',running:'Running',passed:'Passed',failed:'Failed',aborted:'Aborted',unsupported:'Not supported',deferred:'Deferred until idle'};
@@ -30,8 +30,9 @@ export default function DriveHealthPanel({data,selectedData,latest,reportedAt,en
  const catalog=useRef([]);
  catalog.current=driveCatalog(catalog.current,data?.history,data?.drives,latest);
  const inventory=driveInventoryView({drives:catalog.current,latest,reportedAt,enabled});
- const drives=inventory.entries;
+ const drives=visibleDriveEntries(inventory.entries);
  const drive=drives.find(d=>d.id===selected)||drives[0];
+ useEffect(()=>{if(selected&&selected!==drive?.id)onDrive(drive?.id||'');},[selected,drive?.id,onDrive]);
  const history=driveTimeline(selectedData?.history||data?.history||[],drive?.id);
  const attention=drives.filter(d=>d.reportMembership==='current'&&d.present&&['warning','critical'].includes(d.status));
  const critical=attention.some(d=>d.status==='critical');
