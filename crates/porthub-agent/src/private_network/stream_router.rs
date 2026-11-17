@@ -367,11 +367,14 @@ impl Router {
         self.changed.send_replace(snapshot.revision);
         Ok(())
     }
+    fn delivery_scope(&self)->porthub_mesh::udp::SendPermit{let cancel=self.cancel.clone();porthub_mesh::udp::SendPermit::control(move||!cancel.is_cancelled())}
+    pub(crate) fn retire(&self){self.cancel.cancel();self.endpoint.close();}
     pub fn valid_lease(&self) -> bool {
         let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
-        state.policy.deadline>Instant::now()&&state.policy.base_authority.as_ref().is_none_or(|authority|authority.check().is_ok())
+        !self.cancel.is_cancelled()&&state.policy.deadline>Instant::now()&&state.policy.base_authority.as_ref().is_none_or(|authority|authority.check().is_ok())
     }
     pub async fn receive(&self, source: Ipv4Addr, payload: Bytes) {
+        if self.cancel.is_cancelled(){return;}
         let (deadline,admission) = {
             let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
             let Some(peer)=state.policy.peers.values().find(|p|p.ip==source) else{return;};
@@ -395,6 +398,7 @@ impl Router {
     /// Returns immediately. A new flow uses a stream only after its peer's
     /// connection has already been prepared in the background.
     pub fn kernel_packet(&self, peer_id: &str, packet: Bytes, prefer_stream: bool) -> bool {
+        if self.cancel.is_cancelled(){return false;}
         let Some(kernel) = Flow::from_packet(&packet) else {
             return false;
         };
@@ -529,6 +533,7 @@ impl Router {
                     self.event(Event::StreamLocal {
                         peer: peer.id,
                         bytes,
+                        scope:self.delivery_scope(),
                     })
                     .await;
                 }
@@ -614,14 +619,15 @@ impl Background {
             packet=tcp_packets.recv()=>{
                 let Some(packet)=packet else{ensure!(local.cancel.is_cancelled(),"private TCP packet owner stopped");return Ok(());};
                 let peer=Flow::from_packet(&packet).and_then(|flow|local.state.lock().unwrap_or_else(|p|p.into_inner()).flows.get(&flow.reverse()).map(|entry|entry.peer.id.clone()));
-                if let Some(peer)=peer {local.event(Event::StreamLocal {peer,bytes:packet}).await;}
+                if let Some(peer)=peer {local.event(Event::StreamLocal {peer,bytes:packet,scope:local.delivery_scope()}).await;}
             }
         }}}.await;Finished::Owner(result)});
         let transport = router.clone();
         tasks.spawn(async move {let result=async {loop {tokio::select! {
             _=transport.cancel.cancelled()=>return Ok(()),
             packet=packets.outgoing()=>{
-                let Some(packet)=packet else{ensure!(transport.cancel.is_cancelled(),"private stream packet owner stopped");return Ok(());};
+                let Some(mut packet)=packet else{ensure!(transport.cancel.is_cancelled(),"private stream packet owner stopped");return Ok(());};
+                let scope=transport.delivery_scope();packet.permit=Some(match packet.permit.take(){Some(origin)=>porthub_mesh::udp::SendPermit::combine(vec![origin,scope]),None=>scope});
                 if let Some(carrier)=&carrier {
                     tokio::select! {_=transport.cancel.cancelled()=>return Ok(()),result=carrier.send(packet)=>{ensure!(result.is_ok(),"private stream carrier stopped");}}
                 } else {transport.event(Event::StreamDatagram {destination:packet.address,payload:packet.payload,permit:packet.permit}).await;}
@@ -679,8 +685,7 @@ impl Background {
                 },
             }
         }Ok(())}.await;
-        router.cancel.cancel();
-        router.endpoint.close();
+        router.retire();
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         result
@@ -752,6 +757,39 @@ fn spawn_reader(
   assert!(!router.kernel_packet("b",syn,true),"unsupported optimization must return raw path, not swallow SYN");
   assert!(router.state.lock().unwrap().flows.is_empty());assert!(router.endpoint.prepared(&mesh_peer(&policy.pair_peer("b").unwrap())).is_none());
   cancel.cancel();task.await.unwrap().unwrap();assert!(waiting.await.unwrap().is_err());
+ }
+
+
+ #[tokio::test]async fn queued_real_legacy_quinn_output_cannot_inherit_replacement_router_generation()->Result<()>{
+  let a=Identity::new()?;let b=Identity::new()?;let(_,pair)=snapshots(&a,&b);let cancel=CancellationToken::new();
+  let(events,mut input)=tokio::sync::mpsc::channel(16);
+  let(router,background)=new("a".into(),"10.203.0.2".parse()?,a.clone(),events,cancel.clone())?;router.update(&pair)?;
+  let(tx,mut rx)=tokio::sync::mpsc::channel(16);let task=tokio::spawn(background.with_carrier(tx).run());
+  let packet=tokio::time::timeout(Duration::from_secs(2),rx.recv()).await?.ok_or_else(||anyhow::anyhow!("legacy output missing"))?;
+  let queued_scope=packet.permit.clone();let live_before=queued_scope.as_ref().is_some_and(|scope|scope.valid());
+  // Finish actual pinned TLS, then obtain the source proxy's real native
+  // SYNACK while intentionally keeping it queued outside the kernel.
+  let(peer,mut io)=Endpoint::new(b,"10.203.1.2".parse()?)?;peer.update_peers(vec![mesh_peer(&pair.peers[0])])?;let peer=Arc::new(peer);let ingress=io.ingress();
+  ingress.send_reliable_guarded("10.203.0.2".parse()?,packet.payload,packet.permit).await?;
+  let pump_stop=CancellationToken::new();let stopping=pump_stop.clone();let own=router.clone();let pump=tokio::spawn(async move{loop{tokio::select!{
+   _=stopping.cancelled()=>break,
+   p=rx.recv()=>match p{Some(p)=>{if p.permit.as_ref().is_none_or(|p|p.valid()){ingress.send_reliable_guarded("10.203.0.2".parse()?,p.payload,p.permit).await?;}},None=>break},
+   p=io.outgoing()=>match p{Some(p)=>own.receive("10.203.1.2".parse()?,p.payload).await,None=>break}
+  }}Ok::<_,anyhow::Error>(())});
+  let accepting=peer.clone();let remote=tokio::time::timeout(Duration::from_secs(2),accepting.accept()).await??.1;
+  tokio::time::timeout(Duration::from_secs(1),async{while !router.prepared("b"){tokio::task::yield_now().await;}}).await?;
+  let(kernel,mut packets,runner)=tcp_stream::stack()?;let kernel_stop=CancellationToken::new();let running=tokio::spawn(runner.run(kernel_stop.clone()));let connecting=tokio::spawn(async move{kernel.connect(flow()).await});
+  let syn=tokio::time::timeout(Duration::from_secs(1),packets.recv()).await?.unwrap();let mut policy=porthub_network::policy::Engine::default();policy.apply(pair.clone())?;ensure!(policy.check(&syn,"b",false),"legacy fixture SYN not authorized");ensure!(router.kernel_packet("b",syn,true),"legacy fixture stream was not prepared");
+  let(_reply,mut request)=tokio::time::timeout(Duration::from_secs(1),remote.accept_bi()).await??;let mut header=[0;8];request.read_exact(&mut header).await?;ensure!(&header[..4]==b"PHT1","legacy wire changed");
+  let event=tokio::time::timeout(Duration::from_secs(1),input.recv()).await?.ok_or_else(||anyhow::anyhow!("native legacy output missing"))?;
+  let Event::StreamLocal{peer:owner,bytes,scope}=event else{anyhow::bail!("unexpected legacy native event")};
+  ensure!(owner=="b"&&scope.valid()&&policy.check(&bytes,"b",true),"queued native SYNACK did not belong to authorized legacy flow");
+  cancel.cancel();tokio::time::timeout(Duration::from_secs(1),task).await???;
+  pump_stop.cancel();peer.close();tokio::time::timeout(Duration::from_secs(1),pump).await???;kernel_stop.cancel();tokio::time::timeout(Duration::from_secs(1),running).await???;ensure!(connecting.await?.is_err(),"undelivered native SYNACK reached kernel");
+  ensure!(live_before,"real legacy queued output omitted its immutable router generation");
+  ensure!(queued_scope.as_ref().is_some_and(|scope|!scope.valid())&&!scope.valid(),"retired router output can inherit a replacement's policy");
+  let(replacement,_)=new("a".into(),"10.203.0.2".parse()?,a,tokio::sync::mpsc::channel(8).0,CancellationToken::new())?;replacement.update(&pair)?;
+  ensure!(replacement.valid_lease()&&replacement.delivery_scope().valid()&&queued_scope.as_ref().is_some_and(|scope|!scope.valid())&&!scope.valid(),"fresh legacy fallback revived old queued byte/transport output");Ok(())
  }
  #[test]fn compact_port_masks_keep_quic_permission_exact_without_range_expansion(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,mut pair)=snapshots(&a,&b);

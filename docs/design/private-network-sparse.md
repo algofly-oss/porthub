@@ -130,3 +130,27 @@ sealed native event queues, and native DATA/FIN ACK boundaries. It is still an
 in-process controlled carrier, not a normal gateway/three-OS route proof. The
 global authenticated flow dispatcher and its admission/fairness lifecycle remain
 the next runtime work; no capability or protocol offer is published yet.
+
+### Legacy/guarded mode transition ownership
+
+Stable old-gateway legacy fallback remains supported. A legacy↔sparse mode
+transition now retires the old router and creates a fresh one. Its immutable
+cancellation scope travels with both local byte events and carrier datagrams;
+a current policy or replacement router cannot revive queued old output. Local
+native delivery retains that scope across its asynchronous write. This is a
+local retirement veto, not a new claim that legacy PHT1 has temporal byte tags.
+
+The runtime supervises stream owners separately: an intentionally replaced
+owner's normal exit does not terminate the replacement profile, but unexpected
+current-owner exits and cleanup failures remain actionable. At most one current
+and one retiring owner are retained, with a bounded completion wait rather than
+an authority-extension sleep. Actual tests retain a real legacy Quinn output
+and a native proxy SYNACK, retire the router, and prove both remain invalid while
+a fresh fallback router is valid. The original missing-generation red is saved.
+
+Existing streams are interrupted by protocol-mode changes. Graceful own-kernel
+reset/drain and tuple reuse across these changes remain part of the native-OS
+retirement work; this safety veto is not proof of seamless socket migration.
+The global origin2 flow dispatcher, fair multiplexing, native three-OS route and
+suspend proof, large-workspace reachability, renumber/migration and exit/Tor
+coverage remain open. Default and protocol advertisement remain disabled.

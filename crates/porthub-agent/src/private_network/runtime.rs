@@ -24,6 +24,17 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+// A deliberately replaced stream owner may finish normally while the profile
+// remains live. Current-owner failure and cleanup errors remain actionable.
+fn stream_owner_completed(current:u64,stopping:bool,finished:Option<std::result::Result<(u64,Result<()>),tokio::task::JoinError>>)->Result<bool>{
+    match finished{
+        Some(Ok((_,Ok(())))) if stopping=>Ok(true),
+        Some(Ok((generation,Ok(())))) if generation!=current=>Ok(false),
+        Some(Ok((_,Err(error))))=>Err(error),Some(Err(error))=>Err(error.into()),
+        _=>anyhow::bail!("private stream owner stopped unexpectedly"),
+    }
+}
+
 fn retire_route_conflicts(policy:&mut Engine,handle:&super::sparse::Handle,conflicts:&[std::net::Ipv4Addr])->Vec<String>{
     let peers:Vec<_>=handle.peers().into_iter().filter(|peer|conflicts.contains(&peer.ip)).collect();
     for peer in &peers{policy.revoke_pair(&peer.id);handle.retire(&peer.id);}
@@ -304,6 +315,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut local_address=super::address_lifecycle::Binding::default();
     #[cfg(feature = "private-stream")]
     let mut stream_router: Option<super::stream_router::Router> = None;
+    #[cfg(feature="private-stream")]
+    let mut stream_router_sparse_mode:Option<bool>=None;
+    #[allow(unused_mut)]
+    let mut stream_owner_generation=0u64;
+    let mut stream_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
     let mut zone = None;
     let mut dns_registration: Option<dns::Registration> = None;
     let mut registered_suffixes: Vec<String> = Vec::new();
@@ -375,6 +391,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         tokio::select! {
         _=cancel.cancelled()=>break,
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
+        finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
             Some(Event::Snapshot(authority))=>{
@@ -402,9 +419,24 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 routes.extend(sparse_handle.peers().iter().map(|p|p.ip));
                 #[cfg(feature="private-stream")]
                 {
+                    let mode=snapshot.sparse.is_some();
+                    if stream_router_sparse_mode!=Some(mode){
+                        if let Some(previous)=stream_router.take(){previous.retire();}
+                        stream_router_sparse_mode=Some(mode);
+                    }
                     if stream_router.is_none() {
+                        // One current plus one retiring owner maximum. A fast
+                        // old/new-gateway mode flap must not retain old stacks.
+                        while stream_owners.len()>=2 {
+                            match tokio::time::timeout(Duration::from_secs(2),stream_owners.join_next()).await.map_err(|_|anyhow::anyhow!("retired private stream owner did not stop"))? {
+                                Some(Ok((_,Ok(()))))=>{},Some(Ok((_,Err(error))))=>return Err(error),_=>anyhow::bail!("retired private stream owner failed"),
+                            }
+                        }
+                        stream_owner_generation=stream_owner_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("private stream generation exhausted"))?;
+                        let generation=stream_owner_generation;
                         let (router,background)=super::stream_router::new(profile.peer_id.clone(),own.ip,identity.clone(),events.clone(),work.child_token())?;
-                        stream_router=Some(router);tasks.spawn(background.with_carrier(stream_output.clone()).run());
+                        stream_router=Some(router);let carrier=stream_output.clone();
+                        stream_owners.spawn(async move{(generation,background.with_carrier(carrier).run().await)});
                     }
                 }
                 if let Some(tun)=&device {
@@ -644,13 +676,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
             },
             #[cfg(feature="private-stream")]
-            Some(Event::StreamLocal {peer,bytes})=>{
+            Some(Event::StreamLocal {peer,bytes,scope})=>{
+                if !scope.valid(){continue;}
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 if sparse_handle.enabled()&&sparse_handle.by_id(&peer).is_none(){continue;}
                 let parsed=Packet::parse(&bytes);
                 let reset=parsed.is_some_and(|packet|packet.is_reset() && peer_ips.get(&profile.peer_id)==Some(&packet.destination()));
                 if policy.check(&bytes,&peer,true) || reset {
-                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
+                    if let Some(tun)=&device {
+                        let delivered=scope.during(async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result}}).await;
+                        match delivered {Ok(result)=>result?,Err(_) if !scope.valid()=>continue,Err(error)=>return Err(error)}
+                    }
                 }
             },
             #[cfg(feature="private-stream")]
@@ -939,16 +975,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     work.cancel();
     drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
-        while !tasks.is_empty() {
-            let _ = tasks.join_next().await;
+        while !tasks.is_empty()||!stream_owners.is_empty(){
+            tokio::select!{_=tasks.join_next(),if !tasks.is_empty()=>{},_=stream_owners.join_next(),if !stream_owners.is_empty()=>{}}
         }
     })
     .await
     .is_err()
     {
-        tasks.abort_all();
+        tasks.abort_all();stream_owners.abort_all();
     }
     while tasks.join_next().await.is_some() {}
+    while stream_owners.join_next().await.is_some() {}
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
@@ -996,5 +1033,20 @@ mod sparse_native_audit_tests {
         assert!(handle.dns_ttl("10.203.1.2".parse().unwrap()).is_none());
         assert!(policy.pair_peer("c").is_some());assert!(handle.by_id("c").is_some());assert!(policy.valid_lease());
         assert!(retire_route_conflicts(&mut policy,&handle,&["10.203.99.99".parse().unwrap()]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stream_retirement_tests {
+    use super::*;
+    #[tokio::test]
+    async fn actual_joined_retirement_does_not_stop_replacement_and_shutdown_is_normal()->Result<()>{
+        let mut owners=JoinSet::new();let old=CancellationToken::new();let stop=old.clone();
+        owners.spawn(async move{stop.cancelled().await;(1,Ok(()))});old.cancel();
+        ensure!(!stream_owner_completed(2,false,owners.join_next().await)?,"retired owner stopped replacement profile");
+        owners.spawn(async{(2,Ok(()))});ensure!(stream_owner_completed(2,false,owners.join_next().await).is_err(),"unexpected live owner stop hidden");
+        owners.spawn(async{(2,Ok(()))});ensure!(stream_owner_completed(2,true,owners.join_next().await)?,"normal profile shutdown became stream failure");
+        owners.spawn(async{(1,Err(anyhow::anyhow!("retired-native-cleanup-error")))});
+        let error=stream_owner_completed(2,false,owners.join_next().await).unwrap_err();ensure!(error.to_string().contains("retired-native-cleanup-error"),"old-owner cleanup failure was hidden or replaced");Ok(())
     }
 }

@@ -29,6 +29,7 @@ struct Delivery {
     source: Ipv4Addr,
     destination: Ipv4Addr,
     payload: Bytes,
+    permit:Option<porthub_mesh::udp::SendPermit>,
 }
 struct Kernel {
     handle: tcp_stream::Handle,
@@ -70,8 +71,8 @@ fn node(
             _=cancel.cancelled()=>return Ok(()),
             packet=datagrams.recv()=>{
                 let Some(packet)=packet else {ensure!(cancel.is_cancelled(),"stream carrier stopped");return Ok(());};
-                ensure!(packet.permit.is_none(),"legacy stream fixture must not discard sparse admission witnesses");
-                if carrier.send(Delivery {source:own,destination:packet.address,payload:packet.payload}).await.is_err() {
+                if packet.permit.as_ref().is_some_and(|scope|!scope.valid()){continue;}
+                if carrier.send(Delivery {source:own,destination:packet.address,payload:packet.payload,permit:packet.permit}).await.is_err() {
                     ensure!(cancel.is_cancelled(), "test carrier stopped before cancellation");
                     return Ok(());
                 }
@@ -83,15 +84,16 @@ fn node(
             },
             event=events.recv()=>match event {
                 Some(Event::StreamDatagram {destination,payload,permit})=>{
-                    ensure!(permit.is_none(),"legacy stream fixture must not discard sparse admission witnesses");
+                    if permit.as_ref().is_some_and(|scope|!scope.valid()){continue;}
                     let envelope=control_packet::encode(control_packet::STREAM,own,destination,&payload)?;
                     let envelope=control_packet::decode(control_packet::STREAM,envelope).context("stream carrier envelope rejected")?;
-                    if carrier.send(Delivery {source:envelope.source,destination:envelope.destination,payload:envelope.payload}).await.is_err() {
+                    if carrier.send(Delivery {source:envelope.source,destination:envelope.destination,payload:envelope.payload,permit}).await.is_err() {
                         ensure!(cancel.is_cancelled(), "test carrier stopped before cancellation");
                         return Ok(());
                     }
                 },
-                Some(Event::StreamLocal {peer,bytes})=>{
+                Some(Event::StreamLocal {peer,bytes,scope})=>{
+                    if !scope.valid(){continue;}
                     ensure!(peer==other,"private peer identity changed");
                     let parsed=Packet::parse(&bytes).context("invalid local TCP packet")?;
                     ensure!(parsed.destination()==own);
@@ -103,7 +105,7 @@ fn node(
                     if tcp.syn() && !tcp.ack() && opening.insert(flow) {
                         ensure!(services.contains(&flow.destination.port()),"unauthorized backend TCP socket was opened");
                         let kernel=kernel.clone();
-                        children.spawn(async move {kernel.accept_syn(bytes).await});
+                        children.spawn(async move {scope.during(kernel.accept_syn(bytes)).await?});
                     } else {kernel.packet(bytes)?;}
                 },
                 None if cancel.is_cancelled()=>return Ok(()),
@@ -203,6 +205,7 @@ async fn private_router_uses_prepared_streams_enforces_ports_and_revokes_active_
         delivery=deliveries.recv()=>{
             let Some(delivery)=delivery else {return Ok(());};
             if drop_packets.try_update(Ordering::AcqRel,Ordering::Acquire,|left|left.checked_sub(1)).is_ok(){continue;}
+            if delivery.permit.as_ref().is_some_and(|scope|!scope.valid()){continue;}
             if delivery.destination==a_ip {a_in.receive(delivery.source,delivery.payload).await;} else {ensure!(delivery.destination==b_ip);b_in.receive(delivery.source,delivery.payload).await;}
         }
     }}});

@@ -210,6 +210,7 @@ pub enum Event {
     StreamLocal {
         peer: String,
         bytes: Bytes,
+        scope:porthub_mesh::udp::SendPermit,
     },
     #[cfg(feature = "private-stream")]
     StreamDatagram {
