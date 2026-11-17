@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 const MAX_INTENTS: usize = 256;
 #[derive(Clone)]
 pub struct Handle {
+    exit_picker: super::exit_picker::Handle,
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
     revoked: Arc<AtomicBool>,
@@ -60,6 +61,7 @@ struct State {
 }
 pub fn channel() -> (Handle, Control) {
     let handle = Handle {
+        exit_picker: Default::default(),
         state: Default::default(),
         changed: Default::default(),
         revoked: Default::default(),
@@ -130,8 +132,10 @@ impl BoundExitAuthority {
     pub(crate) fn permit(&self)->porthub_mesh::udp::SendPermit{self.permit.clone()}
 }
 impl Handle {
+    pub(crate) fn exit_picker(&self)->super::exit_picker::Handle { self.exit_picker.clone() }
     pub fn revoke_all(&self) {
         self.revoked.store(true, Ordering::SeqCst);
+        self.exit_picker.revoke();
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         s.deadline = None;
         s.epoch = None;s.exit_epoch=None;s.own=None;

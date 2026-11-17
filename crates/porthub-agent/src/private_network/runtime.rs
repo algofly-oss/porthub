@@ -966,6 +966,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            #[cfg(feature="local-tor")]
+            let picker_tor_ready=local_tor.as_ref().is_some_and(|tor|tor.ready());
+            #[cfg(not(feature="local-tor"))]
+            let picker_tor_ready=false;
+            sparse_handle.exit_picker().update_carriers(relay_sender.is_ready(),picker_tor_ready);
+
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
                 if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
