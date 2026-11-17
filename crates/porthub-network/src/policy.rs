@@ -1,8 +1,10 @@
 //! Lease-bound IPv4 ACLs and reply tracking. A packet's addresses must match
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
 pub mod pair_acl;
+pub mod exit_pick;
+pub use exit_pick::{ExitPickRequest,ExitPickResponse,ExitPickStatus,ExitChoice};
 mod sparse;
-pub use sparse::{ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
+pub use sparse::{ExitIntent,ExitRole,ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 /// Existing full-snapshot ceiling, including the mandatory local identity.
 pub const MAX_SNAPSHOT_PEERS: usize = 4096;
@@ -259,6 +261,14 @@ impl Packet {
 }
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct FlowId(Key);
+impl FlowId {
+    /// Opaque direction-independent picker correlation, not authorization.
+    pub fn selection_tag(&self)->String {
+        use sha2::{Digest,Sha256};
+        let key=self.0;let mut hash=Sha256::new();hash.update(key.src.octets());hash.update(key.dst.octets());hash.update([key.protocol]);
+        hash.update(key.sport.to_be_bytes());hash.update(key.dport.to_be_bytes());hash.update(key.icmp.to_be_bytes());format!("{:x}",hash.finalize())
+    }
+}
 impl Packet {
     pub fn flow_id(&self) -> FlowId {
         let key = self.key;

@@ -28,10 +28,24 @@ pub struct SparseInfo {
     pub epoch: String,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub exit_epoch: Option<String>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub exit_intents:Vec<ExitIntent>,
     #[serde(default)]
     pub capture_pools: Vec<porthub_mesh::lan_routes::Network>,
 }
 
+/// Owned plumbing/discovery intent only. Remote packets still require ExitPair.
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="snake_case")]
+pub enum ExitRole {Client,Router}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExitIntent {
+    pub id:String,pub name:String,pub role:ExitRole,
+    pub selection:porthub_mesh::exit_policy::Selection,
+    pub traffic_mode:porthub_mesh::exit_policy::TrafficMode,
+    pub allow_direct_fallback:bool,pub tor_enabled:bool,pub tor_circuit_groups:usize,
+}
 /// Separately negotiated exact exit authority. It never grants ordinary private
 /// ports, chooses an exit, or enables local Tor/direct fallback by itself.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -88,6 +102,15 @@ impl Engine {
                         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "unsupported sparse private authority"
             );
+            ensure!(sparse.exit_intents.len()<=256&&(sparse.exit_intents.is_empty()||sparse.exit_epoch.is_some()),"exit intent negotiation/bounds invalid");
+            let mut intent_ids=std::collections::HashSet::new();let mut clients=0;let mut routers=0;
+            for intent in &sparse.exit_intents {
+                ensure!(!intent.id.is_empty()&&intent.id.len()<=60&&intent.name.len()<=256&&intent_ids.insert(&intent.id)
+                    &&(1..=16).contains(&intent.tor_circuit_groups)
+                    &&(!intent.tor_enabled||(intent.role==ExitRole::Client&&intent.traffic_mode.internet())),"invalid exit intent");
+                match intent.role{ExitRole::Client=>clients+=1,ExitRole::Router=>routers+=1}
+            }
+            ensure!(clients<=1&&(clients==0||routers==0),"ambiguous or recursive exit intent");
             ensure!(sparse.exit_epoch.as_ref().is_none_or(|epoch|epoch.len()==64
                 && epoch.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase())),"invalid exit pair generation");
             ensure!(
