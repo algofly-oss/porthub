@@ -43,6 +43,9 @@ fn retire_route_conflicts(policy:&mut Engine,handle:&super::sparse::Handle,confl
 // Sparse base replies intentionally omit idle identities. Counter handles must
 // follow the effective base+installed pair set, without discarding pending rows.
 fn reconcile_traffic(tracker:&super::traffic::Tracker,own:&str,base:Option<&Snapshot>,pairs:&super::sparse::Handle)->HashMap<String,Arc<super::traffic::Counters>> {
+    if !pairs.enabled() {
+        return tracker.reconcile(base.into_iter().flat_map(|base|base.peers.iter()).filter(|peer|peer.id!=own).map(|peer|peer.id.clone()));
+    }
     let mut ids=std::collections::BTreeSet::new();
     if let Some(base)=base {ids.extend(base.peers.iter().filter(|peer|peer.id!=own).map(|peer|peer.id.clone()));}
     ids.extend(pairs.peers().into_iter().filter(|peer|peer.id!=own).map(|peer|peer.id));
@@ -969,7 +972,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             #[cfg(feature="local-tor")]
             refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
             policy.prune_pairs();
-            traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
+            if sparse_handle.enabled(){traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);}
             #[cfg(feature="private-stream")]
             {
                 let mode=*strategy.borrow();
