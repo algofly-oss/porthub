@@ -113,7 +113,7 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
         for(id,identity,control,events)in[(aid.clone(),a_identity,ca,ea),(bid.clone(),b_identity,cb,eb)]{
             let profile=Profile{server:format!("http://{address}"),peer_id:id.clone(),token:TOKEN.into(),workspace:owner.to_hex(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let(_updates,interfaces)=watch::channel(vec![]);let(relay,_)=watch::channel(None);
-            tasks.spawn(controller::run_watched_sparse(profile,interfaces,Default::default(),events,relay,controller::LocalIdentity{instance:format!("runtime-{}",&id[id.len()-16..]),certificate:identity},stop.child_token(),Some(control)));
+            tasks.spawn(controller::run_watched_sparse(profile,interfaces,Default::default(),events,relay,controller::LocalIdentity{traffic:None,instance:format!("runtime-{}",&id[id.len()-16..]),certificate:identity},stop.child_token(),Some(control)));
         }
         let(ka,pa,kar)=tcp_stream::stack()?;let(kb,pb,kbr)=tcp_stream::stack()?;
         tasks.spawn(kar.run(stop.child_token()));tasks.spawn(kbr.run(stop.child_token()));
