@@ -65,7 +65,7 @@ class Outer(unittest.TestCase):
    root=pathlib.Path(temp);receipts=root/'receipts';receipts.mkdir();binary=root/'binary';binary.write_bytes(b'OFFLINE')
    image='sha256:'+'a'*64;state={'image':False};module=types.SimpleNamespace(command=lambda *a,**k:None)
    def native(args):
-    stage=pathlib.Path('/tmp/porthub-sparse-native-'+args.nonce);stage.mkdir(mode=0o700);state['stage']=stage
+    stage=gate.netns_stage(args.nonce);stage.mkdir(mode=0o700);state['stage']=stage
     (stage/'receipt.json').write_text(json.dumps({'offline_mock_only':True,'container_absent':True,'rootfs_removed':True}))
     (stage/'stdout.log').write_text('OFFLINE bounded native metadata')
     if failed:raise RuntimeError('preserved native failure')
@@ -82,7 +82,7 @@ class Outer(unittest.TestCase):
     raise AssertionError('unexpected Docker mock command '+str(argv))
    prior=gate.COMMAND_DEADLINE;gate.COMMAND_DEADLINE=time.monotonic()+90
    try:
-    with patch.object(gate.importlib.util,'spec_from_file_location',return_value=types.SimpleNamespace(loader=loader)),patch.object(gate.importlib.util,'module_from_spec',return_value=module),patch.object(gate,'run',side_effect=run):
+    with patch.object(gate.importlib.util,'spec_from_file_location',return_value=types.SimpleNamespace(loader=loader)),patch.object(gate.importlib.util,'module_from_spec',return_value=module),patch.object(gate,'run',side_effect=run),patch.object(gate,'netns_stage',side_effect=lambda nonce:root/('porthub-sparse-native-'+nonce)):
      if failed:
       with self.assertRaisesRegex(RuntimeError,'preserved native failure'):gate.netns_gate(root,binary,receipts,30,time.monotonic()+100)
      else:gate.netns_gate(root,binary,receipts,30,time.monotonic()+100)

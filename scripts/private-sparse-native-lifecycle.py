@@ -143,6 +143,8 @@ def source_guard(contract):
   if 'async fn '+leaf not in source.read_text():raise RuntimeError('exact native test absent: '+name)
  return root
 
+def netns_stage(nonce):return pathlib.Path('/tmp/porthub-sparse-native-'+nonce)
+
 def netns_gate(root,binary,receipt_dir,seconds,cleanup_deadline):
  """Import an empty local image; no registry/network or host network mutation."""
  global COMMAND_DEADLINE
@@ -156,7 +158,7 @@ def netns_gate(root,binary,receipt_dir,seconds,cleanup_deadline):
   if remaining<=0:raise RuntimeError('netns command budget exhausted before spawn')
   return original_command(argv,timeout=min(timeout,remaining),check=check)
  module.command=bounded_netns_command
- nonce=uuid.uuid4().hex;image=None;stage=pathlib.Path('/tmp/porthub-sparse-native-'+nonce)
+ nonce=uuid.uuid4().hex;image=None;stage=netns_stage(nonce)
  receipt={'nonce':nonce,'image_absent':False,'container_absent':False};error=None
  try:
   import tarfile

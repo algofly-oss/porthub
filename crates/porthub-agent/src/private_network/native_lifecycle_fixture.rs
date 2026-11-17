@@ -119,6 +119,15 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
         links.len() == 1 && links[0].name() == Some("lo"),
         "fixture namespace is not empty/isolated"
     );
+    // Metadata-only causal witness before the production open strips errno.
+    // Never create a node, load a module or relax cgroup/device permissions.
+    use std::os::unix::fs::{FileTypeExt,OpenOptionsExt};
+    let device=std::fs::symlink_metadata("/dev/net/tun")?;
+    println!("fixture_tun_char={} fixture_tun_major={} fixture_tun_minor={}",device.file_type().is_char_device(),libc::major(device.rdev()),libc::minor(device.rdev()));
+    ensure!(device.file_type().is_char_device()&&libc::major(device.rdev())==10&&libc::minor(device.rdev())==200,"fixture /dev/net/tun is not the exact existing TUN character device");
+    match std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW|libc::O_NONBLOCK).open("/dev/net/tun"){
+        Ok(probe)=>drop(probe),Err(error)=>{println!("fixture_tun_open_errno={:?}",error.raw_os_error());return Err(error.into());}
+    }
     let source_name = format!("ph{}", &spec.nonce[..8]);
     let foreign_name = format!("ph{}", &spec.nonce[8..16]);
     ensure!(source_name != foreign_name, "fixture names collide");

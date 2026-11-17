@@ -25,6 +25,14 @@ def own(cid,nonce,image):
  row=json.loads(result.stdout)[0]
  if row['Name']!='/porthub-sparse-native-'+nonce or row['Image']!=image or row['Config']['Labels'].get('porthub.sparse.native.nonce')!=nonce:raise RuntimeError('container ownership changed; refusing mutation')
  return row
+def valid_scope(cfg):
+ # Moby canonicalizes these exact flags to CAP_-prefixed names. No added
+ # capability is accepted: https://github.com/moby/moby/blob/v28.3.2/oci/caps/utils.go#L45-L70
+ caps=cfg.get('CapAdd') or [];drops=cfg.get('CapDrop') or []
+ if not all(isinstance(c,str) for c in caps+drops):return False
+ normalized={c.removeprefix('CAP_') for c in caps}
+ return cfg.get('NetworkMode')=='none' and not cfg.get('Privileged') and cfg.get('ReadonlyRootfs') is True and normalized=={'NET_ADMIN','SYS_CHROOT'} and {c.removeprefix('CAP_') for c in drops}=={'ALL'}
+
 def recipe(root,nonce,image,spec_hash,loader,library_dirs):
  return ['docker','run','--detach','--pull=never','--name','porthub-sparse-native-'+nonce,'--label','porthub.sparse.native.nonce='+nonce,'--read-only','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_CHROOT','--security-opt','no-new-privileges:true','--pids-limit','96','--memory','512m','--cpus','1','--ulimit','nofile=256:256','--log-opt','max-size=1m','--log-opt','max-file=1','--mount',f'type=bind,source={root},target=/fixture,readonly','--mount','type=bind,source=/proc,target=/fixture/proc,readonly','--device','/dev/net/tun:/fixture/dev/net/tun','--env','PORTHUB_SPARSE_NATIVE_FIXTURE='+PURPOSE,'--env','PORTHUB_SPARSE_NATIVE_SPEC_SHA256='+spec_hash,'--env','RUST_LOG=off','--env','RUST_BACKTRACE=0','--entrypoint','/fixture'+loader,image,'--library-path',':'.join('/fixture'+p for p in library_dirs),'/fixture/chroot','/fixture','/porthub-tests','--ignored','--exact',TEST,'--nocapture','--test-threads=1']
 def dependencies(binary):
@@ -78,7 +86,8 @@ def run(args):
   if not re.fullmatch('[0-9a-f]{64}',cid):raise RuntimeError('invalid container ID')
   receipt.update(executed=True,container_id=cid)
   row=own(cid,nonce,args.image);cfg=row['HostConfig']
-  if cfg['NetworkMode']!='none' or cfg['Privileged'] or not cfg['ReadonlyRootfs'] or set(cfg['CapAdd'])!={'NET_ADMIN','SYS_CHROOT'}:raise RuntimeError('native container scope differs')
+  receipt['observed_scope']={key:cfg.get(key) for key in ['NetworkMode','Privileged','ReadonlyRootfs','CapAdd','CapDrop','SecurityOpt','PidsLimit','Memory','NanoCpus','Devices']}
+  if not valid_scope(cfg):raise RuntimeError('native container scope differs; exact observed scope retained')
   waited=command(['docker','wait',cid],timeout=30);receipt['native_exit_code']=int(waited.stdout.strip())
   logs=command(['docker','logs',cid],timeout=10)
   if len(logs.stdout)>512*1024 or len(logs.stderr)>512*1024:raise RuntimeError('native metadata log exceeded bounded cap')
@@ -121,6 +130,10 @@ def self_test():
  assert all(value.endswith(',readonly') for i,value in enumerate(cmd) if i and cmd[i-1]=='--mount')
  assert cmd[-5:]==['--ignored','--exact',TEST,'--nocapture','--test-threads=1']
  assert '--pull=never' in cmd
+ base={'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL']}
+ assert valid_scope(base) and valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN','CAP_SYS_CHROOT']))
+ assert not valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN','CAP_SYS_CHROOT','CAP_SYS_ADMIN']))
+ assert not valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN'])) and not valid_scope(dict(base,CapDrop=[]))
  import types
  original_command=globals()['command'];original_dependencies=globals()['dependencies'];original_stat=os.stat
  try:
@@ -139,7 +152,7 @@ def self_test():
     if args[:2]==['docker','inspect']:
      if state['exists'] and mode.startswith('inspect_error'):return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'injected inspection failure')
      if not state['exists']:return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'absent')
-     row={'Name':'/porthub-sparse-native-'+state['nonce'],'Image':image,'Config':{'Labels':{'porthub.sparse.native.nonce':state['nonce']}},'HostConfig':{'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT']},'State':{'Running':state['running']}}
+     row={'Name':'/porthub-sparse-native-'+state['nonce'],'Image':image,'Config':{'Labels':{'porthub.sparse.native.nonce':state['nonce']}},'HostConfig':{'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL']},'State':{'Running':state['running']}}
      return types.SimpleNamespace(returncode=0,stdout=json.dumps([row]).encode(),stderr=b'')
     if args[:2]==['docker','wait']:
      if mode=='timeout':raise subprocess.TimeoutExpired(args,timeout)
