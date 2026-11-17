@@ -466,6 +466,11 @@ async fn transfer(
     permit: &SendPermit,
     generation: [u8; 16],
 ) -> Result<[u8; HEADER]> {
+    let request_nonce=if connection.requested_credit(){
+        let mut request=*header;request[..4].copy_from_slice(b"PHQ3");let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|anyhow::anyhow!("credit nonce unavailable"))?;ensure!(nonce!=[0;16],"invalid credit nonce");
+        request[77..93].copy_from_slice(&nonce);request[93..96].fill(0);
+        let receiver_nonce=connection.request_credit(&request,permit).await?;Some(receiver_nonce)
+    }else{None};
     let (mut send, mut receive) = connection.open_chunk(permit).await?;
     // Causal ordering: receiver's credit start precedes this resolved open.
     // Do not compute remaining lifetime before waiting for stream credit.
@@ -477,7 +482,9 @@ async fn transfer(
         (1..=15_000).contains(&millis),
         "source bound outside guarded wire limits"
     );
-    let actual = wire_header(*header, generation, millis as u32)?;
+    let mut actual=*header;
+    if let Some(nonce)=request_nonce {actual[..4].copy_from_slice(if &header[..4]==b"PHF2"{b"PHF3"}else{b"PHC3"});actual[4..20].copy_from_slice(&nonce);}
+    let actual = wire_header(actual, generation, millis as u32)?;
     let header = &actual;
     let result = permit
         .during(async {

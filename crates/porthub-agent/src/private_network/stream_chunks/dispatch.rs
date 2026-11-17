@@ -284,6 +284,16 @@ impl EndpointSlot {
         identity: porthub_mesh::Identity,
         owner: CancellationToken,
     ) -> Result<Self> {
+        Self::new_protocol(dispatcher, key, current, identity, owner, false)
+    }
+    pub(crate) fn new_protocol(
+        dispatcher: &Dispatcher,
+        key: Key,
+        current: Current,
+        identity: porthub_mesh::Identity,
+        owner: CancellationToken,
+        requested: bool,
+    ) -> Result<Self> {
         let registration = dispatcher.reserve(key, current)?;
         registration.slot.identity.bind_identity(&identity)?;
         registration
@@ -301,15 +311,38 @@ impl EndpointSlot {
             .set(Arc::downgrade(&gate.state))
             .map_err(|_| anyhow::anyhow!("carrier gate already attached"))?;
         let local = registration.slot.identity.local_ip();
-        let (endpoint, packets) = match key.role() {
-            super::carrier::Role::Source => {
-                porthub_mesh::streams::Endpoint::new_fenced_source(identity, local, gate.factory())?
+        let (endpoint, packets) = if requested {
+            match key.role() {
+                super::carrier::Role::Source => {
+                    porthub_mesh::streams::Endpoint::new_requested_source(
+                        identity,
+                        local,
+                        gate.factory(),
+                    )?
+                }
+                super::carrier::Role::Receiver => {
+                    porthub_mesh::streams::Endpoint::new_requested_receiver(
+                        identity,
+                        local,
+                        gate.factory(),
+                    )?
+                }
             }
-            super::carrier::Role::Receiver => porthub_mesh::streams::Endpoint::new_fenced_credited(
-                identity,
-                local,
-                gate.factory(),
-            )?,
+        } else {
+            match key.role() {
+                super::carrier::Role::Source => porthub_mesh::streams::Endpoint::new_fenced_source(
+                    identity,
+                    local,
+                    gate.factory(),
+                )?,
+                super::carrier::Role::Receiver => {
+                    porthub_mesh::streams::Endpoint::new_fenced_credited(
+                        identity,
+                        local,
+                        gate.factory(),
+                    )?
+                }
+            }
         };
         endpoint.update_peers(vec![registration.slot.identity.peer().clone()])?;
         registration.attach(packets.ingress())?;

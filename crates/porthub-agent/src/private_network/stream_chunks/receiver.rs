@@ -152,9 +152,23 @@ impl Receiver {
             && access.permit.remaining().is_some()
     }
     fn header(&self, h: &[u8; HEADER]) -> Result<(usize, [u8; 16], std::time::Duration)> {
+        self.header_credit(h, None)
+    }
+    fn header_credit(
+        &self,
+        h: &[u8; HEADER],
+        credit: Option<[u8; 16]>,
+    ) -> Result<(usize, [u8; 16], std::time::Duration)> {
+        let requested = self.connection.requested_credit();
         ensure!(
-            (&h[..4] == b"PHC2" || &h[..4] == b"PHF2")
-                && h[4..20] == self.flow.nonce
+            requested == credit.is_some(),
+            "data has no exact requested credit"
+        );
+        let data = if requested { b"PHC3" } else { b"PHC2" };
+        let fin = if requested { b"PHF3" } else { b"PHF2" };
+        ensure!(
+            (&h[..4] == data || &h[..4] == fin)
+                && h[4..20] == credit.unwrap_or(self.flow.nonce)
                 && h[20] == self.flow.direction
                 && h[45..77] == self.flow.epoch,
             "foreign/noncanonical RX header"
@@ -172,8 +186,7 @@ impl Receiver {
         let length = u32::from_be_bytes(h[37..41].try_into()?) as usize;
         let id: [u8; 16] = h[77..93].try_into()?;
         ensure!(
-            ((&h[..4] == b"PHC2" && (1..=CHUNK).contains(&length))
-                || (&h[..4] == b"PHF2" && length == 0))
+            ((&h[..4] == data && (1..=CHUNK).contains(&length)) || (&h[..4] == fin && length == 0))
                 && id != [0; 16],
             "RX size/nonce invalid"
         );
@@ -188,7 +201,79 @@ impl Receiver {
             std::time::Duration::from_millis(u64::from(millis)),
         ))
     }
+    async fn wait_request(&self) -> Result<[u8; HEADER]> {
+        ensure!(!self.finished, "credit request after terminal event");
+        let current = self.current.clone();
+        let owner = self.gate.state.clone();
+        let peer = self.connection.peer().clone();
+        let epoch = self.flow.epoch;
+        let port = self.service();
+        // This wait grants no stream credit and retains no data authority.
+        let idle = SendPermit::control(move || {
+            owner.alive.load(Ordering::SeqCst)
+                && owner.parent.valid()
+                && current().is_some_and(|now| Self::valid_access(&now, &peer, &epoch, port))
+        });
+        loop {
+            let request = idle.during(self.connection.next_credit_request()).await??;
+            ensure!(
+                &request[..4] == b"PHQ3"
+                    && request[4..20] == self.flow.nonce
+                    && request[20] == self.flow.direction
+                    && request[45..77] == self.flow.epoch
+                    && request[93..96] == [0; 3]
+                    && request[77..93] != [0; 16],
+                "foreign/noncanonical credit request"
+            );
+            ensure!(
+                u16::from_be_bytes(request[41..43].try_into()?) == self.flow.local_port
+                    && u16::from_be_bytes(request[43..45].try_into()?) == self.flow.remote_port,
+                "credit request ports differ"
+            );
+            let sequence = u64::from_be_bytes(request[21..29].try_into()?);
+            let offset = u64::from_be_bytes(request[29..37].try_into()?);
+            let length = u32::from_be_bytes(request[37..41].try_into()?) as usize;
+            ensure!(length <= CHUNK, "requested credit length exceeds bound");
+            if sequence < self.sequence {
+                ensure!(
+                    offset
+                        .checked_add(length as u64)
+                        .is_some_and(|end| end <= self.offset),
+                    "stale request offset exceeds acknowledged data"
+                );
+                tokio::task::yield_now().await;
+                continue;
+            }
+            ensure!(
+                sequence == self.sequence && offset == self.offset,
+                "credit request sequence/offset differs"
+            );
+            return Ok(request);
+        }
+    }
+    pub(crate) async fn receive_next(&mut self, admission: Current) -> Result<[u8; HEADER]> {
+        let request = if self.connection.requested_credit() {
+            Some(self.wait_request().await?)
+        } else {
+            None
+        };
+        let original = admission()
+            .ok_or_else(|| anyhow::anyhow!("receiver original unavailable after request"))?;
+        self.receive_inner(original, request).await
+    }
     pub(crate) async fn receive(&mut self, original: Access) -> Result<[u8; HEADER]> {
+        let request = if self.connection.requested_credit() {
+            Some(self.wait_request().await?)
+        } else {
+            None
+        };
+        self.receive_inner(original, request).await
+    }
+    async fn receive_inner(
+        &mut self,
+        original: Access,
+        request: Option<[u8; HEADER]>,
+    ) -> Result<[u8; HEADER]> {
         ensure!(!self.finished, "RX DATA/FIN after terminal event");
         let peer = self.connection.peer().clone();
         let epoch = self.flow.epoch;
@@ -232,6 +317,9 @@ impl Receiver {
         // only after the sender's open_bi resolves, so shortening this start
         // is conservative; never start the received TTL at header arrival.
         let credit_start = RequestWindow::start(Arc::new(NativeClock))?;
+        // A sender-chosen request ID cannot protect against prebuffered
+        // streams. The DATA token is unpredictable until THIS credit starts.
+        let grant=if let Some(request)=&request{let mut grant=*request;grant[..4].copy_from_slice(b"PHG3");let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|anyhow::anyhow!("receiver credit nonce unavailable"))?;ensure!(nonce!=[0;16],"invalid receiver credit nonce");grant[4..20].copy_from_slice(&nonce);Some(grant)}else{None};
         let mut key = self
             .flow
             .header(self.sequence, self.offset, CHUNK, [2; 16])?;
@@ -254,10 +342,21 @@ impl Receiver {
         };
         let (result, delivery) = permit
             .during(async {
-                let (mut reply, mut input) = self.connection.accept_one(&permit).await?;
+                let (mut reply, mut input) = if let Some(request) = &request {
+                    self.connection.accept_requested(&permit, request,grant.as_ref().expect("requested grant")).await?
+                } else {
+                    self.connection.accept_one(&permit).await?
+                };
                 let mut header = [0; HEADER];
                 input.read_exact(&mut header).await?;
-                let (length, id, limit) = self.header(&header)?;
+                let credit=grant.as_ref().map(|grant|<[u8;16]>::try_from(&grant[4..20]).expect("fixed receiver nonce"));
+                let (length, id, limit) = self.header_credit(&header, credit)?;
+                if let Some(request) = &request {
+                    ensure!(
+                        header[20..77] == request[20..77],
+                        "DATA/FIN does not match exact requested metadata"
+                    );
+                }
                 ensure!(permit.valid(), "RX ACL changed at header");
                 let deadline = credit_start.clone();
                 let remaining = credit_start.clone();
@@ -282,7 +381,7 @@ impl Receiver {
                             input.read(&mut extra).await?.is_none(),
                             "RX chunk exceeds finite declared body"
                         );
-                        let ack = if &header[..4] == b"PHF2" {
+                        let ack = if &header[..4] == b"PHF2" || &header[..4] == b"PHF3" {
                             self.native
                                 .finish(id, self.offset, delivery.clone())
                                 .await?
@@ -324,7 +423,7 @@ impl Receiver {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&key);
-        self.finished = &result[..4] == b"PHF2";
+        self.finished = &result[..4] == b"PHF2" || &result[..4] == b"PHF3";
         if self.finished {
             self.terminal = Some(delivery.clone());
         }

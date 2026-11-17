@@ -98,3 +98,6 @@ mod stream_chunks;
 
 #[cfg(all(feature="private-sparse",feature="private-stream"))]
 pub mod sparse_dispatch;
+
+#[cfg(all(test,feature="private-sparse",target_os="linux"))]
+mod native_lifecycle_fixture;

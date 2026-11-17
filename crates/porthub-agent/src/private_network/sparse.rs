@@ -61,10 +61,11 @@ pub fn channel() -> (Handle, Control) {
 }
 // A routine renewal is not retirement. Keep its revocation domain only when
 // identity/assignment/epoch/exact ACL is unchanged; each queued request still
-// retains its own ORIGINAL expiry witness. No grant/range expansion is needed.
+// retains its own ORIGINAL expiry witness. Publication revision orders replies;
+// it is not a permission/identity epoch. No grant/range expansion is needed.
 fn same_pair_authority(a:&PairLease,b:&PairLease)->bool {
     let identity=|a:&PeerInfo,b:&PeerInfo|a.id==b.id&&a.ip==b.ip&&a.fingerprint==b.fingerprint&&a.instance==b.instance;
-    a.workspace==b.workspace&&a.self_==b.self_&&a.epoch==b.epoch&&a.revision==b.revision&&identity(&a.local,&b.local)&&identity(&a.peer,&b.peer)
+    a.workspace==b.workspace&&a.self_==b.self_&&a.epoch==b.epoch&&identity(&a.local,&b.local)&&identity(&a.peer,&b.peer)
         &&a.grants.len()==b.grants.len()&&a.grants.iter().zip(&b.grants).all(|(a,b)|a.source==b.source&&a.destination==b.destination&&a.protocol==b.protocol&&a.ports.len()==b.ports.len()&&a.ports.iter().zip(&b.ports).all(|(a,b)|a.start==b.start&&a.end==b.end))
         &&match (serde_json::to_vec(&a.acl),serde_json::to_vec(&b.acl)){(Ok(a),Ok(b))=>a==b,_=>false}
 }
@@ -570,10 +571,23 @@ mod tests {
         let(handle,_)=channel();let epoch="a".repeat(64);handle.update_base_authority(&base(&epoch),authority());
         let pair=lease(&epoch);let query=Lookup{kind:"peer".into(),value:"b".into()};
         handle.installed_authority(&query,pair.clone(),authority());let old=handle.pair_authority("b").unwrap();
-        clock.0.store(10000,Ordering::SeqCst);handle.update_base_authority(&base(&epoch),authority());handle.installed_authority(&query,pair.clone(),authority());
+        clock.0.store(10000,Ordering::SeqCst);handle.update_base_authority(&base(&epoch),authority());handle.installed_authority(&query,{let mut renewed=pair.clone();renewed.revision+=1;renewed},authority());
         assert!(old.check().is_ok(),"identical renewal must not spuriously retire live operations");
         clock.0.store(15000,Ordering::SeqCst);assert!(old.check().is_err());let fresh=handle.pair_authority("b").unwrap();assert!(fresh.check().is_ok());
         let mut changed=pair;changed.grants.clear();handle.installed_authority(&query,changed,authority());assert!(fresh.check().is_err(),"changed ACL retires the old domain");
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn publication_revision_is_not_revocation_but_changed_peer_identity_is() {
+        let pair=lease(&"a".repeat(64));
+        let mut renewed=pair.clone();renewed.revision+=1;
+        assert!(same_pair_authority(&pair,&renewed));
+        for field in 0..3 {
+            let mut replaced=renewed.clone();
+            match field {0=>replaced.peer.fingerprint="replacement".into(),1=>replaced.peer.instance="replacement".into(),_=>replaced.peer.ip="10.203.1.3".parse().unwrap()}
+            assert!(!same_pair_authority(&pair,&replaced));
+        }
+        renewed.grants.clear();assert!(!same_pair_authority(&pair,&renewed));
     }
     #[cfg(feature="private-sparse")]
     #[test]

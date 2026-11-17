@@ -119,7 +119,7 @@ impl Offer {
         self.observe_snapshot(base);
         self.server_origin = protocols.len() <= 8
             && protocols.iter().map(String::len).sum::<usize>() <= 256
-            && protocols.iter().any(|protocol| protocol == "quic2-origin");
+            && protocols.iter().any(|protocol| protocol == "quic3-credit");
     }
     pub(super) fn transport(&self) -> &'static str {
         self.validated(None, false)
@@ -145,7 +145,7 @@ impl Offer {
         }
         if ready.is_some_and(|ready| ready.valid() && self.expected.as_ref() == Some(&ready.scope))
         {
-            "quic2-origin"
+            "quic3-credit"
         } else {
             ""
         }
@@ -187,19 +187,19 @@ mod tests {
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let ready = ready(&base, clock, &owner);
         let mut offer = Offer::new(true);
-        offer.observe_reply(&base, &["quic2-origin".into()]);
+        offer.observe_reply(&base, &["quic3-credit".into()]);
         assert_eq!(offer.validated(Some(&ready), false), "");
         assert_eq!(
             offer.validated(Some(&ready), true),
             if cfg!(all(feature = "private-sparse", feature = "private-stream")) {
-                "quic2-origin"
+                "quic3-credit"
             } else {
                 ""
             }
         );
         let mut foreign = base.clone();
         foreign.workspace = "foreign".into();
-        offer.observe_reply(&foreign, &["quic2-origin".into()]);
+        offer.observe_reply(&foreign, &["quic3-credit".into()]);
         assert_eq!(offer.validated(Some(&ready), true), "");
         for change in 0..3 {
             let mut next = base.clone();
@@ -208,10 +208,10 @@ mod tests {
                 1 => next.peers[0].ip = "10.235.0.1".parse().unwrap(),
                 _ => next.peers[0].fingerprint = "replacement".into(),
             };
-            offer.observe_reply(&next, &["quic2-origin".into()]);
+            offer.observe_reply(&next, &["quic3-credit".into()]);
             assert_eq!(offer.validated(Some(&ready), true), "");
         }
-        offer.observe_reply(&base, &["quic2-origin".into()]);
+        offer.observe_reply(&base, &["quic3-credit".into()]);
         drop(owner);
         assert_eq!(offer.validated(Some(&ready), true), "");
     }
@@ -223,12 +223,12 @@ mod tests {
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let ready = ready(&base, clock.clone(), &owner);
         let mut offer = Offer::new(true);
-        offer.observe_reply(&base, &["quic2-origin".into()]);
+        offer.observe_reply(&base, &["quic3-credit".into()]);
         clock.0.store(15000, Ordering::SeqCst);
         let mut renewed = base.clone();
         renewed.revision += 1;
         renewed.expires_at = chrono::Utc::now() + chrono::Duration::seconds(30);
-        offer.observe_reply(&renewed, &["quic2-origin".into()]);
+        offer.observe_reply(&renewed, &["quic3-credit".into()]);
         assert_eq!(offer.validated(Some(&ready), true), "");
         let (sender, updates) = watch::channel(Some(ready));
         assert_eq!(offer.offered(Some(&updates)), "");
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(offer.validated(Some(&ready), true), "");
         offer.observe_reply(&base, &["future".into()]);
         assert_eq!(offer.validated(Some(&ready), true), "");
-        let oversized = vec!["quic2-origin".into(); 9];
+        let oversized = vec!["quic3-credit".into(); 9];
         offer.observe_reply(&base, &oversized);
         assert_eq!(offer.validated(Some(&ready), true), "");
         offer.observe(false);

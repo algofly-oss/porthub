@@ -11,7 +11,7 @@ async fn bridge(
     remote: Peer,
     accepted: mpsc::Sender<tokio::io::DuplexStream>,
     stop: CancellationToken,
-    allow_new:Arc<AtomicBool>,
+    allow_new: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut acceptors = tokio::task::JoinSet::new();
     let mut services_started = std::collections::HashSet::new();
@@ -42,7 +42,7 @@ async fn bridge(
     result
 }
 
-async fn exercise(revoke: bool, parallel: usize, withdraw:bool) -> Result<()> {
+async fn exercise(revoke: bool, parallel: usize, withdraw: bool) -> Result<()> {
     timeout(Duration::from_secs(12),async {
         let a=Identity::new()?;let b=Identity::new()?;
         let ap=Peer{id:"a".into(),ip:"10.234.250.1".parse()?,fingerprint:a.fingerprint().into(),instance:"a-instance".into()};
@@ -115,12 +115,12 @@ async fn exercise(revoke: bool, parallel: usize, withdraw:bool) -> Result<()> {
 #[tokio::test]
 async fn autonomous_cross_pool_native_syn_dispatches_authenticated_duplex_without_manual_flow_open(
 ) -> Result<()> {
-    exercise(false, 1,false).await
+    exercise(false, 1, false).await
 }
 #[tokio::test]
 async fn autonomous_active_native_flow_api_pair_retirement_reaps_dispatch_and_prevents_raw_fallthrough(
 ) -> Result<()> {
-    exercise(true, 1,false).await
+    exercise(true, 1, false).await
 }
 
 #[tokio::test]
@@ -254,5 +254,5 @@ async fn shared_runtime_records_are_bounded_across_peers_and_raw_budget_pressure
 #[tokio::test]
 async fn autonomous_four_flows_survive_capability_withdrawal_while_new_cold_flows_are_declined(
 ) -> Result<()> {
-    exercise(false, 4,true).await
+    exercise(false, 4, true).await
 }

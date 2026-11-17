@@ -50,6 +50,8 @@ impl Node {
         let fingerprint = identity.fingerprint().to_owned();
         let (lookup, space, local) = (handle.clone(), workspace.clone(), own.clone());
         let current = Arc::new(move |peer: &str| {
+            // Eligibility only: never extends an original authority witness.
+            lookup.touch_peer(peer);
             LocalAuthority::capture(&lookup, &space, &local, peer)
                 .ok()
                 .map(Arc::new)
@@ -59,7 +61,7 @@ impl Node {
             lookup.request_peer(peer);
         });
         let (inner, runner) =
-            flow_runtime::Runtime::new(identity, current, request, events, cancel.clone())?;
+            flow_runtime::Runtime::new_requested(identity, current, request, events, cancel.clone())?;
         Ok((
             Self {
                 inner,

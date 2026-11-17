@@ -69,6 +69,7 @@ enum Command {
     },
 }
 struct Inner {
+    requested: bool,
     identity: Identity,
     current: Lookup,
     request: Request,
@@ -96,9 +97,29 @@ impl Runtime {
         events: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(Self, Background)> {
+        Self::new_protocol(identity, current, request, events, cancel, false)
+    }
+    pub(crate) fn new_requested(
+        identity: Identity,
+        current: Lookup,
+        request: Request,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(Self, Background)> {
+        Self::new_protocol(identity, current, request, events, cancel, true)
+    }
+    fn new_protocol(
+        identity: Identity,
+        current: Lookup,
+        request: Request,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+        requested: bool,
+    ) -> Result<(Self, Background)> {
         let (native, packets, runner) = tagged::stack()?;
         let (commands, input) = mpsc::channel(64);
         let runtime = Self(Arc::new(Inner {
+            requested,
             identity,
             current,
             request,
@@ -392,12 +413,13 @@ impl Runtime {
             Ok(record) => record,
             Err(_) => return Ok(Outcome::Busy),
         };
-        let receiver = match EndpointSlot::new(
+        let receiver = match EndpointSlot::new_protocol(
             &self.0.dispatch,
             key,
             self.current(peer),
             self.0.identity.clone(),
             record.cancel.clone(),
+            self.0.requested,
         ) {
             Ok(slot) => Arc::new(slot),
             Err(error) => {
@@ -564,12 +586,13 @@ async fn attach(
     key: Key,
     tasks: &mut tokio::task::JoinSet<Result<()>>,
 ) -> Result<Arc<EndpointSlot>> {
-    let mut slot = EndpointSlot::new(
+    let mut slot = EndpointSlot::new_protocol(
         &runtime.0.dispatch,
         key,
         runtime.current(&record.peer),
         runtime.0.identity.clone(),
         record.cancel.clone(),
+        runtime.0.requested,
     )?;
     let packets = slot.take_packets()?;
     let slot = Arc::new(slot);

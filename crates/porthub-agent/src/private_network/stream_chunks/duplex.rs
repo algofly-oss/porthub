@@ -35,17 +35,15 @@ impl Duplex {
         let outgoing = async {
             loop {
                 let h = source.send_next().await?;
-                if &h[..4] == b"PHF2" {
+                if &h[..4] == b"PHF2" || &h[..4] == b"PHF3" {
                     return Ok::<_, anyhow::Error>(());
                 }
             }
         };
         let incoming = async {
             loop {
-                let original = admission()
-                    .ok_or_else(|| anyhow::anyhow!("duplex receiver original unavailable"))?;
-                let h = receiver.receive(original).await?;
-                if &h[..4] == b"PHF2" {
+                let h = receiver.receive_next(admission.clone()).await?;
+                if &h[..4] == b"PHF2" || &h[..4] == b"PHF3" {
                     return Ok::<_, anyhow::Error>(());
                 }
             }

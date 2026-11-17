@@ -79,15 +79,12 @@ async fn events(
     while tasks.join_next().await.is_some() {}
     result
 }
-#[tokio::test]
-#[ignore = "requires one isolated MongoDB via PORTHUB_TEST_MONGO_URI; no native OS operations"]
-async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_application_duplex(
-) -> Result<()> {
+async fn exercise(idle:bool,missed:bool)->Result<()> {
     let case = Case::new(Config::default()).await?;
     let stop = CancellationToken::new();
     let _guard = stop.clone().drop_guard();
     let mut tasks = JoinSet::new();
-    let result=timeout(Duration::from_secs(45),async {
+    let result=timeout(Duration::from_secs(if idle{90}else{45}),async {
         let(owner,_)=case.user("sparse-runtime@test.invalid","user").await?;
         let mut ids=Vec::new();let mut machines=Vec::new();let mut peers=Vec::new();
         for i in 0..4097u32 {
@@ -103,7 +100,7 @@ async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_a
         case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
         case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,"rules":[{"id":"runtime443","name":"Exact native runtime service","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"tcp","ports":"443","bidirectional":false,"enabled":true}]}).await?;
         case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.234.0.0/19","additional_cidrs":["10.235.0.0/19"],"dns_suffix":"phub"}).await?;
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;let router=case.router.clone();let done=stop.clone();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;let router=case.router.clone();let http_stop=stop.child_token();let done=http_stop.clone();
         tasks.spawn(async move{axum::serve(listener,router).with_graceful_shutdown(done.cancelled_owned()).await.map_err(Into::into)});
         let (ha,ca)=sparse::channel();let(hb,cb)=sparse::channel();let a_identity=Identity::new()?;let b_identity=Identity::new()?;
         let(aid,aip)=ids[0].clone();let(bid,bip)=ids[4096].clone();
@@ -137,6 +134,49 @@ async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_a
 
         let started=std::time::Instant::now();let flow=tcp_stream::Flow{source:std::net::SocketAddrV4::new(aip,42000),destination:std::net::SocketAddrV4::new(bip,443)};
         let client=tokio::spawn(async move{ka.connect(flow).await});let mut server=apps.recv().await.ok_or_else(||anyhow::anyhow!("service never received authenticated native SYN"))?;let mut client=client.await??;
+        if missed {
+            let lost=std::time::Instant::now();http_stop.cancel();
+            timeout(Duration::from_secs(20),async {
+                while a.node.counts()!=(0,0)||b.node.counts()!=(0,0) {tokio::time::sleep(Duration::from_millis(20)).await;}
+            }).await?;
+            ensure!(!a.policy.lock().await.valid_lease()||ha.peers().is_empty(),"source retained usable authority without HTTP renewal");
+            ensure!(!b.policy.lock().await.valid_lease()||hb.peers().is_empty(),"destination retained usable authority without HTTP renewal");
+            // A normal OS application socket may retain its own TCP retry state;
+            // owner retirement must stop forwarding, not forge an authorized RST.
+            // Attempt new application DATA after expiry and reject any delivery.
+            let _=client.write_all(&[0xd1]).await;
+            let mut one=[0;1];
+            let application_closed=match timeout(Duration::from_secs(2),server.read(&mut one)).await {
+                Ok(Ok(0))|Ok(Err(_))=>true,Err(_)=>false,
+                Ok(Ok(_))=>anyhow::bail!("application DATA crossed expired HTTP authority"),
+            };
+            ensure!(a.node.counts()==(0,0)&&b.node.counts()==(0,0),"missed renewal resurrected optimized owners");
+            println!("actual_http_renewal_lost_retirement_ms={} post_expiry_data_delivered=false application_closed={application_closed}",lost.elapsed().as_millis());
+            return Ok::<_,anyhow::Error>((a,b));
+        }
+        if idle {
+            tokio::time::sleep(Duration::from_secs(35)).await;
+            let current=a.policy.lock().await.valid_lease()&&b.policy.lock().await.valid_lease()&&ha.peers().len()==1&&hb.peers().len()==1;
+            println!("natural_idle_ms=35000 real_http_base_and_pair_current={} source_dispatch={:?} destination_dispatch={:?}",current,a.node.counts(),b.node.counts());
+            ensure!(current,"actual HTTP renewal did not retain current base/pair authority");
+            ensure!(a.node.counts()==(1,2)&&b.node.counts()==(1,2),"fresh HTTP renewal did not preserve an idle native connection across two lease windows");
+        }
+        if idle {
+            let sustained=tokio::time::Instant::now();
+            for index in 0..35u8 {
+                let request=[index;512];let response=[index.wrapping_add(91);512];
+                let (left,right)=tokio::join!(async {
+                    client.write_all(&request).await?;let mut got=[0;512];client.read_exact(&mut got).await?;
+                    ensure!(got==response,"sustained response crossed sequence/authority");Ok::<_,anyhow::Error>(())
+                },async {
+                    server.write_all(&response).await?;let mut got=[0;512];server.read_exact(&mut got).await?;
+                    ensure!(got==request,"sustained request crossed sequence/authority");Ok::<_,anyhow::Error>(())
+                });left?;right?;
+                tokio::time::sleep_until(sustained+Duration::from_secs(u64::from(index)+1)).await;
+            }
+            ensure!(a.node.counts()==(1,2)&&b.node.counts()==(1,2),"renewed sustained duplex lost its native owners");
+            println!("sustained_duplex_ms={} rounds=35 bytes_each_direction=17920",sustained.elapsed().as_millis());
+        }
         let request=vec![0x35;8192*2+193];let answer=vec![0x79;8192*2+77];let expected=request.clone();let reply=answer.clone();
         let service=tokio::spawn(async move{let mut bytes=Vec::new();server.read_to_end(&mut bytes).await?;ensure!(bytes==expected,"API-authorized request mismatch");server.write_all(&reply).await?;server.shutdown().await?;Ok::<_,anyhow::Error>(())});
         client.write_all(&request).await?;client.shutdown().await?;let mut bytes=Vec::new();client.read_to_end(&mut bytes).await?;ensure!(bytes==answer,"API-authorized response mismatch");service.await??;
@@ -172,3 +212,14 @@ async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_a
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB; portable stacks only"]
+async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_application_duplex()->Result<()>{exercise(false,false).await}
+#[tokio::test]
+#[ignore="requires isolated MongoDB; natural >2-lease-period idle regression, portable stacks only"]
+async fn real_http_authority_renewal_preserves_native_idle_then_data_across_two_lease_windows()->Result<()>{exercise(true,false).await}
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB; actual HTTP shutdown must expire native consumers"]
+async fn real_http_missed_renewal_retires_established_native_connection()->Result<()>{exercise(false,true).await}

@@ -44,6 +44,7 @@ const MAX_CONNECTIONS: usize = 512;
 const MAX_CONNECTIONS_PER_PEER: usize = 8;
 const ALPN: &[u8] = b"porthub-private-stream/1";
 const ORIGIN_ALPN: &[u8] = b"porthub-private-stream/2-origin";
+const REQUESTED_ALPN:&[u8]=b"porthub-private-stream/3-credit";
 const PARALLEL_ALPN: &[u8] = b"porthub-private-stream/1-lanes8";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -358,7 +359,7 @@ impl ClientCertVerifier for Verifier {
         self.algorithms.supported_schemes()
     }
 }
-fn transport(idle_timeout: Option<Duration>,credited:bool,bounded_source:bool) -> Result<Arc<quinn::TransportConfig>> {
+fn transport(idle_timeout: Option<Duration>,credited:bool,bounded_source:bool,requested:bool) -> Result<Arc<quinn::TransportConfig>> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_uni_streams(0u8.into())
@@ -380,6 +381,7 @@ fn transport(idle_timeout: Option<Duration>,credited:bool,bounded_source:bool) -
     } else if bounded_source {
         config.max_concurrent_bidi_streams(0u8.into()).stream_receive_window(96u32.into()).receive_window(96u32.into()).send_window(8288);
     }
+    if credited||bounded_source {config.datagram_receive_buffer_size(if requested{Some(8*96)}else{None}).datagram_send_buffer_size(if requested{8*96}else{0});}
     if let Some(timeout) = idle_timeout {
         config.max_idle_timeout(Some(timeout.try_into()?));
     }
@@ -399,8 +401,19 @@ impl FencedConnection {
 
 /// Sealed outgoing guarded profile: no raw Connection/window mutation escape.
 #[derive(Clone)]
-pub struct BoundedSourceConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr}
+pub struct BoundedSourceConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr,requested:bool}
 impl BoundedSourceConnection {
+    pub fn requested_credit(&self)->bool{self.requested}
+    /// One bounded datagram control exchange. No stream/window escape hatch.
+    /// Caller retains its immutable pending-chunk generation fence throughout.
+    pub async fn request_credit(&self,request:&[u8;96],original:&crate::udp::SendPermit)->Result<[u8;16]>{
+        ensure!(self.requested&&&request[..4]==b"PHQ3"&&original.remaining().is_some(),"invalid requested-credit source scope");
+        let mut expected=*request;expected[..4].copy_from_slice(b"PHG3");let request=Bytes::copy_from_slice(request);
+        Ok(original.during(async {let mut retry=tokio::time::interval(Duration::from_millis(100));loop{tokio::select!{
+            _=retry.tick()=>{self.connection.send_datagram_wait(request.clone()).await?;},
+            packet=self.connection.read_datagram()=>{let packet=packet?;ensure!(packet.len()==96&&&packet[..4]==b"PHG3","invalid credit grant envelope");if packet[20..96]==expected[20..96]{let nonce:[u8;16]=packet[4..20].try_into()?;ensure!(nonce!=[0;16],"zero receiver credit nonce");return Ok::<_,anyhow::Error>(nonce);}tokio::task::yield_now().await;}
+        }}}).await??)
+    }
     pub fn peer(&self)->&Peer{&self.peer}
     pub fn local_ip(&self)->Ipv4Addr{self.local}
     pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
@@ -415,7 +428,7 @@ impl BoundedSourceConnection {
 
 /// A credited receiver has no public raw Quinn Connection escape hatch. Only
 /// this owned, non-Clone wrapper can advertise its one incoming stream.
-pub struct CreditedReceiverConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr}
+pub struct CreditedReceiverConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr,requested:bool}
 #[derive(Clone)]
 pub struct ReceiverCloser(Connection);
 impl ReceiverCloser {pub fn close(&self){self.0.close(1u8.into(),b"RX generation retired");} pub async fn closed(&self){self.0.closed().await;}}
@@ -423,6 +436,22 @@ struct AcceptCreditAttempt {closer:ReceiverCloser,armed:bool}
 impl Drop for AcceptCreditAttempt{fn drop(&mut self){if self.armed{self.closer.close();}}}
 impl Drop for CreditedReceiverConnection{fn drop(&mut self){self.connection.close(1u8.into(),b"RX owner stopped");}}
 impl CreditedReceiverConnection {
+    pub fn requested_credit(&self)->bool{self.requested}
+    pub async fn next_credit_request(&self)->Result<[u8;96]>{
+        ensure!(self.requested,"not a requested-credit receiver");let packet=self.connection.read_datagram().await?;
+        ensure!(packet.len()==96&&&packet[..4]==b"PHQ3","invalid credit request envelope");Ok(packet.as_ref().try_into()?)
+    }
+    /// Repeated requests resend only the SAME grant under the SAME original.
+    /// They never refresh the receiver's pre-advertisement witness.
+    pub async fn accept_requested(&mut self,original:&crate::udp::SendPermit,request:&[u8;96],grant:&[u8;96])->Result<(SendStream,RecvStream)>{
+        ensure!(self.requested,"not a requested-credit receiver");let connection=self.connection.clone();let expected=*request;let grant=*grant;ensure!(&grant[..4]==b"PHG3"&&grant[20..96]==expected[20..96]&&grant[4..20]!=[0;16],"invalid receiver-chosen grant");
+        original.during(connection.send_datagram_wait(Bytes::copy_from_slice(&grant))).await??;
+        let accept=self.accept_one(original);tokio::pin!(accept);
+        loop{tokio::select!{
+            accepted=&mut accept=>return accepted,
+            packet=connection.read_datagram()=>{let packet=packet?;ensure!(packet.len()==96&&&packet[..4]==b"PHQ3","invalid duplicate credit request");if packet.as_ref()==expected{original.during(connection.send_datagram_wait(Bytes::copy_from_slice(&grant))).await??;}tokio::task::yield_now().await;}
+        }}
+    }
     pub fn peer(&self)->&Peer{&self.peer}
     pub fn local_ip(&self)->Ipv4Addr{self.local}
     pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
@@ -471,6 +500,8 @@ impl Endpoint {
     pub fn new_fenced_source(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
         Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),ORIGIN_QUEUE,false,true)
     }
+    pub fn new_requested_source(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{Self::with_protocols_profile(identity,local,vec![REQUESTED_ALPN.into()],Some(generation),ORIGIN_QUEUE,false,true)}
+    pub fn new_requested_receiver(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{Self::with_protocols_profile(identity,local,vec![REQUESTED_ALPN.into()],Some(generation),ORIGIN_QUEUE,true,false)}
     fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
     fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
     fn with_protocols_fenced_capacity(
@@ -502,7 +533,7 @@ impl Endpoint {
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
         ));
-        server.transport = transport(None,credited,bounded_source)?;
+        server.transport = transport(None,credited,bounded_source,protocols.iter().any(|p|p.as_slice()==REQUESTED_ALPN))?;
         let (input, incoming) = mpsc::channel(if credited||bounded_source{capacity}else{QUEUE});
         let (outgoing, output) = mpsc::channel(capacity);
         #[cfg(test)] let blocked_sends=Arc::new(AtomicUsize::new(0));
@@ -727,7 +758,7 @@ impl Endpoint {
     pub async fn connect_source(&self,peer:&Peer)->Result<BoundedSourceConnection>{
         ensure!(self.bounded_source,"endpoint has no bounded source profile");
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("source generation absent"))?;
-        let connection=self.connect_inner(peer).await?;Ok(BoundedSourceConnection{connection,generation,peer:peer.clone(),local:self.local})
+        let connection=self.connect_inner(peer).await?;Ok(BoundedSourceConnection{connection,generation,peer:peer.clone(),local:self.local,requested:self.protocols.iter().any(|p|p.as_slice()==REQUESTED_ALPN)})
     }
     pub async fn connect_fenced(&self,peer:&Peer)->Result<FencedConnection> {
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("connection has no immutable socket-generation fence"))?;
@@ -814,7 +845,7 @@ impl Endpoint {
         let mut config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(tls)?,
         ));
-        config.transport_config(transport(idle_timeout,self.credited,self.bounded_source)?);
+        config.transport_config(transport(idle_timeout,self.credited,self.bounded_source,self.protocols.iter().any(|p|p.as_slice()==REQUESTED_ALPN))?);
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             self.inner.connect_with(
@@ -835,7 +866,7 @@ impl Endpoint {
     pub async fn accept_credited(&self)->Result<CreditedReceiverConnection>{
         ensure!(self.credited,"endpoint has no credited receiver profile");
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("receiver generation absent"))?;
-        let (peer,connection)=self.accept_inner().await?;Ok(CreditedReceiverConnection{connection,generation,peer,local:self.local})
+        let (peer,connection)=self.accept_inner().await?;Ok(CreditedReceiverConnection{connection,generation,peer,local:self.local,requested:self.protocols.iter().any(|p|p.as_slice()==REQUESTED_ALPN)})
     }
     pub async fn accept(&self) -> Result<(Peer, quinn::Connection)> {
         ensure!(!self.credited&&!self.bounded_source,"guarded profile requires owned connection wrapper");

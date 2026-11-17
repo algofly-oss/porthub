@@ -685,7 +685,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             if let Some(flows)=&guarded_flows {
                                 // Withdrawal stops cold allocation, not an existing
                                 // pinned flow whose current ACL/identity still match.
-                                let allow_new=sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic2-origin");
+                                let allow_new=sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic3-credit");
                                 let _=flows.receive_offered(&peer,envelope.source,envelope.payload,allow_new);
                             }
                             continue;
@@ -854,7 +854,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(all(feature="private-sparse",feature="private-stream"))]
                 if sparse_handle.enabled() {
                     if let Some(flows)=&guarded_flows {
-                        let negotiated=sparse_handle.by_id(peer).is_some_and(|p|p.stream_transport=="quic2-origin");
+                        let negotiated=sparse_handle.by_id(peer).is_some_and(|p|p.stream_transport=="quic3-credit");
                         let prefer_stream=negotiated&&(!prefer_peer || direct.is_none_or(|session|session.is_relay()));
                         if flows.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
                     }
