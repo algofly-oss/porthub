@@ -31,6 +31,8 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
     for row in rows {let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());found.push((String::from_utf16(&row.Alias[..end])?,guid_hex(&row.InterfaceGuid),row.InterfaceIndex,row.Mtu));}
     Ok(found)
 }
+#[cfg(test)]
+pub(super) fn fixture_adapter_exists(guid:&str)->Result<bool>{Ok(adapters()?.iter().any(|(_,present,_,_)|present==guid))}
 pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
 impl Ownership {
     fn verify(&self,index:u32,device:&tun_rs::AsyncDevice,native:&[Route])->Result<()>{

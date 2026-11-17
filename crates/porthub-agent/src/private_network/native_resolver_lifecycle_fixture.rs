@@ -106,19 +106,27 @@ async fn linux_real_resolver_suffix_replace_and_native_owner_teardown() -> Resul
     let remote = Ipv4Addr::new(10, 254, 254, 2);
     let suffix = format!("s{nonce}.phub");
     let next = format!("t{nonce}.phub");
+    let restarted_suffix = format!("u{nonce}.phub");
     let cancel = CancellationToken::new();
     let mut registration = None;
     let mut owner = None;
     let mut reader = None;
     let netlink = nlink::netlink::Connection::<nlink::netlink::Route>::new()?;
     let result=timeout(Duration::from_secs(30),async {
-        let tun=Arc::new(Tun::open(&name,own,&[remote]).await?);owner=Some(tun.clone());
+        let mut tun=Arc::new(Tun::open(&name,own,&[remote]).await?);owner=Some(tun.clone());
         let server=dns::Server::bind(own).await?;let port=server.port()?;let zone=server.zone.clone();
         zone.write().await.update(&snapshot(own,remote,&suffix)?)?;reader=Some(tokio::spawn(server.serve(cancel.child_token())));
         dns::replace_registration(&mut registration,&root.join("profile.json"),tun.index,own,port,&[suffix.clone()]).await?;
         let answer=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{suffix}"),443))).await??;ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"application resolver bypassed new private namespace");
         zone.write().await.update(&snapshot(own,remote,&next)?)?;dns::replace_registration(&mut registration,&root.join("profile.json"),tun.index,own,port,&[next.clone()]).await?;
         let answer=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{next}"),443))).await??;ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"application resolver missed replaced private namespace");
+        dns::shutdown_registration(&mut registration).await?;
+        drop(owner.take());drop(tun);
+        timeout(Duration::from_secs(5),async{while netlink.get_link_by_name(&name).await?.is_some(){tokio::time::sleep(Duration::from_millis(25)).await;}Ok::<_,anyhow::Error>(())}).await??;
+        tun=Arc::new(Tun::open(&name,own,&[remote]).await?);owner=Some(tun.clone());
+        zone.write().await.update(&snapshot(own,remote,&restarted_suffix)?)?;
+        dns::replace_registration(&mut registration,&root.join("profile.json"),tun.index,own,port,&[restarted_suffix.clone()]).await?;
+        let answer=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{restarted_suffix}"),443))).await??;ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"resolver did not rebind to restarted native link");
         let socket=tokio::net::UdpSocket::bind((own,0)).await?;socket.connect((remote,9000)).await?;let endpoint=socket.local_addr()?;
         let stopped=cancel.child_token();let stop=stopped.clone();let task=tokio::spawn(async move{stopped.cancelled().await;drop(socket);});stop.cancel();timeout(Duration::from_secs(2),task).await??;
         drop(tokio::net::UdpSocket::bind(endpoint).await?);
@@ -131,7 +139,7 @@ async fn linux_real_resolver_suffix_replace_and_native_owner_teardown() -> Resul
         use tokio::io::AsyncReadExt;let mut byte=[0;1];
         ensure!(timeout(Duration::from_secs(2),accepted.read(&mut byte)).await??==0,"fixture-owned native TCP socket did not close");
         drop(accepted);drop(listener);
-        println!("actual_system_resolved_initial=true actual_system_resolved_replaced=true owned_connected_fixture_socket_reaped=true owned_tcp_closed=true");Ok::<_,anyhow::Error>(())
+        println!("actual_system_resolved_initial=true actual_system_resolved_replaced=true same_profile_native_restart=true owned_connected_fixture_socket_reaped=true owned_tcp_closed=true");Ok::<_,anyhow::Error>(())
     }).await;
     cancel.cancel();
     let dns_cleanup = dns::shutdown_registration(&mut registration).await;

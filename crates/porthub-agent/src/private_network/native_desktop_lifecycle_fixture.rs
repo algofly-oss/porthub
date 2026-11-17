@@ -164,8 +164,9 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     let remote = Ipv4Addr::new(10, 254, 254, 2);
     let suffix = format!("s{}.phub", spec.nonce);
     let next_suffix = format!("t{}.phub", spec.nonce);
+    let restart_suffix = format!("u{}.phub", spec.nonce);
     #[cfg(target_os = "macos")]
-    for s in [&suffix, &next_suffix] {
+    for s in [&suffix, &next_suffix, &restart_suffix] {
         ensure!(
             !Path::new("/etc/resolver").join(s).exists(),
             "foreign resolver already uses fixture suffix"
@@ -181,7 +182,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     let mut indices = Vec::new();
     let mut source_name = String::new();
     let result=timeout(Duration::from_secs(45),async {
-        let tun=Arc::new(open(&spec,0,own).await?);source_name=tun.name.clone();indices.push(tun.index);source=Some(tun.clone());
+        let mut tun=Arc::new(open(&spec,0,own).await?);source_name=tun.name.clone();indices.push(tun.index);source=Some(tun.clone());
         let pools=["10.254.253.0/24".parse()?,"10.254.254.0/24".parse()?];
         let audit=tun.reconcile_sparse(&pools,&[remote]).await?;
         ensure!(audit.capture.accepted.len()==2&&audit.capture.conflicting.is_empty()&&audit.accepted_peers==vec![remote],"native prefixes/peer were not admitted");
@@ -197,6 +198,29 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[next_suffix.clone()]).await?;
         let answer=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{next_suffix}"),443))).await??;
         ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"dynamic custom suffix not registered with actual OS resolver");
+        // Normal same-profile restart must reuse only its protected intent,
+        // after the previous native owner actually disappears. Open exactly
+        // once; no retry/adoption if a foreign replacement appears.
+        dns::shutdown_registration(&mut registration).await?;
+        let previous_index=tun.index;
+        #[cfg(windows)]let previous_guid=super::device::adapter_guid(previous_index)?;
+        #[cfg(target_os="macos")]let previous_name=std::ffi::CString::new(tun.name.as_bytes())?;
+        drop(source.take());drop(tun);
+        timeout(Duration::from_secs(5),async {
+            loop {
+                #[cfg(windows)]let present=super::device::fixture_adapter_exists(&previous_guid)?;
+                #[cfg(target_os="macos")]let present=unsafe{libc::if_nametoindex(previous_name.as_ptr())}==previous_index;
+                if !present{break;}
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }Ok::<_,anyhow::Error>(())
+        }).await??;
+        tun=Arc::new(open(&spec,0,own).await?);indices.push(tun.index);source=Some(tun.clone());
+        let restarted=tun.reconcile_sparse(&pools,&[remote]).await?;
+        ensure!(restarted.capture.accepted.len()==2&&restarted.accepted_peers==vec![remote],"same-profile restart lost native capture ownership");
+        zone.write().await.update(&snapshot(own,remote,&restart_suffix)?)?;
+        dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[restart_suffix.clone()]).await?;
+        let answer=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{restart_suffix}"),443))).await??;
+        ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"actual resolver did not rebind to restarted native owner");
         // Own a real connected native socket in an explicit task, then prove its
         // cancellation releases the exact endpoint. No unrelated app is closed.
         let socket=tokio::net::UdpSocket::bind((own,0)).await?;socket.connect((remote,9000)).await?;let endpoint=socket.local_addr()?;
@@ -219,7 +243,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         use tokio::io::AsyncReadExt;let mut byte=[0;1];
         ensure!(timeout(Duration::from_secs(2),accepted.read(&mut byte)).await??==0,"fixture-owned native TCP socket did not close");
         drop(accepted);drop(listener);
-        println!("native_aggregate_capture=true actual_system_dns=true dynamic_suffix=true foreign_collision_withdrawal=true connected_fixture_socket_closed=true owned_tcp_closed=true");
+        println!("native_aggregate_capture=true actual_system_dns=true dynamic_suffix=true same_profile_native_restart=true foreign_collision_withdrawal=true connected_fixture_socket_closed=true owned_tcp_closed=true");
         Ok::<_,anyhow::Error>(())
     }).await;
     // Independent native cleanup executes after body error/timeout as well.
@@ -275,7 +299,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     })
     .await;
     #[cfg(target_os = "macos")]
-    let resolver_absent = [&suffix, &next_suffix]
+    let resolver_absent = [&suffix, &next_suffix, &restart_suffix]
         .iter()
         .all(|s| !Path::new("/etc/resolver").join(s).exists());
     #[cfg(windows)]
