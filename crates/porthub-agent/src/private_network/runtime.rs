@@ -881,7 +881,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             Some(porthub_network::policy::ExitChoice::LocalTor) if local_tor.as_ref().is_some_and(|tor|tor.ready())=>Some(super::tor_exit::LOCAL_TOR.into()),
                             _=>None,
                         };
-                        exit_selection.select_for_peer(flow,now,parsed.flow_ttl(),syn,peer.as_deref()).map(str::to_owned)
+                        let assigned=exit_selection.select_for_peer(flow,now,parsed.flow_ttl(),syn,peer.as_deref()).map(str::to_owned);
+                        if assigned.is_some(){sparse_handle.exit_picker().committed(&intent.id,&tag);}
+                        assigned
                     }
                 }
                 else if parsed.destination().is_private() {

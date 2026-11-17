@@ -426,6 +426,10 @@ pub(crate) async fn run_watched_sparse_owned(
                 preferred = 0;
             }
             Err(crate::control::Failure::Rejected(401 | 403)) => {if let Some(resolver)=&sparse{resolver.handle().revoke_all();}cancel.cancel();anyhow::bail!("private gateway rejected this enrollment");},
+            Err(crate::control::Failure::Rejected(400)) => {
+                #[cfg(feature="private-sparse")]
+                if let (Some(resolver),Some(sent))=(&sparse,&sent_exit_pick){resolver.handle().exit_picker().rejected(sent);}
+            },
             Err(_) => {}
         }
         if let Some(mut reply) = reply {

@@ -24,6 +24,7 @@ struct State {
     ordinal: u64,
     carriers: Option<(Instant, bool, bool)>,
     entries: BTreeMap<(String, String, bool), Entry>,
+    active: Option<(String, String, bool)>,
 }
 struct Entry {
     request: ExitPickRequest,
@@ -52,6 +53,7 @@ impl Handle {
             });
         if scope != state.scope {
             state.entries.clear();
+            state.active = None;
             state.ordinal = 0;
             state.carriers = None;
             state.scope = scope;
@@ -75,6 +77,7 @@ impl Handle {
     pub(crate) fn revoke(&self) {
         let mut state = self.0.lock().unwrap();
         state.scope = None;
+        state.active = None;
         state.routes.clear();
         state.entries.clear();
         state.carriers = None;
@@ -170,11 +173,31 @@ impl Handle {
         state
             .entries
             .retain(|_, entry| now.duration_since(entry.used) < IDLE);
-        let entry = state
-            .entries
-            .values_mut()
-            .filter(|entry| entry.choice.is_none() && entry.retry <= now)
-            .min_by_key(|entry| entry.retry)?;
+        // The server deliberately keeps one cursor slot per source. Never
+        // interleave another cold flow while this fold owns that slot.
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|key| !state.entries.contains_key(key))
+        {
+            state.active = None;
+        }
+        let key = if let Some(key) = &state.active {
+            key.clone()
+        } else {
+            let key = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.choice.is_none() && entry.retry <= now)
+                .min_by_key(|(_, entry)| entry.retry)
+                .map(|(key, _)| key.clone())?;
+            state.active = Some(key.clone());
+            key
+        };
+        let entry = state.entries.get_mut(&key)?;
+        if entry.retry > now {
+            return None;
+        }
         if !entry.started {
             entry.request.local_tor_ready = local_tor_ready;
             entry.request.available_peers = available_peers;
@@ -230,7 +253,35 @@ impl Handle {
                 entry.retry = now + RETRY;
             }
         }
+        if response.status != ExitPickStatus::Pending {
+            state.active = None;
+        }
         Ok(())
+    }
+    /// A definitive cursor rejection discards only this fold; unrelated
+    /// queued flows and any installed NAT assignments remain untouched.
+    pub(crate) fn rejected(&self, sent: &ExitPickRequest) {
+        let mut state = self.0.lock().unwrap();
+        let key = (sent.route_id.clone(), sent.flow_id.clone(), sent.warmup);
+        if let Some(entry) = state.entries.get_mut(&key) {
+            if serde_json::to_vec(&entry.request).ok() != serde_json::to_vec(sent).ok() {
+                return;
+            }
+            entry.request.cursor = None;
+            entry.started = false;
+            entry.retry = Instant::now() + RETRY;
+            if state.active.as_ref() == Some(&key) {
+                state.active = None;
+            }
+        }
+    }
+    pub(crate) fn committed(&self, route: &str, flow: &str) {
+        let mut state = self.0.lock().unwrap();
+        let key = (route.into(), flow.into(), false);
+        state.entries.remove(&key);
+        if state.active.as_ref() == Some(&key) {
+            state.active = None;
+        }
     }
 }
 
@@ -290,6 +341,57 @@ mod tests {
         handle.0.lock().unwrap().carriers =
             Some((Instant::now() - Duration::from_secs(4), true, true));
         assert_eq!(handle.carriers(), (false, false));
+    }
+    #[test]
+    fn one_server_cursor_is_not_overwritten_by_another_flow_and_commits_free_capacity() {
+        let handle = Handle::default();
+        handle.observe(&base());
+        let dst = "1.1.1.1".parse().unwrap();
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        handle.request("route", &first, dst, false);
+        let request = handle.next(true, None).unwrap();
+        handle.request("route", &second, dst, false);
+        assert!(
+            handle.next(true, None).is_none(),
+            "pending HTTP retry must retain the single source slot"
+        );
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        handle
+            .accept(
+                &request,
+                reply(&request, ExitPickStatus::Pending),
+                authority(clock.clone()),
+            )
+            .unwrap();
+        let continuation = handle.next(true, None).unwrap();
+        assert_eq!(continuation.flow_id, first);
+        handle.rejected(&continuation);
+        let other = handle.next(true, None).unwrap();
+        assert_eq!(other.flow_id, second);
+        handle
+            .accept(
+                &other,
+                reply(&other, ExitPickStatus::Ready),
+                authority(clock),
+            )
+            .unwrap();
+        assert_eq!(
+            handle.request("route", &second, dst, false),
+            Some(ExitChoice::LocalTor)
+        );
+        handle.committed("route", &second);
+        let state = handle.0.lock().unwrap();
+        assert_eq!(state.entries.len(), 1);
+        assert!(state.active.is_none());
+        assert!(state
+            .entries
+            .values()
+            .next()
+            .unwrap()
+            .request
+            .cursor
+            .is_none());
     }
     #[test]
     fn selection_is_bounded_and_warmup_does_not_consume_flow_ordinals() {
