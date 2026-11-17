@@ -31,8 +31,8 @@ export default function Boards({active=true}) {
       <div className="flex shrink-0 gap-2"><Button variant="secondary" size="icon" aria-label="Refresh boards" disabled={loading} onClick={load}><IconRefresh size={17} className={loading?"animate-spin":""}/></Button><Button onClick={createBoard}><IconPlus size={17}/>New board</Button></div>
     </div>
     {error&&<p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
-    <div aria-busy={loading} className={`rounded-xl border border-border bg-surface ${boards.length?"min-h-0 flex-1 overflow-auto":"shrink-0"}`}>
-      {!boards.length?<section aria-labelledby="boards-empty-title" className="flex min-h-[280px] flex-col items-center justify-center px-6 py-10 text-center sm:min-h-[320px]">
+    <div aria-busy={loading} className={`rounded-xl border border-border bg-surface min-h-0 flex-1 overflow-auto`}>
+      {!boards.length?<section aria-labelledby="boards-empty-title" className="flex h-full min-h-[280px] flex-col items-center justify-center px-6 py-10 text-center sm:min-h-[320px]">
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-control text-muted-foreground">{loading?<IconRefresh size={26} className="animate-spin" aria-hidden="true"/>:<IconLayoutBoard size={28} aria-hidden="true"/>}</div>
         <h2 id="boards-empty-title" className="mt-4 text-base font-semibold">{loading?"Loading boards…":error?"Boards unavailable":query?"No matching boards.":"No boards yet"}</h2>
         {!loading&&!error&&!query&&<p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">Create a board, then share a link to draw together.</p>}
