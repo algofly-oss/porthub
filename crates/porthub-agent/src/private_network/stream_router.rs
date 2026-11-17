@@ -731,7 +731,7 @@ fn spawn_reader(
   let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
   let witness=||super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap();
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
-  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone(),exit:None};
   let(handle,_)=super::super::sparse::channel();let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};
   handle.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
   handle.installed_authority(&query,lease,super::super::authority_event::Authority::new((),Some(witness()),pair.expires_at));
@@ -746,7 +746,7 @@ fn spawn_reader(
  #[cfg(feature="private-sparse")]
  #[tokio::test]async fn real_kernel_syn_with_valid_sparse_acl_retains_guarded_packet_fallback(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);
-  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone(),exit:None};
   let mut policy=porthub_network::policy::Engine::default();policy.apply(base.clone()).unwrap();policy.install_pair(lease).unwrap();
   let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
   router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_secs(10))]).unwrap();

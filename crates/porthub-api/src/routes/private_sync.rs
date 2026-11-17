@@ -593,7 +593,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
             let remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
-            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl:Some(acl)};
+            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl:Some(acl),exit:None};
             let value=json!({"query":query,"status":"allowed","lease":lease});
             if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384
                 || !app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),generation:None}) {

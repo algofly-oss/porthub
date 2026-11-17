@@ -30,6 +30,26 @@ pub struct SparseInfo {
     pub capture_pools: Vec<porthub_mesh::lan_routes::Network>,
 }
 
+/// Separately negotiated exact exit authority. It never grants ordinary private
+/// ports, chooses an exit, or enables local Tor/direct fallback by itself.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExitPair {
+    pub route_id: String,
+    pub client: String,
+    pub router: String,
+    pub traffic_mode: porthub_mesh::exit_policy::TrafficMode,
+}
+impl ExitPair {
+    fn route(&self,local:&str,remote:&str)->Result<ExitRoute> {
+        ensure!(!self.route_id.is_empty()&&self.route_id.len()<=60
+            && ((self.client==local&&self.router==remote)||(self.client==remote&&self.router==local))
+            && local!=remote,"exit pair authority includes another identity");
+        Ok(ExitRoute { id:self.route_id.clone(),name:self.route_id.clone(),routing_peers:vec![self.router.clone()],clients:vec![self.client.clone()],
+            tor_enabled:false,tor_circuit_groups:4,selection:Default::default(),traffic_mode:self.traffic_mode,
+            allow_direct_fallback:false,masquerade:true,block_lan_access:self.traffic_mode==porthub_mesh::exit_policy::TrafficMode::InternetOnly })
+    }
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairLease {
@@ -43,6 +63,8 @@ pub struct PairLease {
     pub local: PeerInfo,
     pub peer: PeerInfo,
     pub grants: Vec<Grant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<ExitPair>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl: Option<super::pair_acl::PairAcl>,
 }
@@ -170,6 +192,12 @@ impl Engine {
             ),
             "pair address collides with cached identity"
         );
+        if lease.exit.as_ref().is_some_and(|exit|exit.traffic_mode.lan()) {
+            ensure!(!sparse.capture_pools.is_empty()
+                && [&lease.local,&lease.peer].iter().all(|peer|sparse.capture_pools.iter().any(|pool|pool.contains(peer.ip))),
+                "LAN exit pair lacks complete overlay capture metadata");
+        }
+        let exit_routes=lease.exit.as_ref().map(|exit|exit.route(&lease.self_,&lease.peer.id)).transpose()?.into_iter().collect();
         if let Some(acl) = &lease.acl {
             ensure!(
                 lease.grants.is_empty(),
@@ -179,7 +207,7 @@ impl Engine {
         } else {
             ensure!(
                 lease.grants.len() <= 128
-                    && !lease.grants.is_empty()
+                    && (!lease.grants.is_empty() || lease.exit.is_some())
                     && lease.grants.iter().all(|g| g.ports.len() <= 64),
                 "pair grant count exceeds bounds or is denied"
             );
@@ -222,11 +250,12 @@ impl Engine {
             grants: lease.grants,
             pair_acl: lease.acl,
             dns_suffixes: vec![],
-            exit_routes: vec![],
+            exit_routes,
             dns_rules: vec![],
         };
         let mut engine = Box::<Engine>::default();
         engine.flow_budget = self.flow_budget.clone();
+        engine.exit_flow_budget = self.exit_flow_budget.clone();
         engine.apply(snapshot.clone())?;
         // The existing engine revalidates opening ACLs and retires flows on identity changes.
         // An unchanged lease renewal must preserve established TCP reverse-flow tracking.
@@ -247,7 +276,8 @@ impl Engine {
         let mut active = Vec::new();
         for (id, pair) in &mut self.pairs {
             pair.flows.retain(|_, flow| flow.expires > now);
-            if !pair.flows.is_empty() {
+            pair.exit_flows.retain(|_, flow| flow.expires > now);
+            if !pair.flows.is_empty() || !pair.exit_flows.is_empty() {
                 active.push(id.clone());
             }
         }
@@ -305,6 +335,7 @@ mod tests {
             expires_at: Utc::now() + chrono::Duration::seconds(5),
             revision: 1,
             acl: None,
+            exit: None,
             local: peer("a", "10.203.0.2"),
             peer: peer("b", "10.203.1.2"),
             grants: vec![Grant {
@@ -401,6 +432,58 @@ mod tests {
         assert!(e.pair_peer("b").is_some());
         e.revoke();
         assert!(e.pair_peer("b").is_none());
+    }
+    fn exit_base(epoch:&str)->Snapshot {
+        let mut snapshot=base(epoch);snapshot.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];snapshot
+    }
+    fn exit_pair(epoch:&str,local_client:bool)->PairLease {
+        let mut lease=pair(epoch);lease.grants.clear();
+        lease.exit=Some(ExitPair{route_id:"exit-route".into(),client:if local_client{"a"}else{"b"}.into(),router:if local_client{"b"}else{"a"}.into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly});lease
+    }
+    #[test]
+    fn exact_exit_pairs_authorize_both_roles_without_private_port_permissions() {
+        let epoch="a".repeat(64);
+        let old=serde_json::to_value(pair(&epoch)).unwrap();assert!(old.get("exit").is_none());
+        let decoded:PairLease=serde_json::from_value(old).unwrap();assert!(decoded.exit.is_none());
+        for local_client in [true,false] {
+            let mut e=Engine::default();e.apply(exit_base(&epoch)).unwrap();e.install_pair(exit_pair(&epoch,local_client)).unwrap();
+            let client=if local_client{"10.203.0.2"}else{"10.203.1.2"};
+            let request=udp(client,"8.8.8.8",15000,53);let reply=udp("8.8.8.8",client,53,15000);
+            assert!(!e.check_exit(&reply,"b",local_client),"unsolicited exit reply admitted");
+            assert!(e.check_exit(&request,"b",!local_client));assert!(e.check_exit(&reply,"b",local_client));
+            assert!(!e.check_exit(&request,"c",!local_client));
+            assert!(!e.check_exit(&udp("10.203.9.9","8.8.8.8",15000,53),"b",!local_client));
+            assert!(!e.check_exit(&udp(client,"192.168.1.1",15000,53),"b",!local_client));
+            assert!(!e.check(&udp("10.203.0.2","10.203.1.2",15000,53),"b",false),"exit authority widened private ports");
+            assert_eq!(e.active_pair_flows(),vec!["b"]);
+            e.revoke_pair("b");assert!(!e.check_exit(&reply,"b",local_client));
+        }
+    }
+    #[test]
+    fn exit_pair_identity_expiry_and_mode_replacement_are_independent_of_base_liveness() {
+        let epoch="a".repeat(64);let mut e=Engine::default();e.apply(exit_base(&epoch)).unwrap();
+        let mut invalid=exit_pair(&epoch,true);invalid.exit.as_mut().unwrap().router="c".into();assert!(e.install_pair(invalid).is_err());
+        let request=udp("10.203.0.2","8.8.8.8",15000,53);let reply=udp("8.8.8.8","10.203.0.2",53,15000);
+        e.install_pair(exit_pair(&epoch,true)).unwrap();assert!(e.check_exit(&request,"b",false));
+        let mut changed=exit_pair(&epoch,true);changed.exit.as_mut().unwrap().traffic_mode=porthub_mesh::exit_policy::TrafficMode::LanOnly;
+        let mut unknown=Engine::default();unknown.apply(base(&epoch)).unwrap();assert!(unknown.install_pair(changed.clone()).is_err());
+        e.install_pair(changed).unwrap();assert!(!e.check_exit(&reply,"b",true));
+        assert!(!e.check_exit(&udp("10.203.0.2","10.203.9.9",15000,53),"b",false),"LAN exit bypassed an uncached overlay identity");
+        assert!(e.check_exit(&udp("10.203.0.2","192.168.1.1",15000,53),"b",false));
+        e.pairs.get_mut("b").unwrap().deadline=Some(Instant::now()-Duration::from_secs(1));
+        assert!(!e.check_exit(&request,"b",false));assert!(e.valid_lease());assert!(e.active_pair_flows().is_empty());
+        e.install_pair(exit_pair(&epoch,true)).unwrap();assert!(e.check_exit(&request,"b",false));
+        e.apply(exit_base(&"b".repeat(64))).unwrap();assert!(!e.check_exit(&reply,"b",true));
+    }
+    #[test]
+    fn exit_pairs_share_the_existing_total_exit_flow_bound() {
+        let epoch="a".repeat(64);let mut e=Engine::default();e.apply(exit_base(&epoch)).unwrap();
+        e.exit_flow_budget=FlowBudget(std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+        e.install_pair(exit_pair(&epoch,true)).unwrap();
+        let mut c=exit_pair(&epoch,true);c.peer=peer("c","10.203.1.3");c.exit.as_mut().unwrap().router="c".into();e.install_pair(c).unwrap();
+        assert!(e.check_exit(&udp("10.203.0.2","8.8.8.8",15000,53),"b",false));
+        assert!(!e.check_exit(&udp("10.203.0.2","1.1.1.1",15001,53),"c",false));
+        e.revoke_pair("b");assert!(e.check_exit(&udp("10.203.0.2","1.1.1.1",15001,53),"c",false));
     }
     fn udp(source: &str, destination: &str, sport: u16, dport: u16) -> Vec<u8> {
         let mut b = vec![0u8; 28];

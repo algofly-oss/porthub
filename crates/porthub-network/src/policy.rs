@@ -2,7 +2,7 @@
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
 pub mod pair_acl;
 mod sparse;
-pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
+pub use sparse::{ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 /// Existing full-snapshot ceiling, including the mandatory local identity.
 pub const MAX_SNAPSHOT_PEERS: usize = 4096;
@@ -297,6 +297,7 @@ pub struct Engine {
     pairs: HashMap<String, Box<Engine>>,
     compiled_pair: Option<pair_acl::CompiledPairAcl>,
     flow_budget:FlowBudget,
+    exit_flow_budget:FlowBudget,
 }
 impl Engine {
     pub fn revoke(&mut self) {
@@ -311,7 +312,7 @@ impl Engine {
             self.validate_sparse_base(&snapshot)?;
             let retain_pairs = self.same_sparse_authority(&snapshot);
             let compiled_pair=if let Some(acl)=&snapshot.pair_acl{
-                ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty()&&snapshot.exit_routes.is_empty(),"compact ACL is not a complete exact pair");
+                ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty(),"compact ACL is not a complete exact pair");
                 Some(acl.compile()?)
             }else{None};
             let remaining = snapshot
@@ -505,22 +506,33 @@ impl Engine {
     // A separate state table prevents exit grants from widening private ACLs.
     // The authenticated transport identity is bound to every tracked flow.
     pub fn check_exit(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
-        let now = Instant::now();
-        if self.deadline.is_none_or(|deadline| deadline <= now) {
-            self.exit_flows.clear();
-            return false;
+        if !self.valid_lease() { self.exit_flows.clear(); return false; }
+        let Some(packet)=Packet::parse(bytes) else{return false};
+        // Sparse exit permissions are exact, independently expiring pair leases.
+        // Local Tor remains governed by its explicit base policy path.
+        if self.snapshot.as_ref().is_some_and(|snapshot|snapshot.sparse.is_some()
+            && !snapshot.peers.iter().any(|peer|peer.id==remote)) {
+            self.prune_pairs();
+            let Some(pair)=self.pairs.get_mut(remote) else{return false};
+            let Some((request,_))=pair.exit_permitted(packet,remote) else{return false};
+            let target=if request{packet.destination()}else{packet.source()};
+            // A bounded pair cannot enumerate every overlay identity. The complete
+            // capture prefixes replace that legacy inventory check, never ACLs.
+            if self.snapshot.as_ref().and_then(|s|s.sparse.as_ref()).is_some_and(|s|
+                s.capture_pools.iter().any(|pool|pool.contains(target))) {return false;}
+            return pair.check_exit_local(packet,remote,inbound);
         }
-        // A relay can connect before the next policy sync publishes the other
-        // peer's identity. Do not start flows against that placeholder: its
-        // first real fingerprint/instance would correctly revoke those flows.
-        if !self.snapshot.as_ref().is_some_and(|snapshot| snapshot.peers.iter().any(|peer|
-            peer.id == remote && !peer.fingerprint.is_empty() && !peer.instance.is_empty())) {
-            return false;
-        }
-        let Some(packet) = Packet::parse(bytes) else { return false; };
-        let Some((request, local_is_client)) = self.exit_permitted(packet, remote) else { return false; };
-        if request != (inbound != local_is_client) { return false; }
-        track_packet(&mut self.exit_flows, packet, remote, request, now)
+        self.check_exit_local(packet,remote,inbound)
+    }
+    fn check_exit_local(&mut self,packet:Packet,remote:&str,inbound:bool)->bool {
+        let now=Instant::now();
+        if self.deadline.is_none_or(|deadline|deadline<=now){self.exit_flows.clear();return false;}
+        // No placeholder/process-unbound identity can start or retain an exit flow.
+        if !self.snapshot.as_ref().is_some_and(|snapshot|snapshot.peers.iter().any(|peer|
+            peer.id==remote&&!peer.fingerprint.is_empty()&&!peer.instance.is_empty())) {return false;}
+        let Some((request,local_is_client))=self.exit_permitted(packet,remote) else{return false};
+        if request!=(inbound!=local_is_client){return false;}
+        track_packet_budget(&mut self.exit_flows,packet,remote,request,now,Some(&self.exit_flow_budget))
     }
 
     fn exit_permitted(&self, packet: Packet, remote: &str) -> Option<(bool, bool)> {
