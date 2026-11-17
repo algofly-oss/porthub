@@ -67,6 +67,18 @@ fn guard() -> Result<Spec> {
         unsafe { vfs.assume_init() }.f_flag & libc::ST_RDONLY != 0,
         "native fixture root must be read-only"
     );
+    let mut state_fs=std::mem::MaybeUninit::<libc::statfs>::uninit();
+    ensure!(unsafe{libc::statfs(c"/state".as_ptr(),state_fs.as_mut_ptr())}==0,"cannot inspect private fixture state");
+    let state_fs=unsafe{state_fs.assume_init()};
+    let state=std::fs::symlink_metadata("/state")?;
+    ensure!(state.is_dir()&&!state.file_type().is_symlink()&&state.uid()==0&&state.mode()&0o777==0o700
+        &&state_fs.f_type==libc::TMPFS_MAGIC&&state_fs.f_blocks as u64*state_fs.f_bsize as u64==1048576,
+        "fixture state must be exact private 1MiB tmpfs");
+    let mut state_vfs=std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    ensure!(unsafe{libc::statvfs(c"/state".as_ptr(),state_vfs.as_mut_ptr())}==0,"cannot inspect state flags");
+    let flags=unsafe{state_vfs.assume_init()}.f_flag;
+    ensure!(flags&(libc::ST_NODEV|libc::ST_NOSUID|libc::ST_NOEXEC)==libc::ST_NODEV|libc::ST_NOSUID|libc::ST_NOEXEC
+        &&flags&libc::ST_RDONLY==0,"fixture state mount restrictions changed");
     Ok(spec)
 }
 async fn absent(connection: &Connection<Route>, names: &[String]) -> Result<()> {
@@ -136,11 +148,15 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
     let remote = Ipv4Addr::new(10, 254, 254, 2);
     let foreign_own = Ipv4Addr::new(10, 254, 252, 10);
     let pools = ["10.254.253.0/24".parse()?, "10.254.254.0/24".parse()?];
+    let profile=std::path::Path::new("/state/profile.json");
+    crate::profile::write_private(profile,br#"{"server":"https://fixture.invalid","workspace":"private-native-fixture","peer_id":"private-native-fixture"}"#,false)?;
     let mut source = None;
     let mut foreign = None;
     let result=timeout(Duration::from_secs(12),async{
-        let tun=Arc::new(Tun::open(&source_name,own,&[]).await?);source=Some(tun.clone());
-        let audit=tun.reconcile_sparse(&pools,&[remote]).await?;
+        source=Some(super::native_owner::open(profile,&source_name,own,&pools,&[]).await?);
+        let audit=match super::native_owner::reconcile(&mut source,profile,own,&pools,&[remote]).await?{
+            super::native_owner::Outcome::Active(audit)=>audit,super::native_owner::Outcome::Retired(_)=>anyhow::bail!("clean owner retired")};
+        let tun=source.as_ref().unwrap();
         ensure!(audit.capture.conflicting.is_empty()&&audit.capture.accepted.len()==2&&audit.accepted_peers.contains(&remote),"clean private capture not installed");
         // No /32 for these unknown destinations exists: both aggregate
         // prefixes must actually intercept packets before pair discovery.
@@ -155,7 +171,11 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
         // Simulate an independently configured LAN/VPN route. Product code is
         // deliberately NOT used to preflight/admit this external mutation.
         connection.add_route(Ipv4Route::new(Ipv4Addr::new(10,254,254,0),24).dev_index(other.index).scope(RouteScope::Link).metric(7)).await?;
-        let audit=tun.reconcile_sparse(&pools,&[remote]).await?;
+        let audit=match super::native_owner::reconcile(&mut source,profile,own,&pools,&[remote]).await?{
+            super::native_owner::Outcome::Retired(audit)=>audit,super::native_owner::Outcome::Active(_)=>anyhow::bail!("conflicting native owner was not retired")};
+        ensure!(source.is_none(),"production native owner remains open");
+        ensure!(super::native_owner::open(profile,&source_name,own,&pools,&[]).await.is_err(),"quarantined source was reopened");
+        ensure!(connection.get_link_by_name(&source_name).await?.is_none(),"native source interface/address survived retirement");
         ensure!(audit.capture.conflicting.contains(&pools[1])&&!audit.accepted_peers.contains(&remote),"fresh LAN conflict retained private capture/peer authority");
         let native=connection.get_routes().await?;
         ensure!(native.iter().any(|row|row.destination()==Some(&IpAddr::V4(Ipv4Addr::new(10,254,254,0)))&&row.dst_len()==24&&row.oif()==Some(other.index)&&row.priority()==Some(7)),"foreign sentinel route was removed or adopted");
@@ -165,7 +185,23 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
         let escaped=udp_seen(&other,own,remote,Duration::from_millis(250)).await?;
         println!("native_capture_before=true conflict_detected=true foreign_route_preserved=true connected_send_succeeded={} foreign_egress_after_withdrawal={}",send.is_ok(),escaped);
         ensure!(!escaped,"connected private socket escaped via foreign route after capture withdrawal; native fail-closed contract remains OPEN");
-        drop(socket);drop(tun);drop(other);Ok::<_,anyhow::Error>(())
+        let repair=super::native_owner::repair_request(profile)?.ok_or_else(||anyhow::anyhow!("native conflict feedback was not durable"))?;
+        ensure!(repair.source==own&&repair.blocked==vec![pools[1]],"repair feedback lost exact conflicted source/prefix");
+        // A new validated allocation may reopen the same owned interface name.
+        // This native fixture supplies the allocation explicitly; the separate
+        // real HTTP/Mongo test proves the allocator/journal half of this path.
+        let next_own=Ipv4Addr::new(10,254,251,1);let next_remote=Ipv4Addr::new(10,254,250,2);
+        let next_pools=["10.254.251.0/24".parse()?,"10.254.250.0/24".parse()?];
+        source=Some(super::native_owner::open(profile,&source_name,next_own,&next_pools,&[]).await?);
+        ensure!(matches!(super::native_owner::reconcile(&mut source,profile,next_own,&next_pools,&[next_remote]).await?,super::native_owner::Outcome::Active(_)),"fresh allocation failed native reopening");
+        ensure!(super::native_owner::repair_request(profile)?.is_none(),"completed new allocation retained stale repair feedback");
+        let next_socket=tokio::net::UdpSocket::bind((next_own,0)).await?;next_socket.connect((next_remote,9002)).await?;next_socket.send(b"private-native-reallocated").await?;
+        ensure!(udp_seen(source.as_ref().unwrap(),next_own,next_remote,Duration::from_secs(1)).await?,"new allocation did not restore actual native capture");
+        let old_send=socket.send(b"private-native-old-after-reallocation").await;
+        let old_escaped=udp_seen(&other,own,remote,Duration::from_millis(250)).await?;
+        ensure!(!old_escaped,"old connected private socket escaped after native reallocation");
+        println!("native_new_allocation_capture=true old_source_quarantined=true old_socket_send_after_reallocation={} foreign_egress_after_reallocation={}",old_send.is_ok(),old_escaped);
+        drop(next_socket);drop(socket);drop(other);Ok::<_,anyhow::Error>(())
     }).await;
     drop(source);
     drop(foreign);

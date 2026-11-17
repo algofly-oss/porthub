@@ -31,11 +31,16 @@ def valid_scope(cfg):
  caps=cfg.get('CapAdd') or [];drops=cfg.get('CapDrop') or []
  if not all(isinstance(c,str) for c in caps+drops):return False
  normalized={c.removeprefix('CAP_') for c in caps}
- return cfg.get('NetworkMode')=='none' and not cfg.get('Privileged') and cfg.get('ReadonlyRootfs') is True and normalized=={'NET_ADMIN','SYS_CHROOT'} and {c.removeprefix('CAP_') for c in drops}=={'ALL'} and not cfg.get('Devices') and cfg.get('DeviceCgroupRules')==['c 10:200 rw']
+ return cfg.get('NetworkMode')=='none' and not cfg.get('Privileged') and cfg.get('ReadonlyRootfs') is True and normalized=={'NET_ADMIN','SYS_CHROOT'} and {c.removeprefix('CAP_') for c in drops}=={'ALL'} and not cfg.get('Devices') and cfg.get('DeviceCgroupRules')==['c 10:200 rw'] and cfg.get('Tmpfs')=={'/fixture/state':'rw,noexec,nosuid,nodev,size=1048576,mode=0700'}
 
 def valid_mounts(mounts,root):
  expected={'/fixture':str(root),'/fixture/proc':'/proc','/fixture/dev/net/tun':'/dev/net/tun'}
- if not isinstance(mounts,list) or len(mounts)!=len(expected):return False
+ if not isinstance(mounts,list):return False
+ # Docker versions may report tmpfs separately; never accept another writable mount.
+ tmpfs=[m for m in mounts if m.get('Destination')=='/fixture/state']
+ if len(tmpfs)>1 or any(m.get('Type')!='tmpfs' or m.get('RW') is not True for m in tmpfs):return False
+ mounts=[m for m in mounts if m.get('Destination')!='/fixture/state']
+ if len(mounts)!=len(expected):return False
  seen=set()
  for mount in mounts:
   destination=mount.get('Destination')
@@ -44,7 +49,7 @@ def valid_mounts(mounts,root):
  return seen==set(expected)
 
 def recipe(root,nonce,image,spec_hash,loader,library_dirs):
- return ['docker','run','--detach','--pull=never','--name','porthub-sparse-native-'+nonce,'--label','porthub.sparse.native.nonce='+nonce,'--read-only','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_CHROOT','--security-opt','no-new-privileges:true','--pids-limit','96','--memory','512m','--cpus','1','--ulimit','nofile=256:256','--log-opt','max-size=1m','--log-opt','max-file=1','--mount',f'type=bind,source={root},target=/fixture,readonly','--mount','type=bind,source=/proc,target=/fixture/proc,readonly','--mount','type=bind,source=/dev/net/tun,target=/fixture/dev/net/tun,readonly','--device-cgroup-rule','c 10:200 rw','--env','PORTHUB_SPARSE_NATIVE_FIXTURE='+PURPOSE,'--env','PORTHUB_SPARSE_NATIVE_SPEC_SHA256='+spec_hash,'--env','RUST_LOG=off','--env','RUST_BACKTRACE=0','--entrypoint','/fixture'+loader,image,'--library-path',':'.join('/fixture'+p for p in library_dirs),'/fixture/chroot','/fixture','/porthub-tests','--ignored','--exact',TEST,'--nocapture','--test-threads=1']
+ return ['docker','run','--detach','--pull=never','--name','porthub-sparse-native-'+nonce,'--label','porthub.sparse.native.nonce='+nonce,'--read-only','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_CHROOT','--security-opt','no-new-privileges:true','--pids-limit','96','--memory','512m','--cpus','1','--ulimit','nofile=256:256','--log-opt','max-size=1m','--log-opt','max-file=1','--mount',f'type=bind,source={root},target=/fixture,readonly','--mount','type=bind,source=/proc,target=/fixture/proc,readonly','--mount','type=bind,source=/dev/net/tun,target=/fixture/dev/net/tun,readonly','--device-cgroup-rule','c 10:200 rw','--tmpfs','/fixture/state:rw,noexec,nosuid,nodev,size=1048576,mode=0700','--env','PORTHUB_SPARSE_NATIVE_FIXTURE='+PURPOSE,'--env','PORTHUB_SPARSE_NATIVE_SPEC_SHA256='+spec_hash,'--env','RUST_LOG=off','--env','RUST_BACKTRACE=0','--entrypoint','/fixture'+loader,image,'--library-path',':'.join('/fixture'+p for p in library_dirs),'/fixture/chroot','/fixture','/porthub-tests','--ignored','--exact',TEST,'--nocapture','--test-threads=1']
 def dependencies(binary):
  env=os.environ.copy()
  for key in ['LD_PRELOAD','LD_LIBRARY_PATH','BASH_ENV','ENV']:env.pop(key,None)
@@ -78,7 +83,7 @@ def run(args):
   for source,target in files.items():
    dest=fs/target;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,dest);dest.chmod(0o555);manifest['/'+target]=digest(dest)
   if manifest['/porthub-tests']!=args.sha:raise RuntimeError('executable changed while snapshotting')
-  for directory in ['proc','dev/net']:(fs/directory).mkdir(parents=True,exist_ok=True)
+  for directory in ['proc','dev/net','state']:(fs/directory).mkdir(parents=True,exist_ok=True)
   (fs/'dev/net/tun').touch(mode=0o600)
   spec={'authorization':PURPOSE,'nonce':nonce,'parent_netns_inode':os.stat('/proc/self/ns/net').st_ino}
   (fs/'spec.json').write_text(json.dumps(spec,separators=(',',':')));(fs/'spec.json').chmod(0o444)
@@ -96,7 +101,7 @@ def run(args):
   if not re.fullmatch('[0-9a-f]{64}',cid):raise RuntimeError('invalid container ID')
   receipt.update(executed=True,container_id=cid)
   row=own(cid,nonce,args.image);cfg=row['HostConfig']
-  receipt['observed_scope']={key:cfg.get(key) for key in ['NetworkMode','Privileged','ReadonlyRootfs','CapAdd','CapDrop','SecurityOpt','PidsLimit','Memory','NanoCpus','Devices','DeviceCgroupRules']}
+  receipt['observed_scope']={key:cfg.get(key) for key in ['NetworkMode','Privileged','ReadonlyRootfs','CapAdd','CapDrop','SecurityOpt','PidsLimit','Memory','NanoCpus','Devices','DeviceCgroupRules','Tmpfs']}
   receipt['observed_mounts']=[{key:mount.get(key) for key in ['Type','Source','Destination','RW','Propagation']} for mount in row.get('Mounts',[])]
   if not valid_scope(cfg) or not valid_mounts(row.get('Mounts'),fs):raise RuntimeError('native container scope/mount differs; exact observations retained')
   waited=command(['docker','wait',cid],timeout=30);receipt['native_exit_code']=int(waited.stdout.strip())
@@ -142,14 +147,19 @@ def self_test():
  assert all(value.endswith(',readonly') for i,value in enumerate(cmd) if i and cmd[i-1]=='--mount')
  assert cmd[-5:]==['--ignored','--exact',TEST,'--nocapture','--test-threads=1']
  assert '--pull=never' in cmd
- base={'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL'],'Devices':[],'DeviceCgroupRules':['c 10:200 rw']}
+ assert cmd[cmd.index('--tmpfs')+1]=='/fixture/state:rw,noexec,nosuid,nodev,size=1048576,mode=0700'
+ base={'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL'],'Devices':[],'DeviceCgroupRules':['c 10:200 rw'],'Tmpfs':{'/fixture/state':'rw,noexec,nosuid,nodev,size=1048576,mode=0700'}}
  assert valid_scope(base) and valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN','CAP_SYS_CHROOT']))
  assert not valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN','CAP_SYS_CHROOT','CAP_SYS_ADMIN']))
  assert not valid_scope(dict(base,CapAdd=['CAP_NET_ADMIN'])) and not valid_scope(dict(base,CapDrop=[]))
  assert not valid_scope(dict(base,DeviceCgroupRules=['c 10:200 rwm'])) and not valid_scope(dict(base,DeviceCgroupRules=['c 10:201 rw']))
+ assert not valid_scope(dict(base,Tmpfs={}))
+ assert not valid_scope(dict(base,Tmpfs={'/fixture/state':'size=2097152'}))
  assert not valid_scope(dict(base,Devices=[{'PathInContainer':'/fixture/dev/net/tun'}]))
  mounts=[{'Type':'bind','Source':source,'Destination':destination,'RW':False} for destination,source in [('/fixture','/tmp/owned-root'),('/fixture/proc','/proc'),('/fixture/dev/net/tun','/dev/net/tun')]]
  assert valid_mounts(mounts,'/tmp/owned-root')
+ assert valid_mounts(mounts+[{'Type':'tmpfs','Destination':'/fixture/state','RW':True}],'/tmp/owned-root')
+ assert not valid_mounts(mounts+[{'Type':'bind','Destination':'/fixture/state','RW':True}],'/tmp/owned-root')
  assert not valid_mounts(mounts[:-1]+[dict(mounts[-1],RW=True)],'/tmp/owned-root')
  assert not valid_mounts(mounts[:-1]+[dict(mounts[-1],Source='/dev/null')],'/tmp/owned-root')
  assert not valid_mounts(mounts+[dict(mounts[-1],Destination='/foreign')],'/tmp/owned-root')
@@ -171,7 +181,7 @@ def self_test():
     if args[:2]==['docker','inspect']:
      if state['exists'] and mode.startswith('inspect_error'):return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'injected inspection failure')
      if not state['exists']:return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'absent')
-     row={'Name':'/porthub-sparse-native-'+state['nonce'],'Image':image,'Config':{'Labels':{'porthub.sparse.native.nonce':state['nonce']}},'HostConfig':{'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL'],'Devices':[],'DeviceCgroupRules':['c 10:200 rw']},'State':{'Running':state['running']},'Mounts':[{'Type':'bind','Source':source,'Destination':destination,'RW':False} for destination,source in [('/fixture',str(state['stage']/'rootfs')),('/fixture/proc','/proc'),('/fixture/dev/net/tun','/dev/net/tun')]]}
+     row={'Name':'/porthub-sparse-native-'+state['nonce'],'Image':image,'Config':{'Labels':{'porthub.sparse.native.nonce':state['nonce']}},'HostConfig':{'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT'],'CapDrop':['ALL'],'Devices':[],'DeviceCgroupRules':['c 10:200 rw'],'Tmpfs':{'/fixture/state':'rw,noexec,nosuid,nodev,size=1048576,mode=0700'}},'State':{'Running':state['running']},'Mounts':[{'Type':'bind','Source':source,'Destination':destination,'RW':False} for destination,source in [('/fixture',str(state['stage']/'rootfs')),('/fixture/proc','/proc'),('/fixture/dev/net/tun','/dev/net/tun')]]}
      return types.SimpleNamespace(returncode=0,stdout=json.dumps([row]).encode(),stderr=b'')
     if args[:2]==['docker','wait']:
      if mode=='timeout':raise subprocess.TimeoutExpired(args,timeout)

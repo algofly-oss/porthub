@@ -34,11 +34,46 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
 #[cfg(test)]
 pub(super) fn fixture_adapter_exists(guid:&str)->Result<bool>{Ok(adapters()?.iter().any(|(_,present,_,_)|present==guid))}
 pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
+
+// Diagnostic-only: never changes admission, records or native routes.
+#[cfg(test)]
+fn fixture_recovery_failure(index:u32,stage:u8,r:&AdapterRecord,rows:&std::collections::BTreeSet<RouteStamp>){
+    if std::env::var("PORTHUB_SPARSE_NATIVE_FIXTURE").as_deref()!=Ok("reviewed-disposable-desktop-v1"){return;}
+    use std::sync::atomic::{AtomicBool,Ordering};
+    static EMITTED:AtomicBool=AtomicBool::new(false);
+    if EMITTED.swap(true,Ordering::Relaxed){return;}
+    // Only this verified owned adapter; no global route or profile dump.
+    let luid=(||{use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfTable2,FreeMibTable};
+        let mut table=std::ptr::null_mut();if unsafe{GetIfTable2(&mut table)}!=0||table.is_null(){return None;}
+        struct Guard(*mut core::ffi::c_void);impl Drop for Guard{fn drop(&mut self){unsafe{FreeMibTable(self.0)}}}
+        let _guard=Guard(table.cast());let n=unsafe{(*table).NumEntries}as usize;if n>65536{return None;}
+        unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),n)}.iter().find(|row|row.InterfaceIndex==index).map(|row|unsafe{row.InterfaceLuid.Value})})();
+    let baseline=r.baseline.clone().unwrap_or_default();
+    let unknown:std::collections::BTreeSet<_>=rows.iter().filter(|v|!baseline.contains(*v)&&!r.routes.contains(*v)).cloned().collect();
+    let missing:std::collections::BTreeSet<_>=r.routes.difference(rows).cloned().collect();
+    let sets=[&baseline,&r.routes,&r.pending,&r.retiring,&unknown,&missing];
+    let mut out=String::new();
+    for (kind,set) in sets.into_iter().enumerate(){
+        // Six sets x four rows, plus counts; all row fields are numeric network metadata.
+        let sample:Vec<_>=set.iter().take(4).collect();
+        if let Ok(line)=serde_json::to_string(&serde_json::json!({"stage":stage,"index":index,"luid":luid,"kind":kind,"count":set.len(),"rows":sample})){
+            if out.len()+line.len()+1<=8192{out.push_str(&line);out.push('\n');}
+        }
+    }
+    eprintln!("PORTHUB_NATIVE_ROUTE_LEDGER_DIAGNOSTIC\n{out}");
+}
+fn recover_record(index:u32,stage:u8,r:&mut AdapterRecord,guid:&str,addresses:&[IpAddr],mtu:u16,rows:&std::collections::BTreeSet<RouteStamp>)->Result<()>{
+    let result=r.recover(guid,addresses,mtu,rows);
+    #[cfg(test)] if result.is_err(){fixture_recovery_failure(index,stage,r,rows);}
+    #[cfg(not(test))] let _=(index,stage);
+    result
+}
+
 impl Ownership {
     fn verify(&self,index:u32,device:&tun_rs::AsyncDevice,native:&[Route])->Result<()>{
         let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());
         let rows=native.iter().filter(|route|route.if_index()==Some(index)).map(stamp).collect();
-        r.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)?;
+        recover_record(index,1,&mut r,&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)?;
         // Every verified complete inventory retires missing claims durably,
         // before any caller can prune caches, return early or mutate routes.
         r.observe_missing(&rows,|next|save_record(&self.path,next))?;Ok(())
@@ -155,7 +190,14 @@ fn install_driver() -> Result<PathBuf> {
 }
 
 impl Tun {
+    pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
     pub(super) async fn open_owned(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr],admission:HostAdmission)->Result<Self>{
+        Self::open_inner(profile,name,own,peers,admission,None).await
+    }
+    pub(super) async fn open_owned_sparse(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr],pools:&[porthub_mesh::lan_routes::Network])->Result<Self>{
+        Self::open_inner(profile,name,own,peers,HostAdmission::Sparse,Some(pools)).await
+    }
+    async fn open_inner(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr],admission:HostAdmission,pools:Option<&[porthub_mesh::lan_routes::Network]>)->Result<Self>{
         ensure!(own.is_private()&&peers.iter().all(Ipv4Addr::is_private),"invalid private interface address");
         plan_hosts(own,peers,admission,std::iter::empty())?; // deny oversized mode before any native mutation
         let path=windows_state::state_path(profile,".wintun-ownership.json")?;
@@ -179,8 +221,12 @@ impl Tun {
         if let Some((_,guid,index,mtu))=named.first(){
             let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|i|i.index==Some(*index)).filter_map(|i|i.address.ip_addr()).collect();
             let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
-            record.recover(guid,&addresses,u16::try_from(*mtu)?,&current)?;
+            recover_record(*index,2,&mut record,guid,&addresses,u16::try_from(*mtu)?,&current)?;
             record.observe_missing(&current,|next|save_record(&path,next))?;
+        }
+        if let Some(pools)=pools{
+            let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(porthub_network::capture_routes::ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+            super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,existing_index.unwrap_or(u32::MAX))?)?;
         }
         if existing_index.is_none(){record.reset_absent(own,porthub_mesh::MAX_PACKET as u16)?;}
         save_record(&path,&record)?; // protected intent precedes creation
@@ -190,7 +236,7 @@ impl Tun {
         ensure!(adapter_guid(index)?==record.guid&&device.name()?==name,"Wintun did not return the intended owned adapter; no address was assigned");
         if existing_index==Some(index){
             let current=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
-            record.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
+            recover_record(index,3,&mut record,&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
             record.observe_missing(&current,|next|save_record(&path,next))?;
         }else if existing_index.is_some(){
             // The pinned builder may recreate an orphaned *already verified*
@@ -237,8 +283,7 @@ impl Tun {
         let native=manager.list().await.context("cannot inspect sparse route audit")?;
         self.ownership.verify(self.index,&self.device,&native)?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
-        let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
-        ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
+        let mut audit=super::native_owner::conflict(capture_routes::audit(pools,self.own,peers,&existing,self.index)?)?;
         // A route removed outside PortHub is not still a valid ownership claim.
         // Forget missing entries so an exclusive add can repair them, never adopt
         // an arbitrary existing entry just because it points at our interface.

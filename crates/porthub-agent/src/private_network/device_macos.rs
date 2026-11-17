@@ -33,6 +33,14 @@ fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
 }
 
 impl Tun {
+    pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
+    /// Fresh native inventory BEFORE assigning a source address. Never recreate
+    /// an old bound source transiently while a conflicting LAN is still live.
+    pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
+        let mut manager=AsyncRouteManager::new()?;let native=manager.list().await?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(porthub_network::capture_routes::ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,u32::MAX)?)?;Ok(())
+    }
     pub async fn open(_name: &str, own: Ipv4Addr, peers: &[Ipv4Addr]) -> Result<Self> {
         ensure!(own.is_private(), "invalid private interface address");
         ensure!(
@@ -94,8 +102,7 @@ impl Tun {
         let mut manager=AsyncRouteManager::new().context("cannot open sparse route audit")?;
         let native=manager.list().await.context("cannot inspect sparse route audit")?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
-        let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
-        ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
+        let mut audit=super::native_owner::conflict(capture_routes::audit(pools,self.own,peers,&existing,self.index)?)?;
         // A route removed outside PortHub is not still a valid ownership claim.
         // Forget missing entries so an exclusive add can repair them, never adopt
         // an arbitrary existing entry just because it points at our interface.

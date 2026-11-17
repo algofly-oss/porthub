@@ -12,6 +12,8 @@ pub mod device;
 pub mod dns;
 #[cfg(target_os="macos")]
 mod dns_default_macos;
+#[cfg(any(target_os="macos",test))]
+mod dns_convergence_macos;
 mod dns_upstream;
 pub use porthub_network::exit_selection;
 pub use porthub_network::exit_plan;
@@ -110,3 +112,5 @@ mod native_desktop_lifecycle_fixture;
 
 #[cfg(all(test,feature="private-sparse",target_os="linux"))]
 mod native_resolver_lifecycle_fixture;
+
+mod native_owner;

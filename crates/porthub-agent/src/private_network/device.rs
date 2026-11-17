@@ -23,6 +23,14 @@ fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Resul
     result.map_err(|_| anyhow::anyhow!(message))
 }
 impl Tun {
+    pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
+    /// Fresh native inventory BEFORE assigning a source address. Never recreate
+    /// an old bound source transiently while a conflicting LAN is still live.
+    pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
+        let netlink=Connection::<Route>::new()?;let native=netlink.get_routes().await?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){Some(IpAddr::V4(address))=>Some(porthub_network::capture_routes::ExistingRoute{destination:*address,prefix:r.dst_len(),interface:r.oif()}),_=>None}).collect();
+        super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,u32::MAX)?)?;Ok(())
+    }
     pub async fn open(name: &str, own: Ipv4Addr, peers: &[Ipv4Addr]) -> Result<Self> {
         ensure!(
             name.len() == 10
@@ -131,8 +139,7 @@ impl Tun {
         use porthub_network::capture_routes::{self,ExistingRoute};
         let native=safe(self.netlink.get_routes().await,"sparse route audit failed")?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){Some(IpAddr::V4(address))=>Some(ExistingRoute{destination:*address,prefix:r.dst_len(),interface:r.oif()}),_=>None}).collect();
-        let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
-        ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
+        let mut audit=super::native_owner::conflict(capture_routes::audit(pools,self.own,peers,&existing,self.index)?)?;
         // A route removed outside PortHub is not still a valid ownership claim.
         // Forget missing entries so an exclusive add can repair them, never adopt
         // an arbitrary existing entry just because it points at our interface.

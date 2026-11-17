@@ -314,7 +314,7 @@ pub async fn run_watched_sparse(
     cancel: CancellationToken,
     sparse: Option<super::sparse::Control>,
 ) -> Result<()> {
-    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None,None).await
+    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None,None,None).await
 }
 pub(crate) async fn run_watched_sparse_owned(
     profile: Profile,
@@ -327,6 +327,7 @@ pub(crate) async fn run_watched_sparse_owned(
     mut sparse: Option<super::sparse::Control>,
     authority_domain:Option<super::authority_event::Domain>,
     native_streams:Option<watch::Receiver<Option<NativeReady>>>,
+    native_profile:Option<std::path::PathBuf>,
 ) -> Result<()> {
     ensure!(
         interfaces.borrow().len() <= 16,
@@ -390,7 +391,9 @@ pub(crate) async fn run_watched_sparse_owned(
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
             "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
-        if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
+        if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;
+            if let Some(path)=&native_profile{if let Some(repair)=super::native_owner::repair_request(path)?{body["native_repair"]=serde_json::to_value(repair)?;}}
+        }
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let mut reply = None;

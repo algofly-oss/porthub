@@ -324,6 +324,8 @@ pub struct Registration {
     #[cfg(target_os = "macos")]
     paths: Vec<(std::path::PathBuf, Vec<u8>)>,
     #[cfg(target_os="macos")]
+    withdraw_pending: Vec<super::dns_convergence_macos::Endpoint>,
+    #[cfg(target_os="macos")]
     tor_default: Option<super::dns_default_macos::Registration>,
     #[cfg(windows)]
     interface: Option<windows_sys::core::GUID>,
@@ -331,10 +333,35 @@ pub struct Registration {
     nrpt:Option<super::windows_nrpt::Registration>,
 }
 
+#[cfg(target_os="macos")]
+fn resolver_endpoints(registration:&Registration)->Result<Vec<super::dns_convergence_macos::Endpoint>>{
+    registration.paths.iter().map(|(path,contents)|{
+        let suffix=path.file_name().and_then(|v|v.to_str()).ok_or_else(||anyhow::anyhow!("invalid owned DNS suffix"))?.to_owned();
+        let text=std::str::from_utf8(contents)?;
+        let port=text.lines().find_map(|line|line.strip_prefix("port ")).ok_or_else(||anyhow::anyhow!("missing owned DNS port"))?.parse()?;
+        Ok(super::dns_convergence_macos::Endpoint{suffix,port})
+    }).collect()
+}
+#[cfg(target_os="macos")]
+fn close_resolver_files(registration:&mut Registration)->Result<()>{
+    for (path,contents) in &registration.paths{
+        ensure!(std::fs::read(path).ok().as_deref()==Some(contents.as_slice()),"owned macOS resolver changed before withdrawal");
+    }
+    while let Some((path,_))=registration.paths.first(){std::fs::remove_file(path)?;registration.paths.remove(0);}
+    Ok(())
+}
+
 /// Finish owned OS DNS cleanup before the interface address can disappear.
 pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()> {
     #[cfg(windows)]
     if let Some(nrpt)=current.as_mut().and_then(|r|r.nrpt.as_mut()){nrpt.close().await?;}
+    #[cfg(target_os="macos")]
+    if let Some(registration)=current.as_mut(){
+        let mut old=resolver_endpoints(registration)?;old.extend(registration.withdraw_pending.clone());
+        registration.withdraw_pending=old.clone();
+        close_resolver_files(registration)?;
+        super::dns_convergence_macos::wait(&[],&old).await?;
+    }
     *current=None;Ok(())
 }
 
@@ -358,9 +385,16 @@ pub async fn replace_registration(current:&mut Option<Registration>,profile:&std
         let new_default=if needs_default&&current.as_ref().is_none_or(|old|old.tor_default.is_none()) {
             Some(super::dns_default_macos::register(port).await?)
         }else{None};
+        let mut previous=current.as_ref().map(resolver_endpoints).transpose()?.unwrap_or_default();
+        if let Some(old)=current.as_ref(){previous.extend(old.withdraw_pending.clone());}
         let mut next=replace_files(current.as_mut(),std::path::Path::new("/etc/resolver"),port,&private)?;
         if needs_default {next.tor_default=current.as_mut().and_then(|old|old.tor_default.take()).or(new_default);}
         *current=Some(next);
+        let present=resolver_endpoints(current.as_ref().unwrap())?;
+        let removed:Vec<_>=previous.into_iter().filter(|old|!present.contains(old)).collect();
+        current.as_mut().unwrap().withdraw_pending=removed.clone();
+        super::dns_convergence_macos::wait(&present,&removed).await?;
+        current.as_mut().unwrap().withdraw_pending.clear();
         let _=(index,own);
     }
     #[cfg(not(target_os="macos"))]
@@ -476,6 +510,12 @@ pub async fn register(
     let mut registration=register_files(std::path::Path::new("/etc/resolver"), port, &private)?;
     if suffixes.iter().any(|suffix|suffix==".") {
         registration.tor_default=Some(super::dns_default_macos::register(port).await?);
+    }
+    let present=resolver_endpoints(&registration)?;
+    if let Err(error)=super::dns_convergence_macos::wait(&present,&[]).await{
+        close_resolver_files(&mut registration)?;
+        super::dns_convergence_macos::wait(&[],&present).await?;
+        return Err(error);
     }
     Ok(registration)
 }

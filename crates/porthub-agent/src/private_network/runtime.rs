@@ -51,10 +51,13 @@ fn reconcile_traffic(tracker:&super::traffic::Tracker,own:&str,base:Option<&Snap
     ids.extend(pairs.peers().into_iter().filter(|peer|peer.id!=own).map(|peer|peer.id));
     tracker.reconcile(ids.into_iter())
 }
-async fn audit_capture(tun:&Tun,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
+async fn audit_capture(device:&mut Option<Arc<Tun>>,profile:&std::path::Path,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
     let sparse=snapshot.sparse.as_ref().ok_or_else(||anyhow::anyhow!("private capture audit requires negotiated authority"))?;
-    tokio::time::timeout(Duration::from_secs(2),tun.reconcile_sparse(&sparse.capture_pools,peers)).await
-        .map_err(|_|anyhow::anyhow!("private capture route audit timed out; refusing stale native routing"))?
+    let own=snapshot.peers.iter().find(|peer|peer.id==snapshot.self_).ok_or_else(||anyhow::anyhow!("native capture identity missing"))?.ip;
+    match super::native_owner::reconcile(device,profile,own,&sparse.capture_pools,peers).await?{
+        super::native_owner::Outcome::Active(audit)=>Ok(audit),
+        super::native_owner::Outcome::Retired(_)=>anyhow::bail!("native source quarantined after LAN/VPN/VM conflict; safe new address allocation required"),
+    }
 }
 
 fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
@@ -329,6 +332,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         if cfg!(feature="private-sparse"){Some(sparse_control)}else{None},
         Some(authority_owner.domain()),
         Some(native_stream_updates),
+        Some(path.clone()),
     ));
     let mut device: Option<Arc<Tun>> = None;
     let mut local_address=super::address_lifecycle::Binding::default();
@@ -494,10 +498,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(tun)=&device {
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
-                    #[cfg(windows)]
-                    let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,if snapshot.sparse.is_some(){super::native_ownership::HostAdmission::Sparse}else{super::native_ownership::HostAdmission::Legacy}).await?);
-                    #[cfg(not(windows))]
-                    let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
+                    let tun=if let Some(sparse)=&snapshot.sparse{
+                        super::native_owner::open(&path,&name,own.ip,&sparse.capture_pools,&routes).await?
+                    }else{
+                        super::native_owner::admit_legacy(&path,own.ip)?;
+                        #[cfg(windows)]{Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,super::native_ownership::HostAdmission::Legacy).await?)}
+                        #[cfg(not(windows))]{Arc::new(Tun::open(&name,own.ip,&routes).await?)}
+                    };
                     local_address.configured(own.ip)?;
                     let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
@@ -516,7 +523,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     device=Some(tun);
                 }
                 if snapshot.sparse.is_some(){
-                    let audit=audit_capture(device.as_ref().unwrap(),&snapshot,&routes).await?;
+                    let audit=audit_capture(&mut device,&path,&snapshot,&routes).await?;
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
                     {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
@@ -651,10 +658,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let lease=response.lease.expect("checked pair lease");
                 let id=lease.peer.id.clone();
                 if policy.install_pair(lease.clone()).is_err(){sparse_handle.unavailable(&response.query);continue;}
-                let Some(tun)=&device else{policy.revoke_pair(&id);continue;};
+                if device.is_none(){policy.revoke_pair(&id);continue;}
                 let mut routes:Vec<_>=peer_ips.values().copied().collect();routes.retain(|ip|peer_ips.get(&id)!=Some(ip));routes.push(lease.peer.ip);
                 let base=sparse_authority.as_ref().ok_or_else(||anyhow::anyhow!("private pair arrived before base authority"))?;
-                let audit=audit_capture(tun,base,&routes).await?;last_route_audit=Some(Instant::now());
+                let audit=audit_capture(&mut device,&path,base,&routes).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
                     {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
@@ -910,8 +917,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         },
         changed=route_events.changed(),if route_events_open=>{
             if changed.is_err(){route_events_open=false;}else if sparse_handle.enabled(){
-                if let (Some(tun),Some(base))=(&device,&sparse_authority){
-                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
+                    let audit=audit_capture(&mut device,&path,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
                     {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
@@ -931,8 +938,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         _=probe_tick.tick(),if device.is_some()=>{
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
-                if let (Some(tun),Some(base))=(&device,&sparse_authority){
-                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
+                    let audit=audit_capture(&mut device,&path,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
                     {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
