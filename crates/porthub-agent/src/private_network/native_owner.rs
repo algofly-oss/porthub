@@ -391,3 +391,48 @@ pub(super) fn fixture_assignment_ready(profile:&Path,old:Ipv4Addr,new:Ipv4Addr)-
     let(_,record)=read(profile)?;
     ensure!(record.active.as_ref().is_some_and(|active|active.own==new&&active.pin.is_some())&&record.retired.contains(&old)&&record.repair.is_none()&&record.retirement.is_none(),"fresh native assignment did not retire old feedback generation");Ok(())
 }
+
+// Fixture-only failure metadata: never serialize arbitrary error Display text.
+#[cfg(test)]
+pub(super) fn fixture_failure_chain(error:&anyhow::Error)->serde_json::Value {
+    use sha2::{Digest,Sha256};
+    const GUARDS:&[&str]=&[
+        "native source shutdown remains unproven; repair not published",
+        "stopped adapter GUID changed; preserved",
+        "stopped adapter lacks verified baseline",
+        "stopped adapter contains a source or foreign address; preserved",
+        "stopped adapter contains an unowned or retired route; preserved",
+        "stopped adapter has a live unacknowledged intent; preserved",
+        "owned adapter changed externally",
+        "adapter changed during final source-absence proof",
+        "retired route remains after deletion",
+        "recovered compound remains",
+        "recovered shared child disappeared",
+    ];
+    let causes:Vec<_>=error.chain().take(8).map(|cause|{
+        let message=cause.to_string();
+        serde_json::json!({"guard":GUARDS.iter().copied().find(|guard|*guard==message),
+            "message_sha256":format!("{:x}",Sha256::digest(message.as_bytes())),
+            "message_bytes":message.len(),
+            "os_error":cause.downcast_ref::<std::io::Error>().and_then(|error|error.raw_os_error())})
+    }).collect();
+    serde_json::json!({"causes":causes,"truncated":error.chain().count()>8})
+}
+#[cfg(test)]
+mod fixture_failure_chain_tests {
+    #[test]
+    fn bounded_chain_preserves_guard_and_errno_without_dynamic_text() {
+        let error=anyhow::Error::from(std::io::Error::from_raw_os_error(1168))
+            .context("credential-like-sentinel/private/profile")
+            .context("native source shutdown remains unproven; repair not published");
+        let value=super::fixture_failure_chain(&error);
+        assert_eq!(value["causes"].as_array().unwrap().len(),3);
+        assert_eq!(value["causes"][0]["guard"],"native source shutdown remains unproven; repair not published");
+        assert_eq!(value["causes"][2]["os_error"],1168);
+        let output=value.to_string();assert!(!output.contains("credential-like-sentinel"));assert!(!output.contains("private/profile"));
+        let mut error=anyhow::anyhow!("unapproved dynamic sentinel");
+        for _ in 0..10 {error=error.context("context");}
+        let value=super::fixture_failure_chain(&error);
+        assert_eq!(value["causes"].as_array().unwrap().len(),8);assert_eq!(value["truncated"],true);
+    }
+}

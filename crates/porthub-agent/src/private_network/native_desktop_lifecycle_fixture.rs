@@ -655,8 +655,11 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         } else {
             Err(anyhow::anyhow!("owned resolver remained after teardown"))
         });
+    let body_result=result.map_err(anyhow::Error::from).and_then(|r|r);
+    if let Err(error)=&body_result {eprintln!("PORTHUB_NATIVE_FAILURE_CHAIN {}",super::native_owner::fixture_failure_chain(error));}
+    if let Err(error)=&native_cleanup {eprintln!("PORTHUB_NATIVE_CLEANUP_CHAIN {}",super::native_owner::fixture_failure_chain(error));}
     match (
-        result.map_err(anyhow::Error::from).and_then(|r| r),
+        body_result,
         native_cleanup,
     ) {
         (Err(body), Err(cleanup)) => {
