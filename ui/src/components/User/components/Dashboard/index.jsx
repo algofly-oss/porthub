@@ -12,7 +12,7 @@ import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { Button } from "@/components/ui/button";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
-import TerminalTraffic from "./TerminalTraffic";
+import PrivateTraffic from "./PrivateTraffic";
 import { MachineRanking } from "../MachineMetrics";
 import ProxyActivity from "@/components/ui/proxy-activity";
 
@@ -97,7 +97,7 @@ export default function Dashboard({ active = true }) {
         </section>
       </div>
     </div>}
-    <div className="mt-4"><TerminalTraffic active={active} refresh={refresh} /></div>
+    <div className="mt-4"><PrivateTraffic active={active} refresh={refresh} /></div>
   </div></div>;
 }
 

@@ -1,3 +1,4 @@
+import { demoPrivateTraffic } from "./private-traffic.mjs";
 import { demoTerminalTraffic } from "../utils/terminal-traffic.mjs";
 import { demoAccessInventory } from "./access-inventory.mjs";
 import { searchScore } from "../utils/search.mjs";
@@ -41,6 +42,10 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const url=new URL(rawPath,"http://demo.invalid");
   const path = url.pathname.replace(/^.*\/api/, "");
   if(path==="/traffic/hover") return state.trafficHover || {timestamp:Number(url.searchParams.get("timestamp")),contributors:[],total_contributors:0,truncated:false};
+  if(path==="/private/traffic") {
+    if(state.privateTrafficError)throw Error(state.privateTrafficError);
+    return demoPrivateTraffic(state.machines, url.searchParams.get("range") || "1h", url.searchParams.get("machine_id") || "all", Date.now(), {search:url.searchParams.get("search") || "",page:Number(url.searchParams.get("page") || 1),source_peer_id:url.searchParams.get("source_peer_id"),destination_peer_id:url.searchParams.get("destination_peer_id"),coverage:state.privateTrafficCoverage,stale:state.privateTrafficStale,demoDirections:state.privateTrafficDirections});
+  }
   if(path==="/terminal/traffic") {
     if(state.terminalTrafficError)throw Error(state.terminalTrafficError);
     if(state.terminalTraffic)return state.terminalTraffic;
