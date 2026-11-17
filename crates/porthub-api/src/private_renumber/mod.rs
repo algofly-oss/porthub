@@ -13,3 +13,7 @@ pub mod recover;
 pub mod deferred;
 
 pub mod worker;
+
+pub mod native_repair;
+
+pub(crate) mod retirement;

@@ -535,7 +535,7 @@ pub struct Selection {
     pub generation: String,
     pub suffixes: Vec<String>,
 }
-async fn machine(app: &App, workspace: ObjectId, peer: &Document) -> ApiResult<Option<Document>> {
+pub(crate) async fn machine(app: &App, workspace: ObjectId, peer: &Document) -> ApiResult<Option<Document>> {
     use mongodb::bson::Bson;
     let owner = store::id(peer.get("owner_id"));
     let Ok(owner_id) = ObjectId::parse_str(&owner) else {

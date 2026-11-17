@@ -6,19 +6,22 @@ use tokio::sync::watch;
 pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
     let mut migrations = None;
     let mut enrollments = None;
+    let mut native_repairs=None;
     loop {
         if *stop.borrow() {
             break;
         }
         let pass = async {
+            let repairs=super::native_repair::pending_once(&app,native_repairs.clone()).await;
             let recovery = super::recover::pending_once(&app, migrations).await;
             let deferred = super::deferred::pending_once(&app, enrollments).await;
-            (recovery, deferred)
+            (repairs,recovery, deferred)
         };
         tokio::select! {
             biased;
             changed=stop.changed()=>{if changed.is_err()||*stop.borrow(){break;}},
-            (recovery,deferred)=pass=>{
+            (repairs,recovery,deferred)=pass=>{
+                match repairs{Ok(next)=>native_repairs=next,Err(_)=>tracing::warn!("Native collision repair remains queued; source stays quarantined")}
                 match recovery {Ok(batch)=>migrations=batch.next,Err(_)=>tracing::warn!("Private address recovery remains fenced; retrying bounded discovery")}
                 match deferred {Ok(batch)=>enrollments=batch.next,Err(_)=>tracing::warn!("Deferred private enrollment remains queued; retrying bounded discovery")}
             }

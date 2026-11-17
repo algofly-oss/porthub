@@ -248,6 +248,8 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"last_seen_at":now,
         "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
         .ok_or_else(||forbidden("Private credential revoked"))?;
+    #[cfg(feature="private-sparse")]
+    if let Some(repair)=&input.native_repair{crate::private_renumber::native_repair::record(app,owner,&updated,repair).await?;}
     for p in &mut peers {
         if store::string(p, "_id") == input.peer_id {
             *p = updated.clone();

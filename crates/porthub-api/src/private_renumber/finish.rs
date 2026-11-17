@@ -55,6 +55,7 @@ pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> 
         return Err(conflict("Migration progress is incomplete"));
     }
     let pins = super::apply::verify(app, owner, job, &head).await?;
+    super::retirement::activate(app,owner,job).await?;
     let mut rows = app
         .collection("private_renumber_assignments")
         .find(doc! {"job":job})

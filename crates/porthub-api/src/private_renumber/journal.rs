@@ -286,6 +286,7 @@ async fn prepare_with_fault(
         #[cfg(not(test))]
         let _ = fault;
     }
+    super::retirement::stage(app,job,rows,previous.as_ref()).await?;
     // One atomic head CAS activates BOTH the complete plan and its target pool
     // reservation. No per-peer mutation can precede this durable fence.
     let transition=heads.update_one(doc!{"_id":&first.workspace,"generation":first.previous_generation as i64,"state":"stable"},
@@ -313,6 +314,7 @@ async fn prepare_with_fault(
     {
         return Err(conflict("Migration head is not resumable"));
     }
+    super::retirement::activate(app,guard.workspace,job).await?;
     app.private_relay
         .workspace_generation(&first.workspace, first.generation, true);
     Ok(())

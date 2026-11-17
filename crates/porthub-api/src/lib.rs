@@ -1,4 +1,5 @@
 pub mod private_migration_mode;
+pub mod private_retired_sources;
 #[cfg(feature = "private-sparse")]
 pub mod private_renumber;
 pub mod private_sparse;

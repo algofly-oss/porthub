@@ -19,6 +19,8 @@ pub struct Signal {
 pub struct Sync {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse: Option<super::private_pairs::Request>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub native_repair:Option<porthub_network::native_repair::Request>,
     pub peer_id: String,
     pub token: String,
     pub fingerprint: String,
@@ -58,6 +60,11 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         .unwrap_or(raw);
     let sparse=raw.get("sparse").filter(|v| !v.is_null()).map(|v|serde_json::from_value::<super::private_pairs::Request>(v.clone()).map_err(|_| crate::error::ApiError::bad_request("Invalid sparse private request"))).transpose()?;
     if let Some(request)=&sparse { request.validate()?; }
+    let native_repair=raw.get("native_repair").filter(|v|!v.is_null()).map(|v|serde_json::from_value::<porthub_network::native_repair::Request>(v.clone()).map_err(|_|crate::error::ApiError::bad_request("Invalid native repair request"))).transpose()?;
+    if let Some(repair)=&native_repair{
+        repair.validate().map_err(|_|crate::error::ApiError::bad_request("Invalid native repair scope"))?;
+        if !cfg!(feature="private-sparse")||sparse.is_none(){return Err(crate::error::ApiError::bad_request("Native repair requires negotiated private networking"));}
+    }
     let mut model = Model::new(raw)?;
     let peer_id = string(&mut model, "peer_id", 0, 60);
     let token = string(&mut model, "token", 32, 200);
@@ -129,6 +136,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         sparse,
         peer_id,
         token,
+        native_repair,
         fingerprint: fingerprint.to_ascii_uppercase(),
         instance,
         stream_transport,

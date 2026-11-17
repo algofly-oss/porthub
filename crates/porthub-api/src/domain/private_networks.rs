@@ -196,6 +196,7 @@ async fn occupied(app: &App, owner: &str) -> ApiResult<(Vec<Network>, Vec<Ipv4Ad
             addresses.push(ip);
         }
     }
+    {let(retired_ranges,retired_addresses)=crate::private_retired_sources::occupied(app).await?;ranges.extend(retired_ranges);addresses.extend(retired_addresses);}
     Ok((ranges, addresses))
 }
 
@@ -326,4 +327,26 @@ pub(crate) async fn validate_migration_targets_locked(app:&App,owner:&str,target
         return Err(ApiError::new(StatusCode::CONFLICT,"Migration pool conflicts with a reserved workspace, retained address, or reported local network"));
     }
     Ok(())
+}
+
+/// Rare automatic collision repair, under the existing allocation lock. Choose
+/// disjoint pools ourselves; client reports contain no proposed addresses.
+#[cfg(feature="private-sparse")]
+pub(crate) async fn migration_targets_locked(app:&App,owner:&str,count:usize,blocked:&[mongodb::bson::Bson])->ApiResult<Vec<Network>>{
+    if count==0||count>65536||blocked.len()>porthub_network::capture_routes::MAX_CAPTURE_PREFIXES{return Err(ApiError::bad_request("Invalid native repair capacity"));}
+    let (mut reserved,addresses)=occupied(app,owner).await?;
+    let current=ensure_locked(app,owner).await?;reserved.extend(pools(&current)?);
+    let mut lans=workspace_lans(app,owner).await?;
+    for value in blocked{let raw=value.as_str().ok_or_else(||ApiError::bad_request("Invalid native repair prefix"))?;lans.push(raw.parse().map_err(|_|ApiError::bad_request("Invalid native repair prefix"))?);}
+    let mut remaining=count;let mut selected=Vec::new();
+    while remaining>0{
+        if selected.len()>=32{return Err(ApiError::new(StatusCode::CONFLICT,"No bounded disjoint address capacity is available"));}
+        let required=remaining.min(65534).saturating_add(2).next_power_of_two();
+        let prefix=(32-required.trailing_zeros()).clamp(16,24)as u8;
+        let mut seen=HashSet::new();
+        let candidate=overflow_candidates().map(|mut candidate|{while candidate.bits_for_migration()>prefix{candidate=candidate.parent().expect("bounded parent");}candidate})
+            .find(|candidate|seen.insert(candidate.cidr())&&available(*candidate,&reserved,&addresses)&&avoids_lans(*candidate,&lans))
+            .ok_or_else(||ApiError::new(StatusCode::CONFLICT,"No non-conflicting private range is available; existing identities are preserved"))?;
+        remaining=remaining.saturating_sub(candidate.capacity()as usize);reserved.push(candidate);selected.push(candidate);
+    }Ok(selected)
 }

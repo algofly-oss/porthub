@@ -114,6 +114,11 @@ impl Network {
         None
     }
 
+    #[cfg(feature="private-sparse")]
+    pub(crate) fn bits_for_migration(self)->u8{self.bits}
+    #[cfg(feature="private-sparse")]
+    pub(crate) fn migration_address(self,offset:u32)->Option<Ipv4Addr>{(offset<self.capacity()).then(||Ipv4Addr::from(self.base+offset+1))}
+
     pub(crate) fn parent(self) -> Option<Self> {
         (self.bits > 16).then(|| Self {
             base: self.base & (u32::MAX << (33 - self.bits)),

@@ -125,6 +125,7 @@ pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> 
         return Err(conflict("Migration is not ready for application"));
     }
     let pins = verify(app, owner, job, &head).await?;
+    super::retirement::activate(app,owner,job).await?;
     let generation = head
         .get_i64("generation")
         .map_err(|_| conflict("Invalid migration generation"))?;
