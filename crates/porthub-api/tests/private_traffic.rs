@@ -314,8 +314,11 @@ async fn historical_report_authorization_is_independent_of_pair_batch_and_rechec
         ensure!(!resolve().await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
         let mut maximum = report.clone(); maximum.rows.clear();
         for index in 0..porthub_mesh::traffic_report::MAX_ROWS {
-            let peer = format!("{owner}:{}",ObjectId::new());
-            case.app.collection("private_peers").insert_one(doc!{"_id":&peer,"workspace_id":owner,"owner_id":owner,"machine_id":machines[0],"enabled":true}).await?;
+            let machine = ObjectId::new();
+            let peer = format!("{owner}:{machine}");
+            let ip = format!("10.204.{}.{}",index/250,index%250+1);
+            case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"enabled":true}).await?;
+            case.app.collection("private_peers").insert_one(doc!{"_id":&peer,"workspace_id":owner,"owner_id":owner,"machine_id":machine,"ip":ip,"enabled":true}).await?;
             maximum.rows.push(row(&peer,index as u64+1,at,1,0));
         }
         ensure!(porthub_api::private_traffic::authorized_report_peers(&case.app,owner,&peers[0],&maximum).await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.len()==257);
