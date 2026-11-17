@@ -130,3 +130,17 @@ export function driveCatalog(previous=[],history=[],drives=[],latest=[]) {
  for(const drive of [...(history||[]).map(point=>point.snapshot),...(drives||[]),...(latest||[])])if(drive?.id)records.set(drive.id,drive);
  return [...records.values()].sort((a,b)=>(b.observed_at||0)-(a.observed_at||0)||a.id.localeCompare(b.id)).slice(0,512);
 }
+
+// Categorical SMART states, never a health percentage. Unknown/removed samples
+// deliberately break each physical drive's line; identities never cross drives.
+export function driveConditionSeries(history=[],drives=[]) {
+ const groups=new Map();
+ for(const point of history)if(point.snapshot?.id&&Number.isFinite(point.at)){
+  const id=point.snapshot.id;if(!groups.has(id))groups.set(id,[]);groups.get(id).push(point);
+ }
+ return drives.map(drive=>{
+  const points=(groups.get(drive.id)||[]).sort((a,b)=>a.at-b.at).map(p=>({at:p.at,sample:p.snapshot}));
+  const segments=metricSegments(points,s=>s.present?({healthy:2,warning:1,critical:0}[s.status]??null):null,7*24*60*60*1000);
+  return {drive,segments};
+ });
+}

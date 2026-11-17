@@ -29,11 +29,11 @@ const {launchBrowser}=require('./browser.cjs');
    await panel.getByLabel('Physical drive',{exact:true}).waitFor();
    const picker=await panel.getByLabel('Physical drive',{exact:true}).inputValue();
    if(scenario==='fresh-empty'){
-    assert(picker.includes('Historical'));await panel.getByText('Historical',{exact:true}).waitFor();
+    assert(picker.includes('Historical'));await panel.getByText('Historical',{exact:true}).first().waitFor();
     await panel.getByText('No physical drives in the current report',{exact:true}).waitFor();
     assert((await panel.innerText()).includes('Not in the current report. Last recorded health: Critical.'));assert(!(await panel.innerText()).includes(' · Removed '));
    }else if(['disabled','missing','stale'].includes(scenario)){
-    assert(picker.includes('Last recorded'));await panel.getByText('Current status unknown',{exact:true}).waitFor();
+    assert(picker.includes('Last recorded'));await panel.getByText('Current status unknown',{exact:true}).first().waitFor();
     assert((await panel.innerText()).includes('Current presence is unknown.'));assert(!(await panel.innerText()).includes(' · Removed '));
    }else if(scenario==='rejoined'){
     assert(picker.includes('Rejoined physical SSD'));assert(!picker.includes('Historical'));await panel.getByText('Healthy',{exact:true}).first().waitFor();assert(!(await panel.innerText()).includes('Not in the current report.'));

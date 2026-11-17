@@ -104,7 +104,9 @@ export default function MachineMetrics({ machineId, active }) {
   const [driveDays,setDriveDays]=useState(7),[driveId,setDriveId]=useState('');
   useEffect(()=>setDriveId(''),[machineId]);
   const selectedDrive=driveId||sample?.drive_health?.find(d=>d.present)?.id||sample?.drive_health?.[0]?.id||'';
-  const health=useMetrics(`/api/machines/metrics/${encodeURIComponent(machineId||'')}/drives?days=${driveDays}${selectedDrive?'&drive='+encodeURIComponent(selectedDrive):''}`,active&&!!machineId&&!!sample,60000);
+  const healthURL=`/api/machines/metrics/${encodeURIComponent(machineId||'')}/drives?days=${driveDays}`;
+  const health=useMetrics(healthURL,active&&!!machineId&&!!sample,60000);
+  const selectedHealth=useMetrics(`${healthURL}&drive=${encodeURIComponent(selectedDrive)}`,active&&!!machineId&&!!sample&&!!selectedDrive,60000);
   const history=data?.history||[];
   const devices=gpuDevices(history,sample),gpu=devices.find(d=>d.id===gpuId)||devices[0];
   const readGpu=s=>gpuReading(s,gpu?.id,gpu?.name,gpu?.allowLegacy);
@@ -123,7 +125,7 @@ export default function MachineMetrics({ machineId, active }) {
     {error && <p role="alert" className="text-sm text-amber-600">{error}</p>}
     {loading && <p role="status" className="text-sm text-muted-foreground">Loading metrics…</p>}
     <div className="grid grid-cols-2 gap-4">{RESOURCES.map(([key, label]) => <div key={key}><Usage label={label} value={utilization(sample, key)} /><p className="mt-2 text-xs text-muted-foreground">{key === 'cpu' ? sample ? `${sample.cores} logical CPUs` : '' : key === 'gpu' ? sample?.gpus?.map(gpuMemorySummary).join(' · ') : sample?.[key] ? memoryText(sample[key]) : ''}</p></div>)}</div>
-    <DriveHealthPanel key={machineId} data={health.data} latest={sample?.drive_health} reportedAt={latest?.at} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
+    <DriveHealthPanel key={machineId} data={health.data} selectedData={selectedHealth.data} latest={sample?.drive_health} reportedAt={latest?.at} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error||selectedHealth.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
     <div className="grid gap-3 xl:grid-cols-2">{RESOURCES.filter(([key])=>key==='cpu'||key==='ram').map(([key, label]) => <HistoryChart key={key} history={data?.history || []} resource={key} label={label} intervalMs={data?.interval_ms || 60000} interval={`Last ${hours} ${hours === 1 ? 'hour' : 'hours'}`} />)}<div>{devices.length>1&&<SearchDropdown aria-label="GPU device" value={gpu?.id||''} onChange={e=>setGpuId(e.target.value)}>{devices.map(d=><option key={d.id} value={d.id}>{d.name} · {d.id}</option>)}</SearchDropdown>}<SeriesChart label={gpu?`GPU · ${gpu.name}`:'GPU'} history={history} series={gpuSeries} intervalMs={data?.interval_ms||60000}/></div><SeriesChart label="Disk usage by drive" history={history} series={diskSeries} intervalMs={data?.interval_ms||60000}/></div>
     <p className="text-xs leading-5 text-muted-foreground">Readings arrive every 15 seconds. History retains minute samples for seven days; chart gaps indicate missing reports. Disk usage includes verified local storage capacity; unmounted or unverified drives are unavailable. Client owners can disable reporting with <code>porthub features disable metrics</code>.</p>
   </section>;

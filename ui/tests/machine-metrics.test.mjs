@@ -132,3 +132,20 @@ test('historical drive catalog survives narrowed queries and remains bounded',as
  assert.equal(driveCatalog([],[],[{id:'new-host'}]).some(d=>d.id==='a'),false);
  assert.equal(driveCatalog([],[],Array.from({length:600},(_,i)=>({id:String(i),observed_at:i}))).length,512);
 });
+
+import {driveConditionSeries} from '../src/lib/machineMetrics.mjs';
+test('all-drive condition series preserves identity, categorical transitions and unknown/removed gaps',()=>{
+ const a={id:'a',name:'SSD'},b={id:'b',name:'HDD'},c={id:'c',name:'USB'};
+ const point=(id,at,status,present=true)=>({at,snapshot:{id,status,present}});
+ const rows=driveConditionSeries([point('a',1,'healthy'),point('b',1,'warning'),point('a',2,'warning'),point('a',3,'unavailable'),point('a',4,'critical'),point('b',2,'removed',false),point('b',3,'healthy'),point('c',1,'unavailable')],[a,b,c]);
+ assert.deepEqual(rows[0].segments.map(s=>s.map(p=>p.value)),[[2,1],[0]]);
+ assert.deepEqual(rows[1].segments.map(s=>s.map(p=>p.value)),[[1],[2]]);
+ assert.deepEqual(rows[2].segments,[]);
+ assert.deepEqual(rows.map(s=>s.drive.name),['SSD','HDD','USB']);
+});
+test('condition series never invents readings for absent drives or connects long reporting gaps',()=>{
+ const day=86400000;
+ assert.deepEqual(driveConditionSeries([],[{id:'a'}])[0].segments,[]);
+ const history=[{at:1,snapshot:{id:'a',present:true,status:'healthy'}},{at:12*day,snapshot:{id:'a',present:true,status:'critical'}}];
+ assert.equal(driveConditionSeries(history,[{id:'a'}])[0].segments.length,2);
+});
