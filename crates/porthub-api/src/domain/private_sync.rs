@@ -19,6 +19,10 @@ pub struct Signal {
 pub struct Sync {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse: Option<super::private_pairs::Request>,
+    // Separate root capability: older gateways ignore unknown root fields,
+    // while the existing sparse Request intentionally denies unknown fields.
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub exit_pair_protocol: Option<u32>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub native_repair:Option<porthub_network::native_repair::Request>,
     pub peer_id: String,
@@ -60,6 +64,13 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         .unwrap_or(raw);
     let sparse=raw.get("sparse").filter(|v| !v.is_null()).map(|v|serde_json::from_value::<super::private_pairs::Request>(v.clone()).map_err(|_| crate::error::ApiError::bad_request("Invalid sparse private request"))).transpose()?;
     if let Some(request)=&sparse { request.validate()?; }
+    let exit_pair_protocol=if cfg!(feature="private-sparse") {
+        match raw.get("exit_pair_protocol").filter(|value|!value.is_null()) {
+            None=>None,
+            Some(value) if value.as_u64()==Some(1)&&sparse.is_some()=>Some(1),
+            Some(_)=>return Err(crate::error::ApiError::bad_request("Exit pair capability requires negotiated private protocol1")),
+        }
+    }else{None};
     let native_repair=raw.get("native_repair").filter(|v|!v.is_null()).map(|v|serde_json::from_value::<porthub_network::native_repair::Request>(v.clone()).map_err(|_|crate::error::ApiError::bad_request("Invalid native repair request"))).transpose()?;
     if let Some(repair)=&native_repair{
         repair.validate().map_err(|_|crate::error::ApiError::bad_request("Invalid native repair scope"))?;
@@ -134,6 +145,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     model.finish()?;
     Ok(Sync {
         sparse,
+        exit_pair_protocol,
         peer_id,
         token,
         native_repair,
@@ -153,6 +165,21 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+    #[test]
+    fn exit_capability_is_explicit_scoped_and_legacy_ignorable() {
+        let ordinary=body("");assert!(parse(ordinary.clone()).ok().expect("valid ordinary sync").exit_pair_protocol.is_none());
+        let mut scoped=body("quic3-credit");scoped["exit_pair_protocol"]=serde_json::json!(1);
+        if cfg!(feature="private-sparse") {
+            assert_eq!(parse(scoped.clone()).ok().expect("valid exit capability").exit_pair_protocol,Some(1));
+            for value in [serde_json::json!(0),serde_json::json!(2),serde_json::json!(true),serde_json::json!("1")] {
+                scoped["exit_pair_protocol"]=value;assert!(parse(scoped.clone()).is_err());
+            }
+            let mut unscoped=ordinary;unscoped["exit_pair_protocol"]=serde_json::json!(1);assert!(parse(unscoped).is_err());
+        } else {
+            let mut compatible=ordinary;compatible["exit_pair_protocol"]=serde_json::json!(1);
+            assert!(parse(compatible).ok().expect("legacy ignores new root capability").exit_pair_protocol.is_none());
+        }
+    }
     fn body(mode:&str)->Value{let mut body=serde_json::json!({"peer_id":"peer","token":"fixture-credential-0123456789abcdef0123456789","fingerprint":vec!["AB";32].join(":"),"instance":"instance-0123456789","stream_transport":mode});if matches!(mode,"quic2-origin"|"quic3-credit"){body["sparse"]=serde_json::json!({"protocol":1,"sequence":1,"wanted":[]});}body}
     #[test]
     fn origin_transport_is_exact_feature_negotiated_and_legacy_values_remain_compatible(){

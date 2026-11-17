@@ -191,3 +191,48 @@ pub fn local_epoch(
         &Value::Null,
     )
 }
+
+/// Prepared binding for negotiated exit-pair publication. Not advertised or used
+/// by current sync until the corresponding runtime intent/lease path is wired.
+/// Independent of ordinary rule books: exit edits must not revoke private ACLs,
+/// and private rule edits must not independently revoke valid exit permissions.
+/// Caller supplies only current enabled routes from this authenticated workspace.
+pub fn local_exit_epoch(machine:&Value,peer:&Value,routes:&[Value])->String {
+    let mut routes:Vec<_>=routes.iter().map(|route|{
+        let mut selected=serde_json::Map::new();
+        for key in ["_id","workspace_id","enabled","created_at","routing_selectors","distribution_selectors","selection","traffic_mode","tor_enabled","tor_circuit_groups","allow_direct_fallback"] {
+            if let Some(value)=route.get(key){selected.insert(key.into(),value.clone());}
+        }
+        Value::Object(selected)
+    }).collect();
+    routes.sort_by_key(|route|route["_id"].to_string());
+    format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"exit_pair_protocol":1,"identity_epoch":local_epoch(machine,&[],&HashMap::new(),peer),"local_exit_capabilities":{"lan_exit":peer["lan_exit"],"tor_exit":peer["tor_exit"],"protocol":peer["exit_pair_protocol"]},"exit_routes":routes})).expect("typed exit epoch")))
+}
+#[cfg(test)]
+mod exit_epoch_tests {
+    use super::*;
+    #[test]
+    fn exit_epoch_binds_rules_selection_modes_roles_and_membership() {
+        let machine=json!({"_id":"m","user_id":"o","group_ids":["g"]});
+        let peer=json!({"_id":"o:m","owner_id":"o","workspace_id":"o","machine_id":"m","credential_hash":"credential","ip":"10.1.0.1","enabled":true});
+        let route=json!({"_id":"r","workspace_id":"o","enabled":true,"created_at":1,"routing_selectors":[{"kind":"machine","id":"router"}],"distribution_selectors":[{"kind":"group","id":"g"}],"selection":"sticky","traffic_mode":"internet_only","tor_enabled":false,"tor_circuit_groups":4,"allow_direct_fallback":false});
+        let hash=|m:&Value,r:Value|local_exit_epoch(m,&peer,&[r]);let original=hash(&machine,route.clone());
+        for (field,value) in [("enabled",json!(false)),("created_at",json!(2)),("routing_selectors",json!([])),("distribution_selectors",json!([])),("selection",json!("round_robin")),("traffic_mode",json!("lan_only")),("tor_enabled",json!(true)),("tor_circuit_groups",json!(8)),("allow_direct_fallback",json!(true))] {
+            let mut changed=route.clone();changed[field]=value;assert_ne!(original,hash(&machine,changed),"exit field {field} did not revoke old binding");
+        }
+        for field in ["lan_exit","tor_exit","exit_pair_protocol"] {
+            let mut changed=peer.clone();changed[field]=json!(1);
+            assert_ne!(original,local_exit_epoch(&machine,&changed,&[route.clone()]),"local capability {field} was not bound");
+        }
+        let mut removed=machine.clone();removed["group_ids"]=json!([]);assert_ne!(original,hash(&removed,route.clone()));
+        let mut cosmetic=route.clone();cosmetic["name"]=json!("Renamed");cosmetic["updated_at"]=json!(42);assert_eq!(original,hash(&machine,cosmetic));
+        assert_ne!(original,local_epoch(&machine,&[],&HashMap::new(),&peer));
+    }
+    #[test]
+    fn exit_epoch_ignores_cursor_order_but_preserves_selector_priority() {
+        let a=json!({"_id":"a","routing_selectors":[{"kind":"machine","id":"first"},{"kind":"machine","id":"second"}]});let b=json!({"_id":"b"});
+        let hash=|routes:&[Value]|local_exit_epoch(&json!({}),&json!({}),routes);
+        assert_eq!(hash(&[a.clone(),b.clone()]),hash(&[b.clone(),a.clone()]));
+        let mut reordered=a.clone();reordered["routing_selectors"].as_array_mut().unwrap().reverse();assert_ne!(hash(&[a,b.clone()]),hash(&[reordered,b]));
+    }
+}
