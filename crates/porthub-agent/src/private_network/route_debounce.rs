@@ -193,7 +193,14 @@ pub(crate) mod witness {
             else {state.events_dropped=state.events_dropped.saturating_add(1);}
         }
         fn callback_matches(&self,key:&Key)->bool {
+            self.callback_matches_platform(key,cfg!(target_os="macos"))
+        }
+        fn callback_matches_platform(&self,key:&Key,macos:bool)->bool {
             let mut identity=key.clone();identity.metric=self.expected.metric;
+            // Darwin RTM_ADD echoes a request header index of zero; the
+            // pinned parser ignores RTAX_IFP's AF_LINK index. This starts
+            // only a bounded readback, never proves interface ownership.
+            if macos && identity.index==Some(0) {identity.index=self.expected.index;}
             identity==self.expected
         }
         #[cfg(any(windows,target_os="macos"))]
@@ -251,6 +258,26 @@ pub(crate) mod witness {
             }
         }
         pub(crate) fn completed(&self) -> bool { self.state.lock().unwrap().completed }
+    }
+    #[test]
+    fn macos_zero_callback_index_is_only_a_readback_trigger() {
+        let key=Key{address:"10.254.254.0".parse().unwrap(),prefix:25,index:Some(13),gateway:None,metric:None};
+        let w=Witness::new(key.clone());let zero=Key{index:Some(0),..key.clone()};
+        assert!(w.callback_matches_platform(&zero,true));
+        assert!(!w.callback_matches_platform(&zero,false));
+        assert!(!w.callback_matches_platform(&Key{index:Some(14),..key.clone()},true));
+        assert!(!w.callback_matches_platform(&Key{gateway:Some("10.254.252.1".parse().unwrap()),..zero.clone()},true));
+        assert!(!w.callback_matches_platform(&Key{prefix:24,..zero},true));assert!(!w.completed());
+    }
+    #[cfg(target_os="macos")]
+    #[test]
+    fn macos_zero_callback_requires_exact_native_readback() {
+        let route=Route::new("10.254.254.0".parse().unwrap(),25).with_if_index(13);
+        for rows in [vec![],vec![route.clone().with_if_index(14)],vec![route.clone().with_if_index(0)]] {
+            let w=Witness::new(Key::route(&route));w.ready();w.event(&RouteChange::Add(route.clone().with_if_index(0)));
+            w.published_native(&rows);assert!(!w.completed());
+        }
+        let w=Witness::new(Key::route(&route));w.ready();w.event(&RouteChange::Add(route.clone().with_if_index(0)));assert!(!w.completed());w.published_native(&[route]);assert!(w.completed());
     }
     struct PendingReadback(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl std::future::Future for PendingReadback{type Output=();fn poll(self:std::pin::Pin<&mut Self>,_:&mut std::task::Context<'_>)->std::task::Poll<()>{std::task::Poll::Pending}}

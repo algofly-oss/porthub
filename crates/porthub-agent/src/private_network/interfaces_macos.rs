@@ -126,7 +126,17 @@ async fn watch_inner(
                     changed.clear();
                     if let Ok(Ok(addresses)) = tokio::time::timeout(Duration::from_secs(2), current()).await {
                         super::topology::publish(&output,route_changes.as_ref(),Some(addresses));
-                        #[cfg(test)] if let Some(witness)=&witness { witness.published(); }
+                        #[cfg(test)] if let Some(witness)=&witness {
+                            if let Some(remaining)=witness.readback_remaining(){
+                                witness.readback_started(remaining);
+                                let native=async {match AsyncRouteManager::new(){Ok(mut manager)=>manager.list().await,Err(error)=>Err(error)}};
+                                match super::route_debounce::witness::bounded_readback(&cancel,remaining,native).await {
+                                    Ok(Ok(rows))=>witness.published_native(&rows),
+                                    Ok(Err(error))=>witness.readback_failed(error.raw_os_error()),
+                                    Err(stop)=>witness.readback_stopped(stop),
+                                }
+                            }
+                        }
                     }else{super::topology::publish(&output,route_changes.as_ref(),None);}
                     backoff = Duration::from_secs(1);
                 }
