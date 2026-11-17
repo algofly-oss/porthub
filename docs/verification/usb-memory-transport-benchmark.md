@@ -1,4 +1,4 @@
-# Paired RAM-stream direct transport benchmark (private, not executed)
+# Paired RAM-stream direct transport benchmark (private verification)
 
 This ignored test measures the production `usb::negotiate(Control)` → authenticated bulk TLS → `bridge_bulk` path. It does not attach a USB device or emulate storage. There is no block device, mount, filesystem payload, driver installation, permanent process, enrollment, or production registry claim. Both endpoints verify 128 MiB in 64 KiB pattern/offset chunks plus streaming SHA256. Small application completion barriers precede source-side in-memory USB-policy revocation and owned connection shutdown. Each receiver reports its actual elapsed throughput; compare the two receipts to establish both directions. Do not call the enqueue-side number storage write throughput.
 
@@ -52,7 +52,7 @@ timeout 190s "$BENCH_ROOT/fixture" --exact \
  --ignored --nocapture >"$BENCH_ROOT/source.log" 2>&1
 ```
 
-Wait at most10s for the fixed `PORTHUB_MEMORY_SIGNAL_READY loopback-only` line in the owned source log, then run destination on Miro (Root's bounded SSH supervisor, environment and protected remote staging):
+Use one automated supervisor to watch for `PORTHUB_MEMORY_SIGNAL_READY loopback-only` and immediately launch the destination SSH command. The production hello deadline is eight seconds; separate manual tool turns can consume that budget before the peer starts. Keep the deadline unchanged. Run destination on Miro with the bounded supervisor, environment and protected remote staging:
 
 ```sh
 PORTHUB_USB_MEMORY_BENCH_AUTHORIZED=root-reviewed-memory-bulk-v1 \
@@ -68,4 +68,12 @@ Capture fresh `link-after.json` on each host, compute `--before link-before.json
 
 Require both actor exits0, same session SHA, exact opposite endpoints, each received/sent payload134217728 bytes, source send SHA=destination receive SHA and reverse, source gateway payload0, source local USB revocation true, both bridge-stopped true. Destination may classify only a typed `std::io::ErrorKind::UnexpectedEof` after all payload/SHA and application COMMIT barriers as `expected-post-commit-revoke-tls-eof`; source intentional policy revocation drops TLS without close_notify. EOF during payload/barriers, string-only errors and other I/O errors still fail. Retain the terminal class in the receipt. Retain failures and counter deltas without inferring a device or driver cause.
 
-Finally stop ONLY the dedicated tunnel using `ssh -S "$BENCH_ROOT/control.sock" -O exit nitin@miro.phub`; verify that owned control socket/master and both exact actor children are absent. Do not broadly kill processes. Preserve both proof lines/logs and fresh counter snapshots; remove only exact owned binaries/spec files after an ownership/hash manifest check. No physical USB, mounts, services or client policies should have changed. Actual LAN execution remains a separate Root-authorized gate.
+Finally stop ONLY the dedicated tunnel using `ssh -S "$BENCH_ROOT/control.sock" -O exit nitin@miro.phub`; verify that owned control socket/master and both exact actor children are absent. Do not broadly kill processes. Preserve both proof lines/logs and fresh counter snapshots; remove only exact owned binaries/spec files after an ownership/hash manifest check. No physical USB, mounts, services or client policies should have changed. Retain separate receipts for each actual LAN execution.
+
+## Recorded wired LAN run — 2026-11-17
+
+The optimized `agent-dev` build (opt-level3, no LTO) from benchmark commit `8c8385d572d22a166a8cff63f1294a9547cf7bb8` completed on Luna and Miro. Both hosts used their 1,000Mb/s full-duplex Ethernet interfaces. The observed simultaneous rates were 109.44MiB/s from Luna to Miro and 98.20MiB/s in reverse. Each side received and checked 128MiB, including pattern offsets, SHA256 and mutual completion acknowledgements. Selected TLS endpoints were the expected nonloopback LAN addresses; signaling carried zero binary payload. The source's in-memory USB-policy revocation stopped both bridges.
+
+The first attempt exposed the manual launch race described above. The second completed the payload checks but rejected the expected TLS EOF after intentional revocation. A test-only classifier now accepts typed `UnexpectedEof` only after all payload and commit barriers; earlier and other failures remain errors. The third attempt passed at both endpoints. No production transport behavior was changed for that classifier.
+
+Fresh counter snapshots recorded a Luna vendor RX-error-counter increase while Linux CRC/error counters remained zero. This counter difference does not identify a cause for storage performance. No NIC settings changed. Both actors and the owned signaling tunnel stopped; private specs and remote staging were removed, and numerical proofs and failure logs were retained. No USB device or block device was opened by the benchmark, and no payload was written to a filesystem. Physical storage performance still requires its own device test.
