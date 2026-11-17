@@ -289,7 +289,7 @@ def execute(args):
   if not errors and stage:
    try:
     if args.contract=='windows':
-     allowed={'profile.json','foreign.json','spec.json','profile.json.wintun-ownership.json','foreign.json.wintun-ownership.json','profile.json.wintun-ownership.json.lock','foreign.json.wintun-ownership.json.lock','start.gate','profile.json.nrpt-ownership.json','profile.json.nrpt-ownership.json.lock'}
+     allowed={'profile.json','foreign.json','spec.json','profile.json.wintun-ownership.json','foreign.json.wintun-ownership.json','profile.json.wintun-ownership.json.lock','foreign.json.wintun-ownership.json.lock','start.gate','profile.json.nrpt-ownership.json','profile.json.nrpt-ownership.json.lock','profile.json.native-quarantine.json','profile.json.native-quarantine.json.lock','profile.json.native-source-owner.lock'}
      unexpected={p.name for p in stage.iterdir()}-allowed
      if unexpected:raise RuntimeError('unexpected stage files; no broad cleanup: '+','.join(sorted(unexpected)))
     shutil.rmtree(stage);receipt['stage_absent']=not stage.exists()
