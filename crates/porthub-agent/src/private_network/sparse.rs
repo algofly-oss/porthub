@@ -26,10 +26,22 @@ struct Cached {
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
     stream_masks: Option<StreamMasks>,
     _retirement_owner:Option<super::authority_event::Owner>,
+    _exit_retirement_owner:Option<super::authority_event::Owner>,
+    exit_authority:Option<super::authority_event::Authority<()>>,
+    private_active:bool,
+    exit_active:bool,
     authority: Option<super::authority_event::Authority<()>>,
     lease: PairLease,
     deadline: Instant,
     last_used: Instant,
+}
+impl Cached {
+    fn private_valid(&self,now:Instant)->bool {self.private_active&&self.deadline>now&&self.authority.as_ref().is_none_or(|a|a.check().is_ok())}
+    fn exit_valid(&self,now:Instant)->bool {self.exit_active&&self.deadline>now&&self.exit_authority.as_ref().is_none_or(|a|a.check().is_ok())}
+    fn valid(&self,now:Instant)->bool {self.private_valid(now)||self.exit_valid(now)}
+    fn metadata_authority(&self,now:Instant)->Option<&super::authority_event::Authority<()>> {
+        if self.private_valid(now){self.authority.as_ref()}else{self.exit_authority.as_ref()}
+    }
 }
 struct Intent {
     used: Instant,
@@ -40,6 +52,8 @@ struct Intent {
 struct State {
     authority: Option<super::authority_event::Authority<()>>,
     epoch: Option<String>,
+    exit_epoch:Option<String>,
+    own:Option<(String,String,Ipv4Addr,String,String)>,
     deadline: Option<Instant>,
     cache: BTreeMap<String, Cached>,
     wanted: BTreeMap<Lookup, Intent>,
@@ -70,6 +84,11 @@ fn same_pair_authority(a:&PairLease,b:&PairLease)->bool {
         &&match (serde_json::to_vec(&a.acl),serde_json::to_vec(&b.acl)){(Ok(a),Ok(b))=>a==b,_=>false}
 }
 
+fn same_exit_authority(a:&PairLease,b:&PairLease)->bool {
+    let identity=|a:&PeerInfo,b:&PeerInfo|a.id==b.id&&a.ip==b.ip&&a.fingerprint==b.fingerprint&&a.instance==b.instance;
+    a.workspace==b.workspace&&a.self_==b.self_&&identity(&a.local,&b.local)&&identity(&a.peer,&b.peer)
+        &&a.exit.as_ref().zip(b.exit.as_ref()).is_some_and(|(a,b)|a.epoch==b.epoch&&a.route_id==b.route_id&&a.client==b.client&&a.router==b.router&&a.traffic_mode==b.traffic_mode)
+}
 #[cfg(all(feature="private-sparse",feature="private-stream"))]
 #[derive(Clone)]
 pub(crate) struct StreamMasks {
@@ -102,12 +121,20 @@ impl BoundPairAuthority {
     pub(crate) fn permit(&self)->porthub_mesh::udp::SendPermit{self.permit.clone()}
 }
 
+/// Exit packets cannot borrow ordinary private-stream masks or retirement.
+#[cfg(feature="private-sparse")]
+pub(crate) struct BoundExitAuthority {lease:PairLease,permit:porthub_mesh::udp::SendPermit}
+#[cfg(feature="private-sparse")]
+impl BoundExitAuthority {
+    pub(crate) fn lease(&self)->&PairLease{&self.lease}
+    pub(crate) fn permit(&self)->porthub_mesh::udp::SendPermit{self.permit.clone()}
+}
 impl Handle {
     pub fn revoke_all(&self) {
         self.revoked.store(true, Ordering::SeqCst);
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         s.deadline = None;
-        s.epoch = None;
+        s.epoch = None;s.exit_epoch=None;s.own=None;
         s.cache.clear();
         s.wanted.clear();
         drop(s);
@@ -120,20 +147,40 @@ impl Handle {
         if self.revoked()||state.deadline.is_none_or(|d|d<=Instant::now()){return None;}
         let base=state.authority.as_ref()?.clone();base.check().ok()?;base.remaining().ok()??;
         let cached=state.cache.get(id)?;
-        if cached.deadline<=Instant::now()||cached.lease.peer.id!=id||state.epoch.as_deref()!=Some(cached.lease.epoch.as_str())||cached.lease.self_!=cached.lease.local.id{return None;}
+        if !cached.private_valid(Instant::now())||cached.lease.peer.id!=id||state.epoch.as_deref()!=Some(cached.lease.epoch.as_str())||cached.lease.self_!=cached.lease.local.id{return None;}
         let pair=cached.authority.as_ref()?.clone();pair.check().ok()?;pair.remaining().ok()??;
-        let lease=cached.lease.clone();
+        let mut lease=cached.lease.clone();lease.exit=None; // Private-only authority view, never relabelled.
         let permit=porthub_mesh::udp::SendPermit::bounded(||true,move||Some(base.remaining().ok()??.min(pair.remaining().ok()??)));
         Some(BoundPairAuthority{lease,permit,
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
             masks:cached.stream_masks.clone(),
         })
     }
+    #[cfg(feature="private-sparse")]
+    pub(crate) fn bound_exit_pair_authority(&self,id:&str)->Option<BoundExitAuthority>{
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if self.revoked()||state.deadline.is_none_or(|d|d<=now){return None;}
+        let base=state.authority.as_ref()?.clone();base.check().ok()?;base.remaining().ok()??;
+        let cached=state.cache.get(id)?;
+        if !cached.exit_valid(now)||cached.lease.peer.id!=id||cached.lease.self_!=cached.lease.local.id
+            ||state.exit_epoch.as_deref()!=Some(cached.lease.exit.as_ref()?.epoch.as_str()){return None;}
+        let pair=cached.exit_authority.as_ref()?.clone();pair.check().ok()?;pair.remaining().ok()??;
+        let permit=porthub_mesh::udp::SendPermit::bounded(||true,move||Some(base.remaining().ok()??.min(pair.remaining().ok()??)));
+        let mut lease=cached.lease.clone();lease.grants.clear();lease.acl=None;
+        Some(BoundExitAuthority{lease,permit})
+    }
+    pub(crate) fn exit_pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if self.revoked()||state.deadline.is_none_or(|d|d<=now)||state.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
+        let cached=state.cache.get(id)?;
+        if !cached.exit_valid(now)||state.exit_epoch.as_deref()!=Some(cached.lease.exit.as_ref()?.epoch.as_str()){return None;}
+        let authority=cached.exit_authority.as_ref()?;authority.check().ok()?;Some(authority.clone())
+    }
     pub(crate) fn pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
         if self.revoked()||s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
         let cached=s.cache.get(id)?;
-        if cached.deadline<=Instant::now(){return None;}
+        if !cached.private_valid(Instant::now())||s.epoch.as_deref()!=Some(cached.lease.epoch.as_str()){return None;}
         let authority=cached.authority.as_ref()?;authority.check().ok()?;Some(authority.clone())
     }
     pub(crate) fn authority_ttl(&self)->Option<u32> {
@@ -157,9 +204,20 @@ impl Handle {
             return;
         }
         let epoch = snapshot.sparse.as_ref().map(|s| s.epoch.clone());
-        if s.epoch != epoch {
-            s.cache.clear();
+        let exit_epoch=snapshot.sparse.as_ref().and_then(|s|s.exit_epoch.clone());
+        let own=snapshot.peers.iter().find(|p|p.id==snapshot.self_).map(|p|(snapshot.workspace.clone(),snapshot.self_.clone(),p.ip,p.fingerprint.clone(),p.instance.clone()));
+        if s.own!=own||own.is_none(){s.cache.clear();}
+        let now=Instant::now();
+        for cached in s.cache.values_mut(){
+            if epoch.as_deref()!=Some(cached.lease.epoch.as_str()) {
+                cached.private_active=false;cached.authority=None;cached._retirement_owner=None;
+                #[cfg(all(feature="private-sparse",feature="private-stream"))] {cached.stream_masks=None;}
+            }
+            if exit_epoch.as_deref().is_none_or(|epoch|cached.lease.exit.as_ref().is_none_or(|exit|exit.epoch!=epoch)) {
+                cached.exit_active=false;cached.exit_authority=None;cached._exit_retirement_owner=None;
+            }
         }
+        s.cache.retain(|_,cached|cached.valid(now));s.exit_epoch=exit_epoch;s.own=own;
         s.epoch = epoch;
         s.authority = authority;
         s.deadline = snapshot
@@ -184,7 +242,7 @@ impl Handle {
         let hit = s
             .cache
             .values_mut()
-            .find(|c| select(&c.lease.peer) && c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))?;
+            .find(|c| select(&c.lease.peer) && c.valid(now))?;
         hit.last_used = now;
         Some(hit.lease.peer.clone())
     }
@@ -196,9 +254,9 @@ impl Handle {
         let peer = s
             .cache
             .values()
-            .find(|c| c.lease.peer.ip == ip && c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))?;
+            .find(|c| c.lease.peer.ip == ip && c.valid(now))?;
         let mut remaining=peer.deadline.min(base).checked_duration_since(now)?;
-        for authority in [s.authority.as_ref(),peer.authority.as_ref()].into_iter().flatten(){
+        for authority in [s.authority.as_ref(),peer.metadata_authority(now)].into_iter().flatten(){
             if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
         }
         let remaining=remaining.as_secs();
@@ -220,8 +278,8 @@ impl Handle {
         let now = Instant::now();
         s.cache
             .values()
-            .filter(|c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))
-            .map(|c| c.lease.clone())
+            .filter(|c| c.private_valid(now))
+            .map(|c| {let mut lease=c.lease.clone();if !c.exit_valid(now){lease.exit=None;}lease})
             .collect()
     }
     pub fn peers(&self) -> Vec<PeerInfo> {
@@ -232,7 +290,7 @@ impl Handle {
         }
         s.cache
             .values()
-            .filter(|p| p.deadline > now && p.authority.as_ref().is_none_or(|a|a.check().is_ok()))
+            .filter(|p| p.valid(now))
             .map(|p| p.lease.peer.clone())
             .collect()
     }
@@ -245,7 +303,7 @@ impl Handle {
         if self.revoked() || state.deadline.is_none_or(|d| d <= now) || state.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return false;
         }
-        let Some(cached) = state.cache.get_mut(id).filter(|c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok())) else {
+        let Some(cached) = state.cache.get_mut(id).filter(|c| c.valid(now)) else {
             return false;
         };
         cached.last_used = now;
@@ -301,6 +359,9 @@ impl Handle {
         let now = Instant::now();
         if self.revoked()
             || s.epoch.as_deref() != Some(&lease.epoch)
+            || lease.self_!=lease.local.id
+            || s.own.as_ref().is_none_or(|own|own.0!=lease.workspace||own.1!=lease.self_||own.2!=lease.local.ip||own.3!=lease.local.fingerprint||own.4!=lease.local.instance)
+            || lease.exit.as_ref().is_some_and(|exit|s.exit_epoch.as_deref()!=Some(exit.epoch.as_str()))
             || s.deadline.is_none_or(|d| d <= now)
             || s.authority.as_ref().is_some_and(|a|a.check().is_err())
             || authority.as_ref().is_some_and(|a|a.check().is_err())
@@ -314,7 +375,7 @@ impl Handle {
         else {
             return;
         };
-        s.cache.retain(|_, c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()));
+        s.cache.retain(|_, c| c.valid(now));
         if !s.cache.contains_key(&lease.peer.id) && s.cache.len() >= MAX_PAIR_LEASES {
             return;
         }
@@ -324,7 +385,10 @@ impl Handle {
             .map(|c| c.last_used)
             .unwrap_or(now);
         let mut previous=s.cache.remove(&lease.peer.id);
-        let retained_owner=if authority.is_some(){previous.as_mut().filter(|cached|same_pair_authority(&cached.lease,&lease)).and_then(|cached|cached._retirement_owner.take())}else{None};
+        let retained_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.private_active&&same_pair_authority(&cached.lease,&lease)).and_then(|cached|cached._retirement_owner.take())}else{None};
+        let retained_exit_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.exit_active&&same_exit_authority(&cached.lease,&lease)).and_then(|cached|cached._exit_retirement_owner.take())}else{None};
+        let exit_retirement_owner=retained_exit_owner.or_else(||if lease.exit.is_some(){authority.as_ref().map(|_|super::authority_event::Owner::new())}else{None});
+        let exit_authority=authority.clone().zip(exit_retirement_owner.as_ref()).map(|(authority,owner)|authority.retired_with(owner.domain()));
         let retirement_owner=retained_owner.or_else(||authority.as_ref().map(|_|super::authority_event::Owner::new()));
         let authority=authority.zip(retirement_owner.as_ref()).map(|(authority,owner)|authority.retired_with(owner.domain()));
         s.cache.insert(
@@ -333,6 +397,8 @@ impl Handle {
                 #[cfg(all(feature="private-sparse",feature="private-stream"))]
                 stream_masks,
                 _retirement_owner:retirement_owner,
+                _exit_retirement_owner:exit_retirement_owner,
+                exit_authority,private_active:true,exit_active:lease.exit.is_some(),
                 authority,
                 lease,
                 deadline: now + left,
@@ -350,7 +416,7 @@ impl Handle {
         s.cache
             .values()
             .find(|c| {
-                c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok())
+                c.valid(now)
                     && match query.kind.as_str() {
                         "peer" => c.lease.peer.id == query.value,
                         "ip" => c.lease.peer.ip.to_string() == query.value,
@@ -444,7 +510,7 @@ impl Control {
             .ok_or_else(|| anyhow::anyhow!("sparse sequence exhausted"))?;
         let mut s = self.handle.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        s.cache.retain(|_, c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()));
+        s.cache.retain(|_, c| c.valid(now));
         s.wanted
             .retain(|_, i| now.saturating_duration_since(i.used) < Duration::from_secs(30));
         let mut renew: Vec<_> = s
@@ -575,6 +641,67 @@ mod tests {
         assert!(old.check().is_ok(),"identical renewal must not spuriously retire live operations");
         clock.0.store(15000,Ordering::SeqCst);assert!(old.check().is_err());let fresh=handle.pair_authority("b").unwrap();assert!(fresh.check().is_ok());
         let mut changed=pair;changed.grants.clear();handle.installed_authority(&query,changed,authority());assert!(fresh.check().is_err(),"changed ACL retires the old domain");
+    }
+    #[cfg(feature="private-sparse")]
+    struct ExitClock(std::sync::atomic::AtomicU64);
+    #[cfg(feature="private-sparse")]
+    impl super::super::authority_clock::SuspendClock for ExitClock {
+        fn elapsed_since_boot(&self)->anyhow::Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}
+    }
+    #[cfg(feature="private-sparse")]
+    fn exit_base(private:&str,exit:&str)->Snapshot {
+        let mut snapshot=base(private);snapshot.sparse.as_mut().unwrap().exit_epoch=Some(exit.into());
+        snapshot.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];snapshot
+    }
+    #[cfg(feature="private-sparse")]
+    fn exit_lease(private:&str,exit:&str)->PairLease {
+        let mut pair=lease(private);pair.exit=Some(porthub_network::policy::ExitPair{epoch:exit.into(),route_id:"exit-route".into(),client:"a".into(),router:"b".into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly});pair
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn cached_permission_classes_retire_independently_and_epoch_roundtrip_never_revives_old_permits() {
+        let clock=Arc::new(ExitClock(std::sync::atomic::AtomicU64::new(0)));
+        let authority=|expiry|super::super::authority_event::Authority::new((),Some(super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap()),expiry);
+        let a="a".repeat(64);let b="b".repeat(64);let e="e".repeat(64);let f="f".repeat(64);let(handle,_)=channel();
+        let query=Lookup{kind:"peer".into(),value:"b".into()};let snapshot=exit_base(&a,&e);let pair=exit_lease(&a,&e);
+        handle.update_base_authority(&snapshot,authority(snapshot.expires_at));handle.installed_authority(&query,pair.clone(),authority(pair.expires_at));
+        let old_private=handle.bound_pair_authority("b").unwrap();let old_exit=handle.bound_exit_pair_authority("b").unwrap();
+        assert!(old_private.lease().exit.is_none());assert!(old_exit.lease().grants.is_empty()&&old_exit.lease().acl.is_none());
+        assert!(old_private.permit().valid()&&old_exit.permit().valid());
+        let original_deadline=handle.state.lock().unwrap().cache["b"].deadline;
+        clock.0.store(10000,Ordering::SeqCst);let changed=exit_base(&b,&e);handle.update_base_authority(&changed,authority(changed.expires_at));
+        assert_eq!(handle.state.lock().unwrap().cache["b"].deadline,original_deadline);
+        assert!(!old_private.permit().valid());assert!(old_exit.permit().valid());
+        assert!(handle.bound_pair_authority("b").is_none());assert_eq!(handle.bound_exit_pair_authority("b").unwrap().lease().epoch,a,"cached immutable lease was relabelled");
+        assert!(handle.by_id("b").is_some());assert!(handle.leases().is_empty());
+        handle.update_base_authority(&snapshot,authority(snapshot.expires_at));assert!(handle.bound_pair_authority("b").is_none(),"ordinary epoch roundtrip revived retired bytes");
+        handle.update_base_authority(&changed,authority(changed.expires_at));
+        let renewed=exit_lease(&b,&e);handle.installed_authority(&query,renewed.clone(),authority(renewed.expires_at));
+        let fresh_private=handle.bound_pair_authority("b").unwrap();let fresh_exit=handle.bound_exit_pair_authority("b").unwrap();
+        assert!(old_exit.permit().valid(),"unchanged genuine exit renewal retired old queued receipt before its deadline");
+        let changed_exit=exit_base(&b,&f);handle.update_base_authority(&changed_exit,authority(changed_exit.expires_at));
+        assert!(fresh_private.permit().valid());assert!(!fresh_exit.permit().valid()&&!old_exit.permit().valid());
+        assert!(handle.leases()[0].exit.is_none(),"inactive exit poisoned private validator view");
+        handle.update_base_authority(&changed,authority(changed.expires_at));assert!(handle.bound_exit_pair_authority("b").is_none(),"exit epoch roundtrip revived retired bytes");
+        let mut new_source=changed;new_source.peers[0].instance="replacement-source".into();handle.update_base_authority(&new_source,authority(new_source.expires_at));
+        assert!(!fresh_private.permit().valid());assert!(handle.by_id("b").is_none());
+        handle.installed_authority(&query,renewed.clone(),authority(renewed.expires_at));assert!(handle.by_id("b").is_none(),"old source receipt was republished under replacement source");
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn exit_receipt_retains_original_suspend_clock_across_new_private_base() {
+        let clock=Arc::new(ExitClock(std::sync::atomic::AtomicU64::new(0)));
+        let authority=|expiry|super::super::authority_event::Authority::new((),Some(super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap()),expiry);
+        let a="a".repeat(64);let b="b".repeat(64);let e="e".repeat(64);let(handle,mut control)=channel();
+        let snapshot=exit_base(&a,&e);let pair=exit_lease(&a,&e);let query=Lookup{kind:"peer".into(),value:"b".into()};
+        handle.update_base_authority(&snapshot,authority(snapshot.expires_at));handle.installed_authority(&query,pair.clone(),authority(pair.expires_at));
+        let queued=handle.bound_exit_pair_authority("b").unwrap();
+        clock.0.store(10000,Ordering::SeqCst);let changed=exit_base(&b,&e);handle.update_base_authority(&changed,authority(changed.expires_at));
+        assert!(queued.permit().valid());assert!(handle.dns_ttl(pair.peer.ip).is_some());assert!(handle.touch_peer("b"));
+        clock.0.store(15000,Ordering::SeqCst);
+        assert!(handle.authority_valid());assert!(!queued.permit().valid());assert!(handle.bound_exit_pair_authority("b").is_none());
+        assert!(handle.by_id("b").is_none()&&handle.dns_ttl(pair.peer.ip).is_none());
+        control.batch().unwrap();assert!(handle.state.lock().unwrap().cache.is_empty());
     }
     #[cfg(feature="private-sparse")]
     #[test]
