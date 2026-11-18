@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import os
 import json
 from pathlib import Path
 import tempfile
@@ -21,6 +22,19 @@ class DepotTests(unittest.TestCase):
             with self.assertRaises(ValueError):d.install(root,key,io.BytesIO(b'changed'))
             self.assertEqual((root/key).read_bytes(),payload)
             self.assertEqual(list(root.glob('.incoming-*')),[])
+
+    def test_published_directories_are_readable_under_restrictive_umask(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = b'archive'
+            key = 'a' * 40 + '/aarch64-apple-darwin/' + hashlib.sha256(payload).hexdigest() + '.zip'
+            old_mask = os.umask(0o077)
+            try:
+                d.install(root, key, io.BytesIO(payload))
+            finally:
+                os.umask(old_mask)
+            for directory in [(root / key).parent, root / ('a' * 40)]:
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
 
     def test_caps_reject_without_evicting_active_data(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -101,7 +101,15 @@ def install(root,key,stream,max_bytes=MAX_BYTES,max_revisions=MAX_REVISIONS):
                     raise ValueError('Depot byte cap reached; explicit protected-source prune required')
                 if source not in {row['source_revision'] for row in rows} and len(rows)>=max_revisions:
                     raise ValueError('Depot revision cap reached; explicit protected-source prune required')
-                target.parent.mkdir(parents=True,exist_ok=True)
+                directory = root
+                for component in Path(key).parts[:-1]:
+                    directory = directory / component
+                    if not directory.exists():
+                        directory.mkdir(mode=0o755)
+                        # The API reads published paths under a different UID.
+                        directory.chmod(0o755)
+                    if directory.stat().st_mode & 0o022:
+                        raise ValueError('Published directory must not be group/world writable')
                 temporary_path.chmod(0o644)
                 temporary_path.replace(target)
             return {'installed':key,'size':size,'sha256':digest.hexdigest()}
