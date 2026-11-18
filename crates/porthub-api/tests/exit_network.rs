@@ -195,6 +195,10 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             async fn wait_phase(name:&str,phase:&str)->Result<String> {
                 tokio::time::timeout(Duration::from_secs(8),async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.context("owned relay handshake phase timeout")?
             }
+            wait_phase(provider,"native_relay_origin negotiated=true").await?;
+            wait_phase(consumer,"native_relay_origin negotiated=true").await?;
+            docker(args(&["exec",consumer,"sh","-c","test ! -e /state/release-send && touch /state/release-send"])).await?;
+            println!("fault_injected_relay phase=both_real_relay_connections_established");
             wait_phase(provider,"phase=retained_before_pair").await?;
             println!("fault_injected_relay phase=first_payload_retained_before_pair");
             docker(args(&["exec",provider,"sh","-c","test ! -e /state/release-pair && touch /state/release-pair"])).await?;

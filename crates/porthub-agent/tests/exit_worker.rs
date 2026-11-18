@@ -52,6 +52,7 @@ fn icmp_echo(target: std::net::Ipv4Addr) -> Result<()> {
     Ok(())
 }
 async fn relay_origin_consumer(target:&str)->Result<()> {
+    tokio::time::timeout(Duration::from_secs(20),async{while !std::path::Path::new("/state/release-send").is_file(){tokio::time::sleep(Duration::from_millis(25)).await;}}).await.context("owned relay transport bootstrap not released")?;
     let nonce=std::env::var("PORTHUB_TEST_FIXTURE_NONCE")?;let expected=format!("relay-origin-first-{nonce}");
     let socket=tokio::time::timeout(Duration::from_secs(20),async{loop{
         let socket=tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
