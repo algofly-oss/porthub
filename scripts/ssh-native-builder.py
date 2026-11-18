@@ -159,12 +159,13 @@ env=os.environ.copy()
 env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+env.get('PATH','')
 env.update(CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TARGET_DIR=str(stage/'target'),RUST_MIN_STACK='33554432')
 if job['tools']['vcvars']:
+ env={key.upper():value for key,value in env.items()}
  cmd='"'+job['tools']['vcvars']+'" >nul && set'
  text=subprocess.run(['cmd.exe','/d','/s','/c',cmd],check=True,capture_output=True,text=True,timeout=30).stdout
  for line in text.splitlines():
   if '=' in line and not line.startswith('='):
-   key,value=line.split('=',1); env[key]=value
- env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+env.get('Path',env.get('PATH',''))
+   key,value=line.split('=',1); env[key.upper()]=value
+ env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+env.get('PATH','')
 try:
  with (stage/'worker.log').open('wb') as log:
   subprocess.run([sys.executable,str(source/'scripts/hybrid-native-build.py'),'worker','--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--tool','core','--timeout-seconds',str(job['timeout'])],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
