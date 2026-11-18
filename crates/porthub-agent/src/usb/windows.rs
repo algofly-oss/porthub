@@ -631,7 +631,14 @@ fn parse_device(
     }
     let busnum = busid.split('-').next()?.parse().ok()?;
     let devnum = busid.split('-').nth(1)?.split('.').last()?.parse().ok()?;
-    let blocked = if !row["ClientIPAddress"].is_null() {
+    let vendor = id("VID_")?;
+    let product = id("PID_")?;
+    let blocked = if vendor == "0000" {
+        Some(
+            "Windows could not read the USB device descriptor; reconnect the device before sharing"
+                .into(),
+        )
+    } else if !row["ClientIPAddress"].is_null() {
         Some("Device is already attached by another USB client".into())
     } else if lower.contains("network") || lower.contains("ethernet") {
         Some("Network adapters must remain available to the host".into())
@@ -644,8 +651,8 @@ fn parse_device(
     };
     let device = Device {
         busid: busid.into(),
-        vendor: id("VID_")?,
-        product: id("PID_")?,
+        vendor,
+        product,
         serial: instance.rsplit('\\').next()?.chars().take(256).collect(),
         name: name.chars().take(256).collect(),
         busnum,
@@ -1367,6 +1374,19 @@ mod tests {
             .is_none());
         assert!(parse_device(&row, None, None).unwrap().blocked.is_some());
     }
+
+    #[test]
+    fn descriptor_failure_is_visible_but_cannot_be_forwarded() {
+        let row = serde_json::json!({
+            "BusId": "1-4",
+            "InstanceId": r"USB\VID_0000&PID_0002\failed",
+            "Description": "Unknown USB Device (Device Descriptor Request Failed)",
+        });
+        let device = parse_device(&row, Some(false), Some(false)).unwrap();
+        assert_eq!(device.vendor, "0000");
+        assert!(device.blocked.as_deref().unwrap().contains("descriptor"));
+    }
+
     #[test]
     fn storage_guard_checks_only_selected_disk_volumes() {
         let disks = [
