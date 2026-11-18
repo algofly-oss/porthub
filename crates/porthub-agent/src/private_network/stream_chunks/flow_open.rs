@@ -4,6 +4,7 @@ use super::*;
 use crate::private_network::authority_clock::{NativeClock, RequestWindow};
 use porthub_mesh::streams::CreditedReceiverConnection;
 use std::time::Duration;
+pub(super) const OPEN_BUDGET: Duration = Duration::from_secs(2);
 fn remaining(permit: &SendPermit) -> Result<u32> {
     let n = permit
         .remaining()
@@ -334,7 +335,7 @@ async fn initiate_inner(
     let closing = connection.clone();
     let mut flight = Flight::new(gate, original.clone(), move || closing.close())?;
     let result = tokio::time::timeout(
-        Duration::from_secs(2),
+        OPEN_BUDGET,
         original.during(async {
             let (mut output, mut input) = connection.open_chunk(&original).await?;
             let mut request = [0; HEADER];
@@ -425,7 +426,7 @@ async fn accept_inner(
     let closing = connection.closer();
     let mut flight = Flight::new(gate, original.clone(), move || closing.close())?;
     let result = tokio::time::timeout(
-        Duration::from_secs(2),
+        OPEN_BUDGET,
         original.during(async {
             let (mut output, mut input) = connection.accept_one(&original).await?;
             let mut request = [0; HEADER];
@@ -633,6 +634,14 @@ pub(super) mod tests {
         remote: &Peer,
         label: &str,
     ) -> Result<(sparse::Handle, LocalAuthority)> {
+        local_with_clock(own, remote, label, Arc::new(NativeClock))
+    }
+    pub(crate) fn local_with_clock(
+        own: &Peer,
+        remote: &Peer,
+        label: &str,
+        clock: Arc<dyn crate::private_network::authority_clock::SuspendClock>,
+    ) -> Result<(sparse::Handle, LocalAuthority)> {
         let info = |p: &Peer| serde_json::json!({"id":p.id,"ip":p.ip,"fingerprint":p.fingerprint,"instance":p.instance,"hostname":format!("{}.phub",p.id)});
         let expiry = chrono::Utc::now() + chrono::Duration::seconds(60);
         let epoch = label.repeat(64);
@@ -645,7 +654,7 @@ pub(super) mod tests {
         let authority = || {
             Authority::new(
                 (),
-                Some(RequestWindow::start(Arc::new(NativeClock)).unwrap()),
+                Some(RequestWindow::start(clock.clone()).unwrap()),
                 expiry,
             )
         };

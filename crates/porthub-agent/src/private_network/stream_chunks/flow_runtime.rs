@@ -20,6 +20,12 @@ const PER_PEER: usize = 4;
 // Optimization is opportunistic. No native flow-open is sent before this
 // deadline, so a failed pre-connect can safely return its original SYN to raw.
 const PRECONNECT_BUDGET: Duration = Duration::from_secs(1);
+// Reserve both reciprocal flow-open windows without extending any origin.
+const SETUP_RUNWAY: Duration =
+    PRECONNECT_BUDGET.saturating_add(flow_open::OPEN_BUDGET.saturating_mul(2));
+fn setup_ready(permit: &SendPermit, needed: Duration) -> bool {
+    permit.remaining().is_some_and(|left| left >= needed)
+}
 // Same bound as the existing raw transport flow-pinning table. Exhaustion
 // declines new optimizations; it never truncates identities or raw packets.
 const DECISIONS: usize = 65536;
@@ -75,6 +81,8 @@ enum Command {
     },
 }
 struct Inner {
+    #[cfg(test)]
+    connected_sources: std::sync::atomic::AtomicUsize,
     requested: bool,
     identity: Identity,
     current: Lookup,
@@ -163,6 +171,8 @@ impl Runtime {
         let (native, packets, runner) = tagged::stack()?;
         let (commands, input) = mpsc::channel(64);
         let runtime = Self(Arc::new(Inner {
+            #[cfg(test)]
+            connected_sources: std::sync::atomic::AtomicUsize::new(0),
             requested,
             identity,
             current,
@@ -360,6 +370,10 @@ impl Runtime {
             self.commit_raw(flow);
             return false;
         };
+        if !setup_ready(&local.original(), SETUP_RUNWAY) {
+            self.commit_raw(flow);
+            return false;
+        }
         let sequence = syn_sequence(&bytes);
         let Ok(syn) = local.admit_syn(bytes) else {
             self.commit_raw(flow);
@@ -558,7 +572,8 @@ impl FlowFailureReporter {
         for cause in error.chain().take(16) {
             let text=cause.to_string();
             if let Some(known)=stages.iter().find(|known|text==**known) {if stage=="unclassified"{stage=*known;}}
-            if cause.is::<tokio::time::error::Elapsed>() {reason="timeout";}
+            if text == "private packet admission retired" {reason="admission-retired";}
+            else if cause.is::<tokio::time::error::Elapsed>() {reason="timeout";}
             else if cause.is::<std::io::Error>() {reason="native-io";}
             else if ["source flow authority unavailable","response authority unavailable","target authority unavailable","carrier original request authority expired","native SYN current pair/epoch changed while queued","source flow owner retired","target flow owner retired"].contains(&text.as_str()) {reason="authority";}
             let bytes=text.as_bytes();let count=bytes.len().min(left);hash.update(&bytes[..count]);left-=count;if left==0{break;}
@@ -723,6 +738,18 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
                 return Ok(Some(syn));
             },
         };
+        #[cfg(test)]
+        runtime.0.connected_sources.fetch_add(1, Ordering::SeqCst);
+        // No native leg exists before initiate_native. Preserve the exact SYN
+        // and old witness if preconnect consumed its setup runway.
+        let fresh = current()
+            .ok_or_else(|| anyhow::anyhow!("source flow authority unavailable"))?;
+        if !setup_ready(
+            &syn.bind_current(&fresh)?,
+            flow_open::OPEN_BUDGET.saturating_mul(2),
+        ) {
+            return Ok(Some(syn));
+        }
         let opened = flow_open::initiate_native(&client, &source.gate(), &local, &syn).await.context("source-open")?;
         let opening = opened.prepare_source(&runtime.0.native, syn).await.context("source-native-prepare")?;
         record

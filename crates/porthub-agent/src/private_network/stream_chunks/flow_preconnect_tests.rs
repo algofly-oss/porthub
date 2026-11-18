@@ -83,10 +83,15 @@ async fn native_delivery(
     Ok(())
 }
 
-async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:bool)->Result<()> {
+async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:bool,deplete_setup:bool)->Result<()> {
     timeout(Duration::from_secs(7),async {
         let ai=Identity::new()?;let bi=Identity::new()?;let(ap,bp)=roles(&ai,&bi);
-        let(ha,_)=flow_open::tests::local(&ap,&bp,"a")?;let(hb,_)=flow_open::tests::local(&bp,&ap,"b")?;
+        struct SetupClock(std::sync::atomic::AtomicU64);
+        impl crate::private_network::authority_clock::SuspendClock for SetupClock {
+            fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}
+        }
+        let setup_clock=Arc::new(SetupClock(std::sync::atomic::AtomicU64::new(0)));
+        let(ha,_)=flow_open::tests::local_with_clock(&ap,&bp,"a",setup_clock.clone())?;let(hb,_)=flow_open::tests::local(&bp,&ap,"b")?;
         let aa=ha.clone();let bb=hb.clone();let(ea,mut ra)=mpsc::channel(256);let(eb,mut rb)=mpsc::channel(256);
         let stop=CancellationToken::new();
         let(a,ar)=Runtime::new_requested(ai,Arc::new(move|peer|LocalAuthority::capture(&aa,"w","a",peer).ok().map(Arc::new)),Arc::new(|_|{}),ea,stop.child_token())?;
@@ -105,7 +110,10 @@ async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:boo
                 packet=pa.recv()=>{let Some(packet)=packet else{break};if !ca.kernel_packet("b",packet.clone(),true){native_delivery(&cb,&kb_io,packet,true,&mut started_b,&mut acceptors,&applications,&observations).await?;}},
                 packet=pb.recv()=>{let Some(packet)=packet else{break};if !cb.kernel_packet("a",packet.clone(),false){native_delivery(&ca,&ka_io,packet,true,&mut started_a,&mut acceptors,&applications,&observations).await?;}},
                 event=ra.recv()=>{let Some(event)=event else{break};match event{
-                    Event::StreamDatagram{payload,permit,..}=>{held.push((true,payload,permit.ok_or_else(||anyhow::anyhow!("source carrier lost permit"))?));},
+                    Event::StreamDatagram{payload,permit,..}=>{
+                        if deplete_setup {setup_clock.0.store(12000,Ordering::SeqCst);}
+                        held.push((true,payload,permit.ok_or_else(||anyhow::anyhow!("source carrier lost permit"))?));
+                    },
                     Event::GuardedRawSyn{handoff}=>{
                         observations.raw_handoffs.fetch_add(1,Ordering::SeqCst);
                         let(bytes,permit)=handoff.release()?;
@@ -135,7 +143,7 @@ async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:boo
             }}Ok::<_,anyhow::Error>(())}.await;
             acceptors.abort_all();while acceptors.join_next().await.is_some(){}result
         });
-        let count=if delayed_healthy||hold_native_after_open{1}else{5};
+        let count=if delayed_healthy||hold_native_after_open||deplete_setup{1}else{5};
         let mut clients=tokio::task::JoinSet::new();
         for index in 0..count {
             if index==4 {
@@ -161,7 +169,10 @@ async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:boo
                 services.spawn(async move{app.write_all(b"SSH-test").await?;let mut request=Vec::new();app.read_to_end(&mut request).await?;ensure!(request.len()==31,"request FIN/body missing");app.write_all(&request).await?;app.shutdown().await?;Ok::<_,anyhow::Error>(())});
             }
             while let Some(client)=clients.join_next().await{client??;}while let Some(server)=services.join_next().await{server??;}
-            if delayed_healthy {
+            if deplete_setup {
+                ensure!(a.0.connected_sources.load(Ordering::SeqCst)==1,"test must exercise successful QUIC preconnect before raw handoff");
+                ensure!(observed.raw_handoffs.load(Ordering::SeqCst)==1&&observed.raw_native_syns.load(Ordering::SeqCst)==1&&observed.optimized_native_syns.load(Ordering::SeqCst)==0,"postconnect depleted original did not return exactly one raw SYN");
+            }else if delayed_healthy {
                 ensure!(observed.raw_handoffs.load(Ordering::SeqCst)==0&&observed.optimized_native_syns.load(Ordering::SeqCst)>0,"delayed healthy setup lost useful optimization");
             }else{
                 ensure!(observed.raw_handoffs.load(Ordering::SeqCst)==4&&observed.raw_native_syns.load(Ordering::SeqCst)==5&&observed.optimized_native_syns.load(Ordering::SeqCst)==0,"stalled preconnect did not hand off each original exactly once");
@@ -177,9 +188,129 @@ async fn carrier_preconnect_case(delayed_healthy:bool,hold_native_after_open:boo
     }).await?
 }
 #[tokio::test]
-async fn four_stalled_preconnects_deliver_original_syn_once_and_fifth_raw_is_responsive()->Result<()>{carrier_preconnect_case(false,false).await}
+async fn four_stalled_preconnects_deliver_original_syn_once_and_fifth_raw_is_responsive()->Result<()>{carrier_preconnect_case(false,false,false).await}
 #[tokio::test]
-async fn delayed_healthy_preconnect_preserves_optimized_native_duplex()->Result<()>{carrier_preconnect_case(true,false).await}
+async fn delayed_healthy_preconnect_preserves_optimized_native_duplex()->Result<()>{carrier_preconnect_case(true,false,false).await}
 
 #[tokio::test]
-async fn already_offered_native_syn_never_falls_back_when_native_ack_stalls()->Result<()>{carrier_preconnect_case(false,true).await}
+async fn already_offered_native_syn_never_falls_back_when_native_ack_stalls()->Result<()>{carrier_preconnect_case(false,true,false).await}
+
+// Exercise the actual synchronous ownership decision with a suspend-aware
+// authority clock, without sleeping until a live lease is nearly expired.
+#[tokio::test]
+async fn late_original_syn_declines_stream_before_reserving_native_owner() -> Result<()> {
+    use crate::private_network::{
+        authority_clock::{RequestWindow, SuspendClock},
+        authority_event::Authority,
+    };
+    use std::sync::atomic::AtomicU64;
+    struct Clock(AtomicU64);
+    impl SuspendClock for Clock {
+        fn elapsed_since_boot(&self) -> Result<Duration> {
+            Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))
+        }
+    }
+    let ai = Identity::new()?;
+    let bi = Identity::new()?;
+    let (ap, bp) = roles(&ai, &bi);
+    let info = |p: &Peer| serde_json::json!({"id":p.id,"ip":p.ip,"fingerprint":p.fingerprint,"instance":p.instance,"hostname":format!("{}.phub",p.id)});
+    let expiry = chrono::Utc::now() + chrono::Duration::seconds(15);
+    let epoch = "a".repeat(64);
+    let base = serde_json::from_value(
+        serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"sparse":{"protocol":1,"epoch":epoch},"peers":[info(&ap)],"grants":[]}),
+    )?;
+    let pair = serde_json::from_value(
+        serde_json::json!({"workspace":"w","self":"a","epoch":epoch,"revision":1,"expires_at":expiry,"local":info(&ap),"peer":info(&bp),"grants":[{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}]}),
+    )?;
+    let clock = Arc::new(Clock(AtomicU64::new(0)));
+    let authority = || {
+        Authority::new(
+            (),
+            Some(RequestWindow::start(clock.clone()).unwrap()),
+            expiry,
+        )
+    };
+    let (h, _) = crate::private_network::sparse::channel();
+    h.update_base_authority(&base, authority());
+    h.installed_authority(
+        &porthub_network::policy::Lookup {
+            kind: "peer".into(),
+            value: "b".into(),
+        },
+        pair,
+        authority(),
+    );
+    let captured = h.clone();
+    let (tx, _) = mpsc::channel(64);
+    let (runtime, background) = Runtime::new_requested(
+        ai,
+        Arc::new(move |id| {
+            LocalAuthority::capture(&captured, "w", "a", id)
+                .ok()
+                .map(Arc::new)
+        }),
+        Arc::new(|_| {}),
+        tx,
+        CancellationToken::new(),
+    )?;
+    let syn = native_syn(flow(49300)).await?;
+    clock.0.store(12000, Ordering::SeqCst);
+    assert!(
+        h.bound_pair_authority("b").unwrap().permit().valid(),
+        "late lease remains authorized for raw transport"
+    );
+    assert!(
+        !runtime.kernel_packet("b", syn.clone(), true),
+        "late original must not commit to an optimized native owner"
+    );
+    assert_eq!(runtime.counts(), (0, 0));
+    assert!(matches!(
+        runtime.0.state.lock().unwrap().decisions.get(&flow(49300)),
+        Some(Decision::Raw)
+    ));
+    assert!(
+        !runtime.kernel_packet("b", syn, true),
+        "same SYN retains its first raw decision"
+    );
+    drop(background);
+    Ok(())
+}
+
+#[test]
+fn setup_runway_consumption_and_original_retirement_never_renew_admission() {
+    use std::sync::atomic::AtomicU64;
+    let left = Arc::new(AtomicU64::new(6000));
+    let original = left.clone();
+    let permit = SendPermit::bounded(
+        || true,
+        move || Some(Duration::from_millis(original.load(Ordering::SeqCst))),
+    );
+    assert!(setup_ready(&permit, SETUP_RUNWAY));
+    left.store(4999, Ordering::SeqCst);
+    assert!(permit.valid());
+    assert!(
+        !setup_ready(&permit, SETUP_RUNWAY),
+        "preconnect must not enter flow-open with depleted original runway"
+    );
+    assert!(
+        setup_ready(&permit, flow_open::OPEN_BUDGET.saturating_mul(2)),
+        "connected QUIC no longer needs its preconnect budget"
+    );
+    left.store(0, Ordering::SeqCst);
+    assert!(!permit.valid());
+    assert!(!setup_ready(&permit, SETUP_RUNWAY));
+    let veto = Arc::new(AtomicBool::new(true));
+    let check = veto.clone();
+    let permit = SendPermit::bounded(
+        move || check.load(Ordering::SeqCst),
+        || Some(Duration::from_secs(10)),
+    );
+    assert!(setup_ready(&permit, SETUP_RUNWAY));
+    veto.store(false, Ordering::SeqCst);
+    assert!(!setup_ready(&permit, SETUP_RUNWAY));
+}
+
+#[tokio::test]
+async fn connected_quic_with_depleted_original_returns_syn_before_native_open() -> Result<()> {
+    carrier_preconnect_case(true, false, true).await
+}

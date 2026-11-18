@@ -336,3 +336,18 @@ fn flow_failure_reports_rate_limit_and_account_for_suppressed_errors() -> Result
 
 #[path = "flow_preconnect_tests.rs"]
 mod preconnect;
+
+#[test]
+fn observed_response_open_admission_retirement_has_explicit_neutral_reason() -> Result<()> {
+    let error = anyhow::anyhow!("private packet admission retired").context("source-response-open");
+    let result = FlowFailureReporter::default()
+        .completed(Ok(Err(error)), std::time::Instant::now())?
+        .unwrap();
+    assert_eq!(result.stage, "source-response-open");
+    assert_eq!(result.reason, "admission-retired");
+    assert_eq!(
+        result.fingerprint,
+        "5a8c3cedd79185e162325a8824e2eab31b2197329ad6ec39957380c48c48aed1"
+    );
+    Ok(())
+}
