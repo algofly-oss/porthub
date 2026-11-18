@@ -50,6 +50,7 @@ pub mod realtime;
 pub mod release_cache;
 pub mod routes;
 pub mod static_ui;
+pub mod native_build_depot;
 pub mod status_monitor;
 pub mod store;
 pub mod terminal;
@@ -109,6 +110,7 @@ pub struct App {
     pub ui: Option<porthub_runtime::proxy::HttpProxy>,
     pub pairdrop: Option<porthub_runtime::proxy::HttpProxy>,
     pub static_ui: Option<static_ui::StaticUi>,
+    pub native_build_depot: Option<Arc<native_build_depot::Depot>>,
     pub gateway_config_lock: tokio::sync::Mutex<()>,
     pub traffic_route_lock: tokio::sync::Mutex<()>,
     pub config_signals: config_signals::ConfigSignals,
@@ -116,6 +118,7 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config, db: Database) -> Self {
+        let native_build_depot=config.native_build_depot_root.as_ref().map(|root|Arc::new(native_build_depot::Depot::new(root,config.native_build_depot_owner_uid).expect("validated protected native build depot")));
         let ui = if config.ui_upstream.is_empty() {
             None
         } else {
@@ -180,6 +183,7 @@ impl App {
             gateway_config_lock: tokio::sync::Mutex::new(()),
             traffic_route_lock: tokio::sync::Mutex::new(()),
             static_ui,
+            native_build_depot,
             pairdrop,
             ui,
             db,
@@ -219,6 +223,7 @@ impl App {
 
 pub fn router(app: Arc<App>) -> Router {
     let realtime = realtime::Hub::install(&app);
+    let depot=native_build_depot::router(app.native_build_depot.clone());
     Router::new()
         .merge(routes::router())
         .merge(docs::router())
@@ -243,6 +248,7 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(axum::middleware::from_fn(http::private_api_cache))
         .layer(axum::middleware::from_fn(http::cors))
         .with_state(app)
+        .merge(depot)
 }
 
 async fn ping(

@@ -13,6 +13,8 @@ pub struct Config {
     pub ui_upstream: String,
     pub pairdrop_upstream: String,
     pub ui_root: String,
+    pub native_build_depot_root: Option<std::path::PathBuf>,
+    pub native_build_depot_owner_uid: u32,
     pub mongo_uri: String,
     pub mongo_database: String,
     pub session_cookie: String,
@@ -55,6 +57,8 @@ impl Default for Config {
             ui_upstream: String::new(),
             pairdrop_upstream: String::new(),
             ui_root: String::new(),
+            native_build_depot_root: None,
+            native_build_depot_owner_uid: 0,
             mongo_uri: String::new(),
             mongo_database: String::new(),
             session_cookie: "porthub_session".into(),
@@ -105,6 +109,9 @@ pub fn docs_enabled(env_default: bool, admin_override: Option<bool>) -> bool {
 
 impl Config {
     pub fn load() -> Result<Self> {
+        let native_build_depot_root=std::env::var_os("PORTHUB_NATIVE_BUILD_DEPOT_ROOT").filter(|v|!v.is_empty()).map(std::path::PathBuf::from);
+        let native_build_depot_owner_uid=env("PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID","0").parse::<u32>().context("invalid native build depot owner UID")?;
+        if let Some(root)=&native_build_depot_root {crate::native_build_depot::Depot::new(root,native_build_depot_owner_uid).context("invalid protected native build depot")?;}
         let signup_disabled = match env("SIGNUP_DISABLED", "false")
             .trim()
             .to_ascii_lowercase()
@@ -313,6 +320,8 @@ impl Config {
             ui_upstream,
             pairdrop_upstream,
             ui_root,
+            native_build_depot_root,
+            native_build_depot_owner_uid,
             mongo_uri: std::env::var("MONGO_DATABASE_URI")
                 .context("MONGO_DATABASE_URI required")?,
             mongo_database: std::env::var("MONGO_DATABASE_NAME")
