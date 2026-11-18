@@ -19,6 +19,7 @@ export default function PrivateTraffic({ active, refresh }) {
   const resource = usePrivateTraffic({ range, machine, search, page, selected, enabled: active, paused, refresh });
   const flows = resource.data?.flows || [];
   const totals = resource.data?.totals;
+  const coverage = resource.data?.coverage;
   const pagination = resource.data?.pagination;
   const current = resource.data?.selected_flow;
   const selectedKey = selected ? privateFlowKey(selected) : null;
