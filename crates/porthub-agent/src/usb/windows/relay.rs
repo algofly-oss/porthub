@@ -485,6 +485,7 @@ pub(super) struct Intent {
     service: String,
     before: Vec<Row>,
     pnp: Vec<String>,
+    cm: CmTree,
 }
 impl Intent {
     pub(super) fn capture(
@@ -507,6 +508,7 @@ impl Intent {
             service: service.into(),
             before,
             pnp: pnp_baseline(controller)?,
+            cm: cm_tree(controller)?,
         })
     }
     pub(super) fn try_clone(&self) -> Result<Self> {
@@ -517,6 +519,7 @@ impl Intent {
             service: self.service.clone(),
             before: self.before.clone(),
             pnp: self.pnp.clone(),
+            cm: self.cm.clone(),
         })
     }
     pub(super) fn absent_port(&self, port: i32) -> Result<bool> {
@@ -530,6 +533,12 @@ impl Intent {
         }
         if rows.iter().any(|r| r.port == port) {
             return Ok(false);
+        }
+        // After a canceled import, an empty hub may return unusable index
+        // metadata. Exact restoration of the controller inventory and the
+        // complete pre-attach PnP tree independently proves retirement.
+        if rows == self.before && cm_absent(&self.cm, &cm_tree(self.controller)?) {
+            return Ok(true);
         }
         Ok(port_instances(self.controller, port)?.is_empty())
     }

@@ -24,7 +24,6 @@ export default function PrivateTraffic({ active, refresh }) {
   const selectedKey = selected ? privateFlowKey(selected) : null;
   useEffect(() => { setSelected(null); setPage(1); }, [range, machine]);
   const rows = useMemo(() => selected && !current ? [] : privateTrafficWindow(resource.data, current), [resource.data, current, selected]);
-  const coverage = resource.data?.coverage;
   return <section aria-label="Private network traffic" className="min-w-0 overflow-hidden rounded-xl bg-surface">
     <div className="flex flex-wrap items-start justify-between gap-3 p-5">
       <div><h2 className="flex items-center gap-2 text-base font-semibold"><IconNetwork size={18} />Private network traffic</h2><p className="mt-1 text-xs text-muted-foreground">Sender-reported machine-to-machine transfers</p></div>
@@ -40,8 +39,6 @@ export default function PrivateTraffic({ active, refresh }) {
       {selected && !current && <p role="status" className="mt-2 text-xs text-muted-foreground">{resource.loading ? 'Loading the selected direction’s sender history…' : resource.error ? 'Selected history is unavailable; no previous pair is shown.' : 'No sender-reported history is available for this direction.'}</p>}
       {selected && <button type="button" className="mt-2 min-h-11 text-xs text-primary" onClick={()=>setSelected(null)}>Show all machine pairs</button>}
     </div>
-    {coverage?.history_incomplete && <p role="status" className="mx-5 mb-4 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">History is incomplete{coverage.dropped_rows ? `: ${coverage.dropped_rows.toLocaleString()} observations were dropped before upload` : ''}.{coverage.missing_sender_pairs > 0 ? ` ${coverage.missing_sender_pairs} directions have incomplete sender coverage; receiver observations are excluded from totals.` : ''} Available sender measurements remain shown.</p>}
-    {coverage?.unreported_peers > 0 && <p role="status" className="px-5 pb-4 text-xs text-muted-foreground">Partial reporting: historical totals include sender reports received; unreported traffic is unknown.</p>}
     <div className="border-t border-border px-5 py-3"><label className="block text-xs text-muted-foreground">Find a machine pair<input aria-label="Find a private traffic pair" type="search" value={query} maxLength={128} onChange={event=>setQuery(event.target.value)} className="mt-2 h-11 w-full rounded-lg bg-control px-3 text-sm text-foreground" placeholder="Search machine names" /></label></div>
     <div className="flex justify-between gap-2 border-t border-border px-5 py-2 text-[11px] text-muted-foreground"><span>Direction · reported volume</span><span>Recent sender rate</span></div>
     <div className="max-h-[360px] overflow-auto border-t border-border">

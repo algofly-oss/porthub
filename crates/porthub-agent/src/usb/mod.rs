@@ -85,6 +85,59 @@ fn capabilities()->[bool;2] {
     #[cfg(windows)] { [windows::host_installed(),windows::receive_installed()] }
     #[cfg(not(any(target_os="linux",target_os="macos",windows)))] { [false,false] }
 }
+
+// Windows storage enumeration can block inside a driver indefinitely. Keep
+// one probe off the async runtime and keep publishing control reports while
+// it is stuck. An incomplete probe must never advertise devices for export.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct WindowsInventory {
+    pending: Option<tokio::sync::oneshot::Receiver<([bool; 2], Vec<porthub_components::usb::Device>)>>,
+}
+
+#[cfg(any(windows, test))]
+impl WindowsInventory {
+    async fn snapshot(&mut self, path: &Path, enabled: bool) -> ([bool; 2], Vec<porthub_components::usb::Device>) {
+        if self.pending.is_none() {
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let path = path.to_owned();
+            let worker = std::thread::Builder::new().name("porthub-usb-inventory".into()).spawn(move || {
+                let roles = capabilities();
+                let devices = if enabled { inventory_for(&path) } else { Vec::new() };
+                let _ = send.send((roles, devices));
+            });
+            if let Err(error) = worker {
+                tracing::warn!(%error, "Cannot start Windows USB inventory");
+                return Default::default();
+            }
+            self.pending = Some(receive);
+        }
+        match tokio::time::timeout(Duration::from_secs(2), self.pending.as_mut().unwrap()).await {
+            Ok(result) => {
+                self.pending = None;
+                let (roles, devices) = result.unwrap_or_default();
+                (roles, if enabled { devices } else { Vec::new() })
+            }
+            Err(_) => Default::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn stalled_windows_inventory_fails_closed_and_recovers_without_overlap() {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let mut inventory = WindowsInventory { pending: Some(receive) };
+    for _ in 0..2 {
+        let (roles, devices) = inventory.snapshot(Path::new("unused"), true).await;
+        assert_eq!(roles, [false, false]);
+        assert!(devices.is_empty());
+        assert!(inventory.pending.is_some());
+    }
+    send.send(([true, true], Vec::new())).unwrap();
+    assert_eq!(inventory.snapshot(Path::new("unused"), true).await.0, [true, true]);
+    assert!(inventory.pending.is_none());
+}
 fn ordinary_report(body:&mut Value) {
     if let Some(object)=body.as_object_mut(){object.remove("imports");}
     if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias));}
@@ -160,6 +213,8 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         let states = Arc::new(Mutex::new(HashMap::<String, State>::new()));
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(windows)]
+        let mut inventory = WindowsInventory::default();
         loop {
             tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}},_=tick.tick()=>{}}
             let enabled = policy.borrow().enabled(Feature::Usb);
@@ -173,9 +228,11 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            let physical_roles=capabilities();
+            #[cfg(windows)]
+            let (physical_roles,devices)=inventory.snapshot(&path,enabled).await;
+            #[cfg(not(windows))]
+            let (physical_roles,devices)=(capabilities(),if enabled{inventory_for(&path)}else{vec![]});
             let [can_export,can_import]=physical_roles;
-            let devices=if enabled{inventory_for(&path)}else{vec![]};
             // An authenticated owned import can be routed without installing
             // the physical USB host exporter. Never advertise that capability
             // after removing aliases for an older gateway.
