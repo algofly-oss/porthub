@@ -241,7 +241,7 @@ pub fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     }
     #[cfg(windows)]
     if crate::service::windows_acl::is_managed(path) {
-        crate::service::windows_acl::secure(path, false)?;
+        crate::service::windows_acl::secure_new(path, false)?;
     }
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;

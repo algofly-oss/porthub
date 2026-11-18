@@ -247,6 +247,8 @@ fn purge_tor_directory(profile:&Path)->Result<()> {
 pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
     #[cfg(windows)]
     let _ = private;
+    #[cfg(windows)]
+    let mut created = false;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             anyhow::ensure!(
@@ -290,6 +292,10 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
                 builder.mode(if private { 0o700 } else { 0o755 });
             }
             builder.create(path)?;
+            #[cfg(windows)]
+            {
+                created = true;
+            }
             #[cfg(unix)]
             File::open(parent)?.sync_all()?;
         }
@@ -304,7 +310,11 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
     }
     #[cfg(windows)]
     if windows_acl::is_managed(path) {
-        windows_acl::secure(path, true)?;
+        if created {
+            windows_acl::secure_new(path, true)?;
+        } else {
+            windows_acl::secure(path, true)?;
+        }
     }
     Ok(())
 }

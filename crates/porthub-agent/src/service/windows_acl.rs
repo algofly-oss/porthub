@@ -10,7 +10,8 @@ use windows_sys::Win32::{
         SDDL_REVISION_1, SE_FILE_OBJECT,
     },
     Security::{
-        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, DACL_SECURITY_INFORMATION,
+        OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     },
 };
@@ -35,15 +36,19 @@ pub(crate) fn is_managed(path: &Path) -> bool {
 }
 
 pub(crate) fn secure(path: &Path, directory: bool) -> Result<()> {
-    apply(path, directory, false, false)
+    apply(path, directory, false, false, false)
+}
+/// Set the trusted owner on state created by this invocation.
+pub(crate) fn secure_new(path: &Path, directory: bool) -> Result<()> {
+    apply(path, directory, false, false, true)
 }
 pub(crate) fn readable(path: &Path, directory: bool) -> Result<()> {
-    apply(path, directory, true, false)
+    apply(path, directory, true, false, false)
 }
 /// Only public immutable executable artifacts are readable by desktop users.
 /// Credential and native service state paths can never enter this policy.
 pub(crate) fn public_release(path: &Path, directory: bool) -> Result<()> {
-    apply(path, directory, false, true)
+    apply(path, directory, false, true, false)
 }
 fn release_path(path: &Path, directory: bool) -> bool {
     let Ok(root) = managed_root().map(|root| root.join("releases")) else {
@@ -73,7 +78,13 @@ fn release_path(path: &Path, directory: bool) -> bool {
                 .is_some_and(|name| name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()))
     })
 }
-fn apply(path: &Path, directory: bool, readable: bool, executable: bool) -> Result<()> {
+fn apply(
+    path: &Path,
+    directory: bool,
+    readable: bool,
+    executable: bool,
+    set_owner: bool,
+) -> Result<()> {
     ensure!(
         if executable {
             release_path(path, directory)
@@ -112,7 +123,12 @@ fn apply(path: &Path, directory: bool, readable: bool, executable: bool) -> Resu
     } else {
         "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
     };
-    let sddl_wide = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let owner_sddl = if set_owner { "O:BA" } else { "" };
+    let sddl_wide = owner_sddl
+        .encode_utf16()
+        .chain(sddl.encode_utf16())
+        .chain(Some(0))
+        .collect::<Vec<_>>();
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: Input strings are NUL-terminated and output pointers refer to a
     // live local variable. The allocated descriptor is freed below.
@@ -136,8 +152,18 @@ fn apply(path: &Path, directory: bool, readable: bool, executable: bool) -> Resu
         unsafe { LocalFree(descriptor) };
         anyhow::bail!("cannot read PortHub Windows access policy");
     }
-    let info: OBJECT_SECURITY_INFORMATION =
+    let mut info: OBJECT_SECURITY_INFORMATION =
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    let mut owner = ptr::null_mut();
+    if set_owner {
+        let got_owner =
+            unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) };
+        if got_owner == 0 || owner.is_null() {
+            unsafe { LocalFree(descriptor) };
+            anyhow::bail!("cannot read PortHub Windows owner policy");
+        }
+        info |= OWNER_SECURITY_INFORMATION;
+    }
     // SAFETY: The path is NUL-terminated, and `dacl` remains valid until the
     // descriptor is freed. The API copies the ACL into the file security data.
     let result = unsafe {
@@ -145,7 +171,7 @@ fn apply(path: &Path, directory: bool, readable: bool, executable: bool) -> Resu
             path_wide.as_ptr(),
             SE_FILE_OBJECT,
             info,
-            ptr::null_mut(),
+            owner,
             ptr::null_mut(),
             dacl,
             ptr::null_mut(),

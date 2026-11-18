@@ -705,9 +705,9 @@ mod tests {
         // Exercise the production protected-profile constructor; no public/test-only
         // adapter creation escape hatch is introduced for this native regression.
         let managed=crate::service::windows_acl::managed_root()?;
-        std::fs::create_dir_all(&managed)?;
-        crate::service::windows_acl::secure(&managed,true)?;
-        let profile=managed.join("profile.json");
+        let state = managed.join("native");
+        crate::service::directory(&state, true)?;
+        let profile=state.join("profile.json");
         crate::profile::write_private(&profile,&serde_json::to_vec(&serde_json::json!({
             "server":"https://fixture.invalid","workspace":"fixture-workspace","peer_id":"fixture-peer"
         }))?,false)?;
