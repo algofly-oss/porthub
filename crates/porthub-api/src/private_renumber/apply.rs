@@ -115,6 +115,12 @@ pub(super) enum Outcome {
     AppliedFenced,
 }
 pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> ApiResult<Outcome> {
+    drop(run_retained(app, owner, job, fault).await?);
+    Ok(Outcome::AppliedFenced)
+}
+/// A live recovery attempt retains the SAME publication guard through finish.
+/// A restarted attempt still performs the entire original16s authority drain.
+pub(super) async fn run_retained<'a>(app: &'a App, owner: ObjectId, job: &str, fault: Fault) -> ApiResult<fence::Exclusive<'a>> {
     let mut guard = fence::exclusive(app, owner).await?;
     let heads = journal::durable(app, "private_renumber_heads");
     let head = heads
@@ -248,10 +254,9 @@ pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> 
     if actual != applied as u64 || complete != actual {
         return Err(conflict("Workspace membership changed during migration"));
     }
-    // Pool/head publication remains deliberately fenced until a CAS of the exact
-    // old preferences and directory invalidation are implemented together.
-    drop(guard);
-    Ok(Outcome::AppliedFenced)
+    // The caller may retain publication ownership for exact preference/head CAS.
+    // Standalone/crash-test callers drop it and remain durably fenced as before.
+    Ok(guard)
 }
 
 #[cfg(test)]

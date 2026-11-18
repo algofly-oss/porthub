@@ -65,6 +65,9 @@ impl Fences {
 }
 /// Only this constructor can provide mutation authority to the journal. Lock
 /// order is allocation -> workspace, matching enrollment and manual range edits.
+/// Live recovery alone retains workspace across the drain and then reacquires
+/// allocation. Every allocation holder needing workspace MUST use TRY, never
+/// await workspace, which prevents a cycle with that retained recovery owner.
 pub(super) struct Exclusive<'a> {
     pub(super) app: &'a App,
     pub(super) workspace: ObjectId,
@@ -98,6 +101,17 @@ impl Exclusive<'_> {
     }
     pub(super) fn release_allocation(&mut self) {
         self.allocation.take();
+    }
+    /// Retain publication ownership across apply -> finish. This reverse-order
+    /// wait is safe only because ALL allocation holders use a nonblocking TRY
+    /// for workspace ownership (or never acquire workspace ownership at all).
+    /// They must never wait for this guard while retaining allocation ownership.
+    /// Unlike dropping/reacquiring publication, queued sync cannot steal this
+    /// migration's finish opportunity. Allocation remains released during drain.
+    pub(super) async fn reacquire_allocation(&mut self) {
+        if self.allocation.is_none() {
+            self.allocation = Some(self.app.private_network_lock.lock().await);
+        }
     }
 }
 /// Authoritative revocation remains possible while a crashed migration is

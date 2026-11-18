@@ -25,7 +25,16 @@ pub(super) enum Outcome {
 /// A completed head is an idempotent no-op; it must never overwrite a later
 /// legitimate preferences edit, enrollment, or credential revocation.
 pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> ApiResult<Outcome> {
-    let _guard = fence::exclusive(app, owner).await?;
+    let guard = fence::exclusive(app, owner).await?;
+    run_guarded(&guard, job, fault).await
+}
+/// Publication and allocation ownership are both mandatory at final commit.
+/// A live apply can supply its retained publication guard after reacquiring the
+/// allocation lock; restart/committing callers use the ordinary wrapper above.
+pub(super) async fn run_guarded(guard: &fence::Exclusive<'_>, job: &str, fault: Fault) -> ApiResult<Outcome> {
+    guard.require_allocation()?;
+    let app = guard.app;
+    let owner = guard.workspace;
     let key = owner.to_hex();
     let heads = journal::durable(app, "private_renumber_heads");
     let head = heads

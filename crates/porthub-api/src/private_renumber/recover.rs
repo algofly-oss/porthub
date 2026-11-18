@@ -55,16 +55,19 @@ pub async fn workspace(app: &App, owner: ObjectId) -> ApiResult<Outcome> {
     }
     match head.get_str("state").ok() {
         Some("applying") => {
-            apply::run(app, owner, job, apply::Fault::None).await?;
+            let mut guard = apply::run_retained(app, owner, job, apply::Fault::None).await?;
+            guard.reacquire_allocation().await;
+            finish::run_guarded(&guard, job, finish::Fault::None).await?;
         }
-        Some("committing") => {}
+        Some("committing") => {
+            finish::run(app, owner, job, finish::Fault::None).await?;
+        }
         _ => {
             return Err(conflict(
                 "Invalid migration phase; workspace remains fenced",
             ))
         }
     }
-    finish::run(app, owner, job, finish::Fault::None).await?;
     Ok(Outcome::Committed)
 }
 /// Keyset cursor advances even past a failed workspace, so one permanently
