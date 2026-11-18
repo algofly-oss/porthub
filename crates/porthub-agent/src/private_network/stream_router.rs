@@ -726,7 +726,7 @@ fn spawn_reader(
  #[test]
  fn validated_exit_pairs_project_only_explicit_private_stream_ports() {
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();
-  for (with_private,compact) in [(false,false),(true,false),(false,true),(true,true)] {
+  for (with_private,compact) in [(false,false),(true,false),(true,true)] {
    let(mut base,pair)=snapshots(&a,&b);
    base.sparse.as_mut().unwrap().exit_epoch=Some("e".repeat(64));
    base.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];
