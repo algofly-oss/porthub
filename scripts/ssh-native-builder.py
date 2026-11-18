@@ -144,7 +144,20 @@ def snapshot(root, revision, output):
                        stdout=stream, stderr=subprocess.PIPE, check=True, timeout=60)
 
 
+REMOVE_TREE = """
+def remove_tree(path, scope):
+    def readonly_retry(function, name, exception):
+        candidate=pathlib.Path(name)
+        if not isinstance(exception[1],PermissionError) or candidate.is_symlink() or not candidate.resolve().is_relative_to(scope.resolve()):
+            raise exception[1]
+        candidate.chmod(0o700)
+        function(name)
+    shutil.rmtree(path,onerror=readonly_retry)
+"""
+
+
 REMOTE = '''import hashlib,json,os,pathlib,shutil,subprocess,sys
+'''+REMOVE_TREE+'''
 stage=pathlib.Path(__file__).resolve().parent
 job=json.loads((stage/'job.json').read_text())
 if (stage/'owner').read_text()!=job['nonce']: raise RuntimeError('Stage ownership mismatch')
@@ -183,8 +196,10 @@ try:
  archive=stage/'components.zip'
  (stage/'result.json').write_text(json.dumps(dict(revision=job['revision'],target=job['tools']['target'],sha256=sha(archive),size=archive.stat().st_size)))
 finally:
- shutil.rmtree(stage/'target',ignore_errors=True)
- shutil.rmtree(source,ignore_errors=True)
+ for path in (stage/'target',source):
+  if path.exists():
+   try: remove_tree(path,stage)
+   except OSError: pass
  (stage/'finished').write_text('finished')
 '''
 
@@ -234,6 +249,7 @@ def build(host, root, revision, state, timeout, validate_core=False):
 
 
 CLEANUP = """import csv,json,os,pathlib,shutil,subprocess,time
+"""+REMOVE_TREE+"""
 p=pathlib.Path(STAGE)
 if not p.exists(): raise SystemExit(0)
 assert (p/'owner').read_text()==NONCE
@@ -252,7 +268,18 @@ if not (p/'finished').exists():
     else: raise RuntimeError('Owned worker still live')
  elif not (p/'result.json').exists() or (p/'source').exists() or (p/'target').exists():
   raise RuntimeError('Unfinished legacy stage')
-shutil.rmtree(p)
+# Keep the owner marker until every other entry has actually gone, so an
+# interrupted/permission-failed deletion remains safely retryable.
+for child in p.iterdir():
+ if child.name=='owner': continue
+ if child.is_dir() and not child.is_symlink(): remove_tree(child,p)
+ else:
+  try: child.unlink()
+  except PermissionError:
+   if child.is_symlink(): raise
+   child.chmod(0o600);child.unlink()
+(p/'owner').unlink()
+p.rmdir()
 """
 
 

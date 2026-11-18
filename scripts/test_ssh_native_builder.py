@@ -78,6 +78,16 @@ class AdapterTests(unittest.TestCase):
             exec(adapter.CLEANUP,{'STAGE':str(stage),'NONCE':'fixture'})
             self.assertFalse(stage.exists())
 
+    def test_partial_cleanup_preserves_owner_for_safe_retry(self):
+        with tempfile.TemporaryDirectory() as raw:
+            stage=Path(raw)/'owned';stage.mkdir();(stage/'owner').write_text('fixture');(stage/'finished').write_text('finished')
+            (stage/'source').mkdir();(stage/'source/object').write_text('read-only object');(stage/'source/object').chmod(0o400)
+            with mock.patch('shutil.rmtree',side_effect=PermissionError('locked object')):
+                with self.assertRaises(PermissionError):exec(adapter.CLEANUP,{'STAGE':str(stage),'NONCE':'fixture'})
+            self.assertEqual((stage/'owner').read_text(),'fixture')
+            exec(adapter.CLEANUP,{'STAGE':str(stage),'NONCE':'fixture'})
+            self.assertFalse(stage.exists())
+
     def test_same_revision_resume_requires_remote_digest_verification(self):
         with tempfile.TemporaryDirectory() as raw:
             state=Path(raw)/'state';state.write_text(json.dumps({'revision':'a'*40,'target':'fixture'}))
@@ -90,6 +100,6 @@ class AdapterTests(unittest.TestCase):
         compile(adapter.REMOTE,'remote.py','exec')
         self.assertIn("'--tool','core'",adapter.REMOTE)
         self.assertNotIn('git push',adapter.REMOTE)
-        self.assertIn("shutil.rmtree(stage/'target'",adapter.REMOTE)
+        self.assertIn("remove_tree(path,stage)",adapter.REMOTE)
 
 if __name__=='__main__': unittest.main()
