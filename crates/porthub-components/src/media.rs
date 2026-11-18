@@ -165,6 +165,15 @@ impl SessionRequest {
 mod tests {
     use super::*;
     #[test]
+    fn speaker_capture_selects_source_while_render_uses_default() {
+        let mut request=SessionRequest{operation:Operation::CapturePlayback,session:"c".repeat(32),name:"Playback".into(),source_id:Some(stable_source_id(Kind::Speaker,"hardware","output")),video_format:None,camera_identity:None};
+        assert!(request.valid());
+        request.operation=Operation::RenderPlayback;assert!(!request.valid());
+        request.source_id=None;assert!(request.valid());
+        request.operation=Operation::CapturePlayback;assert!(!request.valid());
+        assert_ne!(stable_source_id(Kind::Speaker,"hardware","output"),stable_source_id(Kind::Microphone,"hardware","output"));
+    }
+    #[test]
     fn camera_requests_cannot_be_misread_as_legacy_microphone_sessions() {
         let mut request = SessionRequest {
             operation: Operation::CaptureMicrophone,
