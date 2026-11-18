@@ -11,7 +11,7 @@ pub(super) struct Gate {
     root: PathBuf,
     own: String,
     held: Option<Authority<PairResponse>>,
-    start: Instant,
+    start: Option<Instant>,
     pair_released: bool,
     native_released: bool,
     wait_observed: bool,
@@ -31,7 +31,7 @@ impl Gate {
             root: PathBuf::from("/state"),
             own: own.into(),
             held: None,
-            start: Instant::now(),
+            start: None,
             pair_released: false,
             native_released: false,
             wait_observed: false,
@@ -59,6 +59,7 @@ impl Gate {
         }
         if self.held.is_none() {
             self.held = Some(pair.clone());
+            self.start = Some(Instant::now());
             eprintln!("native_fixture_gate phase=pair_held");
         }
         true
@@ -69,7 +70,9 @@ impl Gate {
         ready: &Readiness,
     ) -> Result<()> {
         ensure!(
-            self.start.elapsed() < Duration::from_secs(20) || !self.active(),
+            self.start
+                .is_none_or(|start| start.elapsed() < Duration::from_secs(20))
+                || !self.active(),
             "provider fixture handshake timed out"
         );
         if !self.pair_released && self.root.join("release-pair").is_file() {

@@ -199,11 +199,12 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         let consumer = containers.last().unwrap();
         if gated {
             let provider=containers.get(1).context("owned provider absent")?;
-            async fn wait_phase(name:&str,phase:&str)->Result<String> {
-                tokio::time::timeout(Duration::from_secs(8),async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.with_context(||format!("owned relay handshake phase timeout: {phase}"))?
+            async fn wait_phase_for(name:&str,phase:&str,budget:Duration)->Result<String> {
+                tokio::time::timeout(budget,async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.with_context(||format!("owned relay handshake phase timeout: {phase}"))?
             }
-            wait_phase(provider,"native_relay_origin negotiated=true").await?;
-            wait_phase(consumer,"native_relay_origin negotiated=true").await?;
+            async fn wait_phase(name:&str,phase:&str)->Result<String>{wait_phase_for(name,phase,Duration::from_secs(8)).await}
+            let bootstrap_deadline=tokio::time::Instant::now()+Duration::from_secs(20);
+            for endpoint in [provider,consumer]{wait_phase_for(endpoint,"native_relay_origin negotiated=true",bootstrap_deadline.saturating_duration_since(tokio::time::Instant::now())).await?;}
             docker(args(&["exec",consumer,"sh","-c","test ! -e /state/release-send && touch /state/release-send"])).await?;
             println!("fault_injected_relay phase=both_real_relay_connections_established");
             wait_phase(provider,"phase=retained_before_pair").await?;
