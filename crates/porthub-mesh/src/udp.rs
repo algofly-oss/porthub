@@ -20,35 +20,67 @@ use tokio_util::sync::CancellationToken;
 /// retains this observation-only check through its bounded packet/native queue.
 #[derive(Clone)]
 pub struct SendPermit {
-    check:Arc<dyn Fn()->bool+Send+Sync>,
-    remaining:Option<Arc<dyn Fn()->Option<Duration>+Send+Sync>>,
-    control_only:bool,
+    observe: Arc<dyn Fn() -> Option<PermitBound> + Send + Sync>,
+}
+#[derive(Clone, Copy)]
+enum PermitBound {
+    Unknown,
+    Control,
+    Known(Duration),
 }
 impl SendPermit {
-    /// Legacy/unknown temporal bound. Never infer a fresh lease from this.
-    pub fn new(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:false}}
-    /// A local non-authorizing veto (owner alive/cancellation), not an unknown
-    /// byte authority. Alone it cannot authorize a guarded wire chunk.
-    pub fn control(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:true}}
-    /// The callback must observe an EXISTING immutable admission clock, not
-    /// construct/reset a clock when queried or when an operation starts.
-    pub fn bounded(check:impl Fn()->bool+Send+Sync+'static,remaining:impl Fn()->Option<Duration>+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:Some(Arc::new(remaining)),control_only:false}}
-    pub fn valid(&self)->bool{(self.check)()&&self.remaining.as_ref().is_none_or(|r|r().is_some_and(|n|!n.is_zero()))}
-    pub fn remaining(&self)->Option<Duration>{if !(self.check)(){return None;}self.remaining.as_ref()?.as_ref()().filter(|n|!n.is_zero())}
-    /// Preserve the exact existing temporal bound while adding a LOCAL control
-    /// veto. Independent byte origins require combine(), not this method.
-    pub fn constrain(&self,control:impl Fn()->bool+Send+Sync+'static)->Self{
-        let original=self.clone();Self{check:Arc::new(move||control()&&original.valid()),remaining:self.remaining.clone(),control_only:self.control_only}
+    /// Legacy authority without a known temporal bound.
+    pub fn new(check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self { observe: Arc::new(move || check().then_some(PermitBound::Unknown)) }
     }
-    /// All independent origins must have known bounds; one unknown stays
-    /// unknown, even if another input has a known later deadline.
-    pub fn combine(origins:Vec<Self>)->Self{
-        let checks=origins.clone();let nonempty=!origins.is_empty();
-        let all_control=origins.iter().all(|p|p.control_only);
-        let known=origins.iter().all(|p|p.remaining.is_some()||p.control_only)&&!all_control;
-        let check=Arc::new(move||nonempty&&checks.iter().all(|p|p.valid()));
-        let remaining=known.then(||Arc::new(move||{let mut left=None;for origin in &origins{if origin.control_only{continue;}let n=origin.remaining()?;left=Some(left.map_or(n,|old:Duration|old.min(n)));}left}) as Arc<dyn Fn()->Option<Duration>+Send+Sync>);
-        Self{check,remaining,control_only:all_control}
+    /// A local non-authorizing veto, never an independent byte origin.
+    pub fn control(check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self { observe: Arc::new(move || check().then_some(PermitBound::Control)) }
+    }
+    /// Both callbacks observe the EXISTING immutable admission, never renew it.
+    pub fn bounded(
+        check: impl Fn() -> bool + Send + Sync + 'static,
+        remaining: impl Fn() -> Option<Duration> + Send + Sync + 'static,
+    ) -> Self {
+        Self { observe: Arc::new(move || {
+            if !check() { return None; }
+            remaining().filter(|n| !n.is_zero()).map(PermitBound::Known)
+        }) }
+    }
+    pub fn valid(&self) -> bool { (self.observe)().is_some() }
+    pub fn remaining(&self) -> Option<Duration> {
+        match (self.observe)()? {
+            PermitBound::Known(left) => Some(left),
+            PermitBound::Unknown | PermitBound::Control => None,
+        }
+    }
+    /// Add a live local veto while preserving every original bound.
+    pub fn constrain(&self, control: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        let original = self.clone();
+        Self { observe: Arc::new(move || {
+            if !control() { return None; }
+            (original.observe)()
+        }) }
+    }
+    /// Evaluate each independent origin once per observation. No observation
+    /// is cached across polls or emissions: revocation and clocks stay live.
+    /// Unknown bounds remain unknown; control vetoes never provide a lease.
+    pub fn combine(origins: Vec<Self>) -> Self {
+        Self { observe: Arc::new(move || {
+            if origins.is_empty() { return None; }
+            let mut unknown = false;
+            let mut left: Option<Duration> = None;
+            for origin in &origins {
+                match (origin.observe)()? {
+                    PermitBound::Unknown => unknown = true,
+                    PermitBound::Control => {},
+                    PermitBound::Known(n) => left = Some(left.map_or(n, |old| old.min(n))),
+                }
+            }
+            Some(if unknown { PermitBound::Unknown }
+                 else if let Some(n) = left { PermitBound::Known(n) }
+                 else { PermitBound::Control })
+        }) }
     }
     pub async fn during<F:std::future::Future>(&self,operation:F)->Result<F::Output>{
         tokio::pin!(operation);let mut tick=tokio::time::interval(Duration::from_millis(50));
@@ -62,6 +94,63 @@ impl SendPermit {
         }
     }
 }
+#[cfg(test)]
+mod permit_observation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn nested_origins_are_checked_once_and_revocation_is_immediate() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let alive = Arc::new(AtomicBool::new(true));
+        let (count, live) = (calls.clone(), alive.clone());
+        let mut permit = SendPermit::bounded(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            live.load(Ordering::SeqCst)
+        }, || Some(Duration::from_secs(1)));
+        for _ in 0..16 {
+            permit = SendPermit::combine(vec![permit]).constrain(|| true);
+        }
+        assert!(permit.valid());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(permit.remaining(), Some(Duration::from_secs(1)));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        alive.store(false, Ordering::SeqCst);
+        assert!(!permit.valid());
+        assert_eq!(permit.remaining(), None);
+    }
+
+    #[test]
+    fn composition_preserves_unknown_bounds_and_control_vetoes() {
+        let known = || SendPermit::bounded(|| true, || Some(Duration::from_secs(3)));
+        let unknown = SendPermit::combine(vec![known(), SendPermit::new(|| true)]);
+        assert!(unknown.valid());
+        assert_eq!(unknown.remaining(), None);
+        let control = SendPermit::combine(vec![SendPermit::control(|| true)]);
+        assert!(control.valid());
+        assert_eq!(control.remaining(), None);
+        assert_eq!(SendPermit::combine(vec![known(), control]).remaining(), Some(Duration::from_secs(3)));
+        assert!(!SendPermit::combine(vec![known(), SendPermit::control(|| false)]).valid());
+        assert!(!SendPermit::combine(Vec::new()).valid());
+    }
+
+    #[test]
+    fn every_original_clock_is_observed_without_extension() {
+        let expired = Arc::new(AtomicBool::new(false));
+        let flag = expired.clone();
+        let first = SendPermit::bounded(|| true, move || {
+            Some(if flag.load(Ordering::SeqCst) { Duration::ZERO } else { Duration::from_secs(2) })
+        });
+        let second = SendPermit::bounded(|| true, || Some(Duration::from_secs(9)));
+        let combined = SendPermit::combine(vec![first, second]).constrain(|| true);
+        assert_eq!(combined.remaining(), Some(Duration::from_secs(2)));
+        expired.store(true, Ordering::SeqCst);
+        assert!(!combined.valid());
+        assert_eq!(combined.remaining(), None);
+        assert!(!SendPermit::bounded(|| true, || None).valid());
+    }
+}
+
 /// Immutable socket-generation factory. It may snapshot original pending
 /// origins, but the factory itself is never replaced on an existing socket.
 #[derive(Clone)]
