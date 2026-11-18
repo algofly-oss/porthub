@@ -25,6 +25,8 @@ pub(crate) struct Plan {
     generation: u64,
     clients: std::sync::Arc<BTreeSet<std::net::Ipv4Addr>>,
 }
+#[cfg(feature="netns-tests")]
+impl Plan {pub(crate) fn diagnostic_generation(&self)->u64{self.generation}}
 impl PartialEq for Plan {fn eq(&self,other:&Self)->bool{self.generation==other.generation&&std::sync::Arc::ptr_eq(&self.clients,&other.clients)}}
 impl Eq for Plan {}
 #[derive(Clone)]
@@ -125,8 +127,12 @@ pub(crate) async fn watch_ready(
             used |= !plan.clients.is_empty();
             // A full apply is multi-step; prior success is not proof mid-refresh.
             requests.applied.send_replace(None);
+            #[cfg(all(feature="private-sparse",feature="netns-tests"))]
+            super::runtime::provider_fixture_phase("native_apply_begin",plan.generation,plan.clients.len());
             let applied = kernel.apply(&plan.clients).await;
             requests.acknowledge(&plan, applied.is_ok());
+            #[cfg(all(feature="private-sparse",feature="netns-tests"))]
+            super::runtime::provider_fixture_phase(if applied.is_ok(){"native_apply_acked"}else{"native_apply_failed"},plan.generation,plan.clients.len());
             if applied.is_err() && !retry {
                 tracing::warn!("exit forwarding refresh failed; readiness remains unproven");
             }

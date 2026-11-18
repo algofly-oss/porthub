@@ -28,6 +28,14 @@ mod cold_datagrams;
 #[cfg(all(target_os="linux",feature="private-sparse"))]
 #[path="pending_exit.rs"]
 mod pending_exit;
+#[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+pub(crate) fn provider_fixture_phase(phase:&'static str,generation:u64,count:usize){
+    static EVENTS:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+    if EVENTS.fetch_add(1,std::sync::atomic::Ordering::Relaxed)<128 {
+        eprintln!("native_provider_pending phase={phase} generation={generation} count={count}");
+    }
+}
+
 
 // A deliberately replaced stream owner may finish normally while the profile
 // remains live. Current-owner failure and cleanup errors remain actionable.
@@ -63,8 +71,13 @@ fn refresh_provider(base:&Snapshot,handle:&super::sparse::Handle,own:&str,readin
 }
 #[cfg(all(target_os="linux",feature="private-sparse"))]
 fn retain_provider(queue:&mut pending_exit::Queue,bytes:bytes::Bytes,origin:Arc<porthub_network::policy::PeerInfo>,base:&super::authority_event::Authority<()>,received_at:Instant,received_boot:Option<Duration>,binding:Option<(&super::exit_forwarding::Plan,porthub_mesh::udp::SendPermit)>)->bool {
+    #[cfg(feature="netns-tests")]
+    let (phase,generation)=binding.as_ref().map(|(plan,_)|("retained_wait_native",plan.diagnostic_generation())).unwrap_or(("retained_before_pair",0));
     let peer=origin.clone();if !queue.push_at(bytes,origin,base,received_at,received_boot){return false;}
-    if let Some((plan,permit))=binding{if !queue.bind_last(plan,&peer,permit){queue.discard_last();return false;}}true
+    if let Some((plan,permit))=binding{if !queue.bind_last(plan,&peer,permit){queue.discard_last();return false;}}
+    #[cfg(feature="netns-tests")]
+    provider_fixture_phase(phase,generation,queue.len());
+    true
 }
 async fn audit_capture(device:&mut Option<Arc<Tun>>,profile:&std::path::Path,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
     let sparse=snapshot.sparse.as_ref().ok_or_else(||anyhow::anyhow!("private capture audit requires negotiated authority"))?;
@@ -1123,6 +1136,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let Ok(guard)=entry.guard(&exit_native_plan,&current,current_permit,&exit_refresh) else{continue;};
                 if let Some(tun)=&device{
                     let delivered=pending_exit::during(guard,async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,tun,&entry.bytes)=>result}}).await?;
+                    #[cfg(feature="netns-tests")]
+                    if delivered.is_some(){provider_fixture_phase("pending_native_write_complete",exit_native_plan.diagnostic_generation(),1);}
                     if delivered.is_none()&&entry.valid(){pending_provider.pending(entry);}
                 }
             }
