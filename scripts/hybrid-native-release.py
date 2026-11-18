@@ -130,7 +130,8 @@ def run_once(root,repository,branch,config_path,state):
             active_config=validation_config(config) if purpose=='core_only_validation' else config
             if purpose=='core_only_validation' and not active_config['builders']: continue
             previous=current['sources'].get(key,{})
-            if previous.get('complete') or time.time()-previous.get('attempted_at',0)<60:continue
+            retry_delay = previous.get('retry_delay_seconds', 60) if previous.get('run_id') == run['id'] else 0
+            if previous.get('complete') or time.time()-previous.get('attempted_at',0)<retry_delay:continue
             # Never execute a request from a fork/PR/arbitrary workflow ref. The
             # prepared commit must actually belong to the operator's main branch.
             origin=git(root,'remote','get-url','origin')
@@ -152,7 +153,10 @@ def run_once(root,repository,branch,config_path,state):
             if not checkout.exists():git(root,'worktree','add','--detach',str(checkout),source)
             controller=load_controller()
             report=controller.control(checkout,source,active_config,owned/('core-validation-outputs' if purpose=='core_only_validation' else 'outputs'))
+            unchanged = previous.get('run_id') == run['id'] and previous.get('targets') == report['targets']
+            next_delay = min(300, retry_delay * 2) if unchanged else 60
             current['sources'][key]={'attempted_at':int(time.time()),'run_id':run['id'],
+                'retry_delay_seconds':next_delay,
                 'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
             current['sources']=dict(list(current['sources'].items())[-32:])
             pending=state/'checkpoint.pending.json';pending.write_text(json.dumps(current,sort_keys=True));pending.replace(checkpoint)

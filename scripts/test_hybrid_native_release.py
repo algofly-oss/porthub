@@ -46,6 +46,28 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(r.run_once(root,REPOSITORY,'main',config,state)['status'],'no_eligible_prepared_release')
                 commands.assert_not_called();loader.assert_not_called()
 
+    def test_unavailable_builder_retries_with_bounded_backoff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root/'config'
+            config.write_text('{"builders":[{"target":"windows"}]}')
+            config.chmod(0o600)
+            controller = Mock()
+            controller.control.return_value = {'targets': {'windows': {'status': 'github_fallback'}}}
+            state = root/'state'
+            with patch.object(r, 'requests', return_value=[({}, self.run_metadata())]), \
+                 patch.object(r, 'read_request', return_value={'source_revision': SOURCE}), \
+                 patch.object(r, 'git', return_value='https://github.com/'+REPOSITORY), \
+                 patch.object(r, 'load_controller', return_value=controller), patch.object(r.time, 'time') as now:
+                for timestamp, delay in [(1000, 60), (1060, 120), (1180, 240), (1420, 300), (1720, 300)]:
+                    now.return_value = timestamp
+                    self.assertEqual(r.run_once(root, REPOSITORY, 'main', config, state)['status'], 'processed')
+                    entry = json.loads((state/'checkpoint.json').read_text())['sources'][SOURCE]
+                    self.assertEqual(entry['retry_delay_seconds'], delay)
+                    now.return_value = timestamp + delay - 1
+                    self.assertEqual(r.run_once(root, REPOSITORY, 'main', config, state)['status'], 'no_eligible_prepared_release')
+                self.assertEqual(controller.control.call_count, 5)
+
     def test_native_core_request_uses_explicit_validation_command_and_new_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);config=root/'builders.json'
