@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -108,8 +109,9 @@ def install(root,key,stream,max_bytes=MAX_BYTES,max_revisions=MAX_REVISIONS):
                         directory.mkdir(mode=0o755)
                         # The API reads published paths under a different UID.
                         directory.chmod(0o755)
-                    if directory.stat().st_mode & 0o022:
-                        raise ValueError('Published directory must not be group/world writable')
+                    info = directory.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                        raise ValueError('Unsafe published directory')
                 temporary_path.chmod(0o644)
                 temporary_path.replace(target)
             return {'installed':key,'size':size,'sha256':digest.hexdigest()}
