@@ -32,7 +32,7 @@ are verified again through previous_builds/verify_reuse before success.
 This establishes artifact/input integrity, not native service, audio, network,
 signing/notarization, or all-platform release acceptance. Existing hosted native
 checks, prepare-release/assemble-client-release and publication verification remain
-separate. No actual local host builds were run to validate this new orchestration;
-its tests exercise host selection, plan-only behavior, execution delegation,
-verification and compiler-environment rejection. Run it on an owned clean checkout
-only after reviewing the plan and confirming host dependency availability.
+separate. On nitin-mbp, the arm64 core build at commit
+`e33e3e5f179c7dd5113384cde2f13ae307ca831e` completed in 92 seconds.
+The local build command verified the artifact receipt and the executable
+reported `porthub 1.11.42` when run on the Mac.
