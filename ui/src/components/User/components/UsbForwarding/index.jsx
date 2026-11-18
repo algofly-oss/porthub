@@ -43,7 +43,12 @@ export default function UsbForwarding({machineId,active}){
      const state=active?(sourceState.state==='active-direct'?'Direct connection':'Gateway relay'):(sourceState?.error||destinationState?.error||'Waiting for both machines');
      const lineage=usbLineage(machines,forwards,f.source,f.device);
      const route=[...(lineage.imported&&!lineage.known?['Original source unknown']:[]),...lineage.path.map(machineName),machineName(f.destination)].join(' → ');
-     const name=f.device.name||f.device.busid;
+     const currentDevice=machines.find(m=>m.id===f.source)?.report?.devices?.find(d=>
+      d.busid===f.device.busid&&d.vendor===f.device.vendor&&d.product===f.device.product&&
+      (!f.device.serial||f.device.serial===d.serial)
+     );
+     const hardwareId=[f.device.vendor,f.device.product].filter(Boolean).join(':');
+     const name=currentDevice?.name||f.device.name||(hardwareId?`USB device ${hardwareId}`:`USB port ${f.device.busid}`);
      return <li key={f.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2.5">
       <div className="min-w-0">
        <p className="break-words text-sm font-medium">{name}</p>
