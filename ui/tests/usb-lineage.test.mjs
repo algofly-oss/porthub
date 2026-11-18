@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {usbLineage,usbOriginLabel} from '../src/lib/usbLineage.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {matchesSavedUsbDevice,usbLineage,usbOriginLabel} from '../src/lib/usbLineage.mjs';
 const physical={busid:'2-3',vendor:'1377',product:'1100',serial:'s',name:'Headset'};
 const alias={...physical,busid:'0-12',name:'Headset (forwarded)'};
 const machines=[{id:'l',name:'Luna',report:{imports:[]}},{id:'a',name:'Aero',report:{imports:[{busid:alias.busid,upstream_id:'one'}]}},{id:'m',name:'Miro',report:{imports:[]}}];
@@ -10,3 +10,10 @@ test('cycles and over four upstream hops cannot invent a physical origin',()=>{c
 test('multiple upstream imports preserve original source and order',()=>{const ms=structuredClone(machines);ms[2].report.imports=[{busid:'0-13',upstream_id:'two'}];const l=usbLineage(ms,[...forwards,{id:'two',source:'a',destination:'m',device:alias}],'m',{...alias,busid:'0-13'});assert.deepEqual(l.path,['l','a','m']);assert.equal(l.origin,'l');});
 
 test('missing upstream report is unknown, while offline status preserves exact configured origin',()=>{const ms=structuredClone(machines);delete ms[0].report;assert.equal(usbLineage(ms,forwards,'a',alias).known,false);ms[0].report={imports:[]};ms[0].online=false;assert.equal(usbLineage(ms,forwards,'a',alias).origin,'l');});
+
+test('a saved physical device follows its serial across ports while aliases stay port-specific',()=>{
+ assert.ok(matchesSavedUsbDevice(physical,{...physical,busid:'2-4'}));
+ assert.equal(matchesSavedUsbDevice(physical,{...physical,serial:'other'}),false);
+ assert.equal(matchesSavedUsbDevice({...physical,serial:''},{...physical,serial:'',busid:'2-4'}),false);
+ assert.equal(matchesSavedUsbDevice(physical,alias),false);
+});

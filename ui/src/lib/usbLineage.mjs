@@ -30,3 +30,10 @@ export function usbOriginLabel(lineage,machines){
  if(!lineage.imported)return '';
  return lineage.known?`Forwarded from ${machines.find(m=>m.id===lineage.origin)?.name||'unknown source'}`:'Forwarded · original source unknown';
 }
+
+export function matchesSavedUsbDevice(saved, current) {
+ if (!saved || !current || saved.vendor !== current.vendor || saved.product !== current.product) return false;
+ if ((saved.serial || '') !== (current.serial || '')) return false;
+ if (saved.busid === current.busid) return true;
+ return Boolean(saved.serial) && ![saved, current].some(device => device.busid?.startsWith('0-'));
+}

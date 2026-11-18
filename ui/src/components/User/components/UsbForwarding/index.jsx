@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import {useCallback,useEffect,useState} from 'react';
 import axios from 'axios';
-import {usbLineage,usbOriginLabel} from '@/lib/usbLineage.mjs';
+import {matchesSavedUsbDevice,usbLineage,usbOriginLabel} from '@/lib/usbLineage.mjs';
 const button='inline-flex items-center justify-center min-h-[44px] rounded-lg border border-border px-3 text-sm hover:bg-control disabled:opacity-40';
 const input='mt-2 h-11 w-full rounded-lg border border-border bg-control px-3 text-sm';
 export default function UsbForwarding({machineId,active}){
@@ -14,7 +14,7 @@ export default function UsbForwarding({machineId,active}){
  const selected=devices.find(d=>d.busid===device),lineage=usbLineage(machines,forwards,machineId,selected);
  const machineName=id=>machines.find(m=>m.id===id)?.name||'Unknown machine';
  const chain=[...(lineage.imported&&!lineage.known?['Original source unknown']:[]),...lineage.path.map(machineName),destination?machineName(destination):'Choose a destination'];
- const outgoing=d=>forwards.filter(f=>f.source===machineId&&f.device.busid===d.busid).map(f=>`In use on ${machineName(f.destination)}`).join(' · ');
+ const outgoing=d=>forwards.filter(f=>f.source===machineId&&matchesSavedUsbDevice(f.device,d)).map(f=>`In use on ${machineName(f.destination)}`).join(' · ');
  const act=async operation=>{setBusy(true);setError('');try{await operation();setDevice('');await load();}catch(e){setError(e.response?.data?.detail||'Could not update USB forwarding');}finally{setBusy(false);}};
  const status=(rule,id)=>machines.find(m=>m.id===id)?.report?.states?.find(s=>s.id===rule.id);
  const hostForwards=forwards.filter(f=>f.source===machineId||f.destination===machineId);
@@ -26,7 +26,7 @@ export default function UsbForwarding({machineId,active}){
   {source?.report?.enabled===false&&<p className="text-xs text-muted-foreground">USB forwarding is disabled on this client. Enable it locally with <code>porthub features enable usb</code>.</p>}
   {!owned&&machines.length>0&&<p className="text-xs text-muted-foreground">Only the machine owner can configure USB forwarding.</p>}
   {owned&&<div className="space-y-3" role="group" aria-label="Create USB forward">
-   <label className="block text-xs text-muted-foreground">Device available on {source?.name || 'this machine'}<SearchDropdown aria-label="USB device" value={device} className={input} onChange={e=>setDevice(e.target.value)} required><option value="">Choose a device</option>{devices.map(d=>{const lineage=usbLineage(machines,forwards,machineId,d),origin=usbOriginLabel(lineage,machines),name=(d.name||`${d.vendor}:${d.product}`),displayName=lineage.imported&&lineage.known?name.replace(/\s*\(forwarded\)\s*$/i,''):name;return <option key={d.busid} value={d.busid} disabled={!!d.blocked||forwards.some(f=>f.source===machineId&&f.device.busid===d.busid)}>{[origin,displayName,d.busid,outgoing(d),d.blocked].filter(Boolean).join(' · ')}</option>;})}</SearchDropdown></label>
+   <label className="block text-xs text-muted-foreground">Device available on {source?.name || 'this machine'}<SearchDropdown aria-label="USB device" value={device} className={input} onChange={e=>setDevice(e.target.value)} required><option value="">Choose a device</option>{devices.map(d=>{const lineage=usbLineage(machines,forwards,machineId,d),origin=usbOriginLabel(lineage,machines),name=(d.name||`${d.vendor}:${d.product}`),displayName=lineage.imported&&lineage.known?name.replace(/\s*\(forwarded\)\s*$/i,''):name;return <option key={d.busid} value={d.busid} disabled={!!d.blocked||forwards.some(f=>f.source===machineId&&matchesSavedUsbDevice(f.device,d))}>{[origin,displayName,d.busid,outgoing(d),d.blocked].filter(Boolean).join(' · ')}</option>;})}</SearchDropdown></label>
    {source.online&&source.report?.enabled===true&&devices.length===0&&<p role="status" className="text-xs text-muted-foreground">No USB devices are available on this machine. For WSL, first forward the device from the Windows agent to this WSL machine; Windows hardware does not appear in WSL automatically.</p>}
    <label className="block text-xs text-muted-foreground">Use this device on<SearchDropdown aria-label="USB destination machine" value={destination} className={input} onChange={e=>setDestination(e.target.value)} required><option value="">Choose a destination</option>{machines.filter(m=>m.id!==machineId).map(m=><option key={m.id} value={m.id} disabled={m.report?.supported===false||m.report?.can_import===false}>{m.name}{m.report?.can_import===false?' · Cannot receive USB':m.report?.supported===false?' · USB forwarding unsupported':m.online?'':' · Offline'}</option>)}</SearchDropdown></label>
    <div className="rounded-lg border border-border bg-control/40 p-3 text-sm" aria-label="USB forwarding direction"><p className="break-words font-medium">{chain.join(' → ')}</p><p className="mt-1 text-xs text-muted-foreground">{lineage.imported?(lineage.known?`The device is physically connected to ${machineName(lineage.origin)} and forwarded through ${source?.name || 'this machine'}.`:'This is a forwarded device. Its original physical source cannot be verified from the current reports.'):`The device stays physically connected to ${source?.name || 'this machine'}.`} The final destination gets exclusive use.</p>{lineage.imported&&<p className="mt-1 text-xs text-muted-foreground">Onward forwarding supports compatible audio and HID devices, not storage or serial devices. Stop the child forward before its parent.</p>}<p className="mt-1 text-xs text-muted-foreground">Forwarding a storage device does not mount its filesystem automatically.</p></div>
@@ -44,8 +44,7 @@ export default function UsbForwarding({machineId,active}){
      const lineage=usbLineage(machines,forwards,f.source,f.device);
      const route=[...(lineage.imported&&!lineage.known?['Original source unknown']:[]),...lineage.path.map(machineName),machineName(f.destination)].join(' → ');
      const currentDevice=machines.find(m=>m.id===f.source)?.report?.devices?.find(d=>
-      d.busid===f.device.busid&&d.vendor===f.device.vendor&&d.product===f.device.product&&
-      (!f.device.serial||f.device.serial===d.serial)
+      matchesSavedUsbDevice(f.device,d)
      );
      const hardwareId=[f.device.vendor,f.device.product].filter(Boolean).join(':');
      const name=currentDevice?.name||f.device.name||(hardwareId?`USB device ${hardwareId}`:`USB port ${f.device.busid}`);
