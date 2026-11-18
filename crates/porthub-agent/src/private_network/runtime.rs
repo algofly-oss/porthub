@@ -570,7 +570,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     capture_configured=true;last_route_audit=Some(Instant::now());
                 }else if capture_configured{device.as_ref().unwrap().update_capture_routes(&[]).await?;capture_configured=false;}
                 #[cfg(feature="private-stream")]
-                {authority.check()?;stream_router.as_ref().unwrap().update_pairs_authorized(&snapshot,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                {authority.check()?;stream_router.as_ref().unwrap().update_pairs_authorized(&snapshot,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                 online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
@@ -694,7 +694,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         by_ip.retain(|_,id|id!=&peer.id);peer_ips.remove(&peer.id);
                         if let Some(tun)=&device{if tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await.is_err(){tracing::warn!("could not remove a retired private pair route");}}
                         #[cfg(feature="private-stream")]
-                        if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                        if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                     }
                     traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
                     sparse_handle.unavailable(&response.query);continue;
@@ -714,7 +714,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if !audit.accepted_peers.contains(&lease.peer.ip){
                     policy.revoke_pair(&id);sparse_handle.retire(&id);sparse_handle.unavailable(&response.query);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);
                     #[cfg(feature="private-stream")]
-                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                     continue;
                 }
                 by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
@@ -722,7 +722,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 sparse_handle.installed_authority(&response.query,lease,authority.retained());
                 traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
                 #[cfg(feature="private-stream")]
-                if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
             },
             Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at})=>{
                 if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
@@ -1007,7 +1007,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                     #[cfg(feature="private-stream")]
-                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                 }
             }
         },
@@ -1034,7 +1034,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                     #[cfg(feature="private-stream")]
-                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                 }
             }
             if sparse_handle.enabled(){
@@ -1099,7 +1099,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 stream_plans.send_replace(StreamCarrierPlan {source:peer_ips.get(&profile.peer_id).copied(),valid_until:stream_router.as_ref().filter(|router|router.valid_lease()).map(|_|now+Duration::from_secs(2)),routes});
             }
             #[cfg(feature="private-stream")]
-            if sparse_handle.enabled(){if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}}
+            if sparse_handle.enabled(){if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}}
             path_quality.prune(now);
             last_activity.retain(|_,seen|now.saturating_duration_since(*seen)<Duration::from_secs(600));
             let peers=sessions.read().await;

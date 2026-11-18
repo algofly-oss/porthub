@@ -723,6 +723,32 @@ fn spawn_reader(
   pair.peers.push(serde_json::from_value(serde_json::json!({"id":"b","ip":"10.203.1.2","fingerprint":b.fingerprint(),"instance":"instance-b","hostname":"b.phub","stream_transport":"quic1"})).unwrap());
   pair.grants=serde_json::from_value(serde_json::json!([{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}])).unwrap();(base,pair)
  }
+ #[test]
+ fn validated_exit_pairs_project_only_explicit_private_stream_ports() {
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();
+  for with_private in [false,true] {
+   let(mut base,pair)=snapshots(&a,&b);
+   base.sparse.as_mut().unwrap().exit_epoch=Some("e".repeat(64));
+   base.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];
+   let lease=porthub_network::policy::PairLease {
+    workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),
+    expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),
+    grants:if with_private{pair.grants.clone()}else{Vec::new()},acl:None,
+    exit:Some(porthub_network::policy::ExitPair{epoch:"e".repeat(64),route_id:"exit-route".into(),client:"a".into(),router:"b".into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly}),
+   };
+   let mut engine=porthub_network::policy::Engine::default();engine.apply(base.clone()).unwrap();engine.install_pair(lease).unwrap();
+   let own="10.203.0.2".parse().unwrap();
+   assert!(Policy::compile_pairs(&base,"a",own,&engine.pair_snapshots()).is_err(),"legacy boundary must still reject exit authority");
+   let view=engine.private_stream_pair_snapshots();
+   let compiled=Policy::compile_pairs(&base,"a",own,&view).unwrap();
+   let peer=mesh_peer(&pair.peers[1]);
+   assert_eq!(compiled.allows(&peer,flow(),true),with_private);
+   let forbidden=Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:444".parse().unwrap()};
+   assert!(!compiled.allows(&peer,forbidden,true),"exit role broadened private ports");
+   assert_eq!(view[0].1,engine.pair_snapshots()[0].1);
+   assert!(!engine.pair_snapshots()[0].0.exit_routes.is_empty());
+  }
+ }
  fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
  #[cfg(feature="private-sparse")]
  #[tokio::test]async fn guarded_sparse_policy_does_not_publish_pht1_even_with_valid_authority(){

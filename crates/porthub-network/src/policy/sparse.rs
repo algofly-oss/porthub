@@ -367,6 +367,23 @@ impl Engine {
             .filter_map(|p| Some((p.snapshot.clone()?, p.deadline?)))
             .collect()
     }
+    /// Private-stream view of already validated pair leases. Exit authority
+    /// remains in the engine for the exit packet path and is never translated
+    /// into private ports. Preserve the original identity, ACL and deadline.
+    pub fn private_stream_pair_snapshots(&self) -> Vec<(Snapshot, Instant)> {
+        if !self.valid_lease() { return Vec::new(); }
+        let Some(epoch) = self.snapshot.as_ref().and_then(|s| s.sparse.as_ref()).map(|s| s.epoch.as_str()) else {
+            return Vec::new();
+        };
+        self.pairs.values()
+            .filter(|p| p.valid_lease() && p.pair_private_epoch.as_deref() == Some(epoch))
+            .filter_map(|p| {
+                let mut snapshot = p.snapshot.clone()?;
+                snapshot.exit_routes.clear();
+                Some((snapshot, p.deadline?))
+            })
+            .collect()
+    }
     pub fn pair_peer(&self, id: &str) -> Option<&PeerInfo> {
         if !self.valid_lease() {
             return None;
@@ -515,6 +532,38 @@ mod tests {
     fn exit_pair(epoch:&str,local_client:bool)->PairLease {
         let mut lease=pair(epoch);lease.grants.clear();
         lease.exit=Some(ExitPair{epoch:"e".repeat(64),route_id:"exit-route".into(),client:if local_client{"a"}else{"b"}.into(),router:if local_client{"b"}else{"a"}.into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly});lease
+    }
+    #[test]
+    fn private_stream_projection_never_inherits_exit_authority_or_renews_lease() {
+        let epoch = "a".repeat(64);
+        for with_private in [false, true] {
+            let mut engine = Engine::default();
+            engine.apply(exit_base(&epoch)).unwrap();
+            let mut lease = exit_pair(&epoch, true);
+            if with_private { lease.grants = pair(&epoch).grants; }
+            let original_grants = serde_json::to_value(&lease.grants).unwrap();
+            engine.install_pair(lease).unwrap();
+            let full = engine.pair_snapshots();
+            assert!(!full[0].0.exit_routes.is_empty());
+            let projected = engine.private_stream_pair_snapshots();
+            assert_eq!(projected.len(), 1);
+            assert!(projected[0].0.exit_routes.is_empty());
+            assert_eq!(projected[0].1, full[0].1);
+            assert_eq!(projected[0].0.workspace, full[0].0.workspace);
+            assert_eq!(projected[0].0.self_, full[0].0.self_);
+            assert_eq!(serde_json::to_value(&projected[0].0.peers).unwrap(), serde_json::to_value(&full[0].0.peers).unwrap());
+            assert_eq!(serde_json::to_value(&projected[0].0.grants).unwrap(), original_grants);
+            assert!(!engine.pair_snapshots()[0].0.exit_routes.is_empty(), "projection mutated live exit policy");
+            let mut private = Engine::default();
+            private.apply(projected[0].0.clone()).unwrap();
+            assert_eq!(private.check(&udp("10.203.0.2", "10.203.1.2", 15000, 53), "b", false), with_private);
+            assert!(!private.check_exit(&udp("10.203.0.2", "8.8.8.8", 15001, 53), "b", false));
+            engine.apply(exit_base(&"b".repeat(64))).unwrap();
+            assert!(engine.private_stream_pair_snapshots().is_empty(), "retired private epoch leaked into projection");
+            assert_eq!(engine.pair_snapshots()[0].1, full[0].1, "exit retention renewed original clock");
+            engine.revoke_pair("b");
+            assert!(engine.private_stream_pair_snapshots().is_empty());
+        }
     }
     #[test]
     fn exact_exit_pairs_authorize_both_roles_without_private_port_permissions() {
