@@ -1,9 +1,9 @@
 //! Bounded inherited-pipe PCM bridge. No network credentials or ambient capture.
+use crate::pcm::{read_frame, Queue};
 use anyhow::{ensure, Context, Result};
 use pipewire::{self as pw, properties::properties, spa};
 use porthub_components::media::{Operation, SessionRequest, MAX_PCM_FRAME, PCM_CHANNELS, PCM_RATE};
 use std::{
-    collections::VecDeque,
     io::{BufRead, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,30 +11,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const QUEUE_BYTES: usize = PCM_RATE as usize * 4 / 10; // 100ms maximum, oldest samples discarded.
-#[derive(Default)]
-struct Queue(VecDeque<u8>);
-impl Queue {
-    fn push(&mut self, bytes: &[u8]) {
-        if bytes.len() % 4 != 0 {
-            return;
-        }
-        for bytes in bytes.chunks(4) {
-            while self.0.len() + 4 > QUEUE_BYTES {
-                for _ in 0..4 {
-                    self.0.pop_front();
-                }
-            }
-            self.0.extend(bytes);
-        }
-    }
-    fn clear(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
-        self.0.clear();
-    }
-}
 struct Data {
     queue: Arc<Mutex<Queue>>,
     cancel: Arc<AtomicBool>,
@@ -42,25 +18,14 @@ struct Data {
     format_ready: bool,
     negotiated: Arc<AtomicBool>,
 }
-fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
-    let mut size = [0u8; 4];
-    match reader.read(&mut size[..1])? {
-        0 => return Ok(None),
-        _ => reader.read_exact(&mut size[1..])?,
+fn route(operation: Operation) -> Result<(bool, bool, bool)> {
+    match operation {
+        Operation::CaptureMicrophone => Ok((true, false, false)),
+        Operation::PublishMicrophone => Ok((false, false, false)),
+        Operation::CapturePlayback => Ok((true, true, false)),
+        Operation::RenderPlayback => Ok((false, false, true)),
+        _ => anyhow::bail!("Operation is not an audio endpoint"),
     }
-    let size = u32::from_le_bytes(size) as usize;
-    ensure!(
-        size > 0 && size <= MAX_PCM_FRAME && size % 4 == 0,
-        "Invalid PCM frame size"
-    );
-    let mut data = vec![0; size];
-    reader.read_exact(&mut data)?;
-    ensure!(
-        data.chunks_exact(4)
-            .all(|v| f32::from_le_bytes(v.try_into().unwrap()).is_finite()),
-        "Invalid PCM sample"
-    );
-    Ok(Some(data))
 }
 pub fn serve() -> Result<()> {
     // Only an explicit parent-owned inherited pipe can request a media session.
@@ -99,16 +64,25 @@ pub fn serve() -> Result<()> {
             reader,
         );
     }
-    let capture = request.operation == Operation::CaptureMicrophone;
+    let (capture, monitor, render) = route(request.operation)?;
     pw::init();
     let loop_ = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&loop_, None)?;
     let core = context.connect_rc(None)?;
-    let target = if capture {
+    let target = if request.operation == Operation::CaptureMicrophone {
         Some(crate::linux::capture_target(
             &loop_,
             &core,
             request.source_id.as_deref().unwrap(),
+        )?)
+    } else if monitor {
+        Some(crate::linux::playback_target(
+            &loop_,
+            &core,
+            request
+                .source_id
+                .as_deref()
+                .context("Missing playback source identity")?,
         )?)
     } else {
         None
@@ -171,12 +145,21 @@ pub fn serve() -> Result<()> {
         props.insert("target.object", target);
         props.insert("node.dont-fallback", "true");
         props.insert("node.dont-reconnect", "true");
-    } else {
+    } else if !monitor && !render {
         props.insert("media.class", "Audio/Source");
         props.insert("node.virtual", "true");
         props.insert("priority.session", "-1000000");
         props.insert("priority.driver", "1");
         props.insert("node.always-process", "false");
+    }
+    if monitor {
+        props.insert("stream.capture.sink", "true");
+    }
+    if render || monitor {
+        props.insert(
+            "node.description",
+            format!("PortHub — {} — Speaker", request.name),
+        );
     }
     let stream = pw::stream::StreamBox::new(&core, "PortHub media", props)?;
     let negotiated = Arc::new(AtomicBool::new(false));
@@ -239,6 +222,10 @@ pub fn serve() -> Result<()> {
                 }
                 if let Some(bytes) = plane.data() {
                     if let Some(end) = offset.checked_add(size).filter(|end| *end <= bytes.len()) {
+                        if !crate::pcm::valid_samples(&bytes[offset..end]) {
+                            data.cancel.store(true, Ordering::Release);
+                            return;
+                        }
                         data.queue
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -283,7 +270,7 @@ pub fn serve() -> Result<()> {
     .into_inner();
     let mut params = [spa::pod::Pod::from_bytes(&bytes).context("Invalid PCM format")?];
     let flags = pw::stream::StreamFlags::MAP_BUFFERS
-        | if capture {
+        | if capture || render {
             pw::stream::StreamFlags::AUTOCONNECT
         } else {
             pw::stream::StreamFlags::empty()
@@ -309,7 +296,7 @@ pub fn serve() -> Result<()> {
         let state = stream.state();
         if !ready
             && stream.node_id() != u32::MAX
-            && if capture {
+            && if capture || render {
                 matches!(state, pw::stream::StreamState::Streaming)
                     && negotiated.load(Ordering::Acquire)
             } else {
@@ -321,7 +308,7 @@ pub fn serve() -> Result<()> {
         {
             println!(
                 "{}",
-                serde_json::json!({"session":request.session,"state":if capture{"capturing"}else{"published"},"node_id":stream.node_id(),"rate":PCM_RATE,"channels":PCM_CHANNELS,"format":"f32le"})
+                serde_json::json!({"session":request.session,"state":if capture{"capturing"}else if render{"rendering"}else{"published"},"node_id":stream.node_id(),"source_id":request.source_id,"rate":PCM_RATE,"channels":PCM_CHANNELS,"format":"f32le"})
             );
             std::io::stdout().flush()?;
             ready = true;
@@ -372,6 +359,23 @@ pub fn serve() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcm::QUEUE_BYTES;
+    #[test]
+    fn speaker_direction_is_selected_monitor_to_default_output() {
+        assert_eq!(
+            route(Operation::CapturePlayback).unwrap(),
+            (true, true, false)
+        );
+        assert_eq!(
+            route(Operation::RenderPlayback).unwrap(),
+            (false, false, true)
+        );
+        assert_eq!(
+            route(Operation::PublishMicrophone).unwrap(),
+            (false, false, false)
+        );
+        assert!(route(Operation::CaptureCamera).is_err());
+    }
     #[test]
     fn pcm_input_rejects_truncation_overflow_and_non_finite_samples() {
         assert!(read_frame(&mut &[][..]).unwrap().is_none());
