@@ -19,7 +19,7 @@ const RETRY: Duration = Duration::from_secs(3);
 pub(crate) struct Handle(Arc<Mutex<State>>);
 #[derive(Default)]
 struct State {
-    scope: Option<(String, String, Ipv4Addr, String, String, String)>,
+    scope: Option<(String, String, Ipv4Addr, String, String, String, String)>,
     routes: BTreeSet<String>,
     ordinal: u64,
     carriers: Option<(Instant, bool, bool)>,
@@ -40,7 +40,7 @@ impl Handle {
             .sparse
             .as_ref()
             .zip(base.peers.iter().find(|p| p.id == base.self_))
-            .filter(|(s, _)| s.exit_epoch.is_some())
+            .filter(|(s, _)| s.exit_epoch.is_some() && s.selection_epoch.is_some())
             .map(|(s, p)| {
                 (
                     base.workspace.clone(),
@@ -49,6 +49,7 @@ impl Handle {
                     p.fingerprint.clone(),
                     p.instance.clone(),
                     s.exit_epoch.clone().unwrap(),
+                    s.selection_epoch.clone().unwrap(),
                 )
             });
         if scope != state.scope {
@@ -131,6 +132,7 @@ impl Handle {
         }
         let request = ExitPickRequest {
             route_id: route.into(),
+            selection_epoch: state.scope.as_ref()?.6.clone(),
             flow_id: flow.into(),
             ordinal: state.ordinal,
             destination,
@@ -342,7 +344,7 @@ mod tests {
     }
     fn base() -> Snapshot {
         serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),
-            "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":"client","selection":"sticky","traffic_mode":"internet_only","allow_direct_fallback":false,"tor_enabled":true,"tor_circuit_groups":4}]},
+            "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"selection_epoch":"c".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":"client","selection":"sticky","traffic_mode":"internet_only","allow_direct_fallback":false,"tor_enabled":true,"tor_circuit_groups":4}]},
             "peers":[{"id":"a","ip":"10.234.0.1","fingerprint":"fp-a","instance":"a-instance","hostname":"a.phub"}],"grants":[]})).unwrap()
     }
     fn authority(clock: Arc<Clock>) -> Authority<()> {
@@ -355,6 +357,7 @@ mod tests {
     fn reply(request: &ExitPickRequest, status: ExitPickStatus) -> ExitPickResponse {
         ExitPickResponse {
             route_id: request.route_id.clone(),
+            selection_epoch: request.selection_epoch.clone(),
             flow_id: request.flow_id.clone(),
             ordinal: request.ordinal,
             warmup: request.warmup,
@@ -456,6 +459,32 @@ mod tests {
             *at = Instant::now() - Duration::from_secs(31);
         }
         assert!(failures.peers().is_empty());
+    }
+    #[test]
+    fn scheduling_generation_retires_pending_choices_independently_of_permission_epoch() {
+        let handle = Handle::default();
+        let mut snapshot = base();
+        handle.observe(&snapshot);
+        let dst = "1.1.1.1".parse().unwrap();
+        let flow = "a".repeat(64);
+        handle.request("route", &flow, dst, false);
+        let old = handle.next(true, None).unwrap();
+        snapshot.sparse.as_mut().unwrap().selection_epoch = Some("d".repeat(64));
+        handle.observe(&snapshot);
+        handle.request("route", &flow, dst, false);
+        let fresh = handle.next(true, None).unwrap();
+        assert_eq!(fresh.selection_epoch, "d".repeat(64));
+        assert_eq!(
+            snapshot.sparse.as_ref().unwrap().exit_epoch.as_deref(),
+            Some("e".repeat(64).as_str())
+        );
+        assert!(handle
+            .accept(
+                &old,
+                reply(&old, ExitPickStatus::Ready),
+                authority(Arc::new(Clock(AtomicU64::new(0))))
+            )
+            .is_err());
     }
     #[test]
     fn selection_is_bounded_and_warmup_does_not_consume_flow_ordinals() {

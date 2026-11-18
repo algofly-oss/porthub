@@ -828,6 +828,9 @@ fn validate_exit_response(
     let epoch = base.sparse.as_ref().and_then(|s|s.exit_epoch.as_deref())
         .ok_or_else(||anyhow::anyhow!("exit picker epoch missing"))?;
     response.validate_for(sent, epoch)?;
+    if matches!(response.status,porthub_network::policy::ExitPickStatus::Ready|porthub_network::policy::ExitPickStatus::Pending){
+        ensure!(base.sparse.as_ref().and_then(|s|s.selection_epoch.as_deref())==Some(sent.selection_epoch.as_str()),"exit selection changed before candidate publication");
+    }
     Ok(response.lease.as_ref().map(|lease|lease.expires_at.min(base.expires_at)).unwrap_or(base.expires_at))
 }
 #[cfg(all(test,feature="private-sparse"))]
@@ -838,10 +841,10 @@ mod exit_response_tests {
     fn exit_response_preserves_final_request_expiry_and_rejects_wrong_correlation_or_role() {
         let epoch="e".repeat(64);
         let expiry=chrono::Utc::now()+chrono::Duration::seconds(10);
-        let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"peers":[],"grants":[],"sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":epoch}})).unwrap();
-        let sent:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":"a".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
+        let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"peers":[],"grants":[],"sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":epoch,"selection_epoch":"c".repeat(64)}})).unwrap();
+        let sent:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","selection_epoch":"c".repeat(64),"flow_id":"a".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
         let peer=|id:&str|serde_json::json!({"id":id,"ip":"10.203.0.2","fingerprint":"fp","instance":"instance","hostname":"a.phub"});
-        let mut response:ExitPickResponse=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":sent.flow_id,"ordinal":1,"warmup":true,"epoch":epoch,"status":"ready","choice":{"kind":"peer","id":"b"},"lease":{"workspace":"w","self":"a","epoch":"a".repeat(64),"expires_at":expiry+chrono::Duration::seconds(5),"revision":1,"local":peer("a"),"peer":peer("b"),"grants":[],"exit":{"route_id":"route","epoch":epoch,"client":"a","router":"b","traffic_mode":"internet_only"}}})).unwrap();
+        let mut response:ExitPickResponse=serde_json::from_value(serde_json::json!({"route_id":"route","selection_epoch":"c".repeat(64),"flow_id":sent.flow_id,"ordinal":1,"warmup":true,"epoch":epoch,"status":"ready","choice":{"kind":"peer","id":"b"},"lease":{"workspace":"w","self":"a","epoch":"a".repeat(64),"expires_at":expiry+chrono::Duration::seconds(5),"revision":1,"local":peer("a"),"peer":peer("b"),"grants":[],"exit":{"route_id":"route","epoch":epoch,"client":"a","router":"b","traffic_mode":"internet_only"}}})).unwrap();
         assert_eq!(validate_exit_response(&base,&sent,&response).unwrap(),expiry);
         response.lease.as_mut().unwrap().expires_at=expiry-chrono::Duration::seconds(5);
         assert_eq!(validate_exit_response(&base,&sent,&response).unwrap(),expiry-chrono::Duration::seconds(5));

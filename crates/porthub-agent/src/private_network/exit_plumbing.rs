@@ -74,7 +74,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"id":id,"ip":ip,"fingerprint":format!("fp-{id}"),"instance":format!("instance-{id}"),"hostname":format!("{id}.phub")})).unwrap()
         };
         let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"peers":[peer("a","10.203.0.2")],"grants":[],
-            "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":role,"selection":"round_robin","traffic_mode":"all","allow_direct_fallback":false,"tor_enabled":false,"tor_circuit_groups":4,"masquerade":false,"block_lan_access":false,"lan_networks":["192.168.4.0/24"]}]}})).unwrap();
+            "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"selection_epoch":"c".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":role,"selection":"round_robin","traffic_mode":"all","allow_direct_fallback":false,"tor_enabled":false,"tor_circuit_groups":4,"masquerade":false,"block_lan_access":false,"lan_networks":["192.168.4.0/24"]}]}})).unwrap();
         let pair = PairLease {
             workspace: "w".into(),
             self_: "a".into(),
