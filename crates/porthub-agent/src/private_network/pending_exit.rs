@@ -68,13 +68,20 @@ impl Scope {
         })
     }
 }
-pub(super) fn same_peer(a: &PeerInfo, b: &PeerInfo) -> bool {
+pub(super) fn same_identity(a: &PeerInfo, b: &PeerInfo) -> bool {
     a.id == b.id && a.ip == b.ip && a.fingerprint == b.fingerprint && a.instance == b.instance
+}
+pub(super) fn same_peer(a: &PeerInfo, b: &PeerInfo) -> bool {
+    same_identity(a, b)
+        && a.relay_origin
+            .as_ref()
+            .is_none_or(|stamp| b.relay_origin.as_ref() == Some(stamp))
 }
 pub(super) struct Entry {
     pub(super) bytes: Bytes,
     pub(super) origin: Arc<PeerInfo>,
     pub(super) base: Authority<()>,
+    pub(super) refresh_requested: bool,
     flow: FlowId,
     age: RequestWindow,
     ingress_clock: Arc<dyn SuspendClock>,
@@ -283,6 +290,7 @@ impl Queue {
             bytes,
             origin,
             base: base.clone(),
+            refresh_requested: false,
             flow,
             age,
             ingress_clock: clock,
@@ -336,18 +344,7 @@ pub(super) async fn during<T>(
     permit: porthub_mesh::udp::SendPermit,
     operation: impl std::future::Future<Output = Result<T>>,
 ) -> Result<Option<T>> {
-    tokio::pin!(operation);
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let guarded = std::future::poll_fn(|cx| {
-            if !permit.valid() {
-                return std::task::Poll::Ready(Ok(None));
-            }
-            operation.as_mut().poll(cx).map(|result| result.map(Some))
-        });
-        tokio::select! {result=guarded=>return result,_=tick.tick()=>if !permit.valid(){return Ok(None);}}
-    }
+    super::super::authority_event::during_permit(permit, operation).await
 }
 
 #[cfg(test)]
@@ -583,6 +580,42 @@ mod tests {
             error.downcast_ref::<std::io::Error>().unwrap().kind(),
             std::io::ErrorKind::BrokenPipe
         );
+    }
+    #[test]
+    fn new_relay_stamp_waits_for_matching_pair_without_restamping_original_bytes() {
+        let (mut q, a, clock) = queue();
+        let mut fresh = (*peer()).clone();
+        fresh.relay_origin = Some("2".repeat(32));
+        let incoming = Arc::new(fresh.clone());
+        let mut stale = fresh.clone();
+        stale.relay_origin = Some("1".repeat(32));
+        let bytes = packet(1, 32);
+        assert!(q.push(bytes.clone(), incoming.clone(), &a));
+        let mut entry = q.pop().unwrap();
+        let (r, _) = super::super::super::exit_forwarding::readiness_channel();
+        let plan = r.request([fresh.ip].into()).unwrap();
+        assert!(same_identity(&incoming, &stale));
+        assert!(!same_peer(&incoming, &stale));
+        assert!(!entry.bind(&plan, &stale, permit()));
+        entry.refresh_requested = true;
+        q.pending(entry);
+        clock.0.store(1000, Ordering::SeqCst);
+        let mut entry = q.pop().unwrap();
+        assert!(entry.refresh_requested);
+        assert_eq!(entry.origin.relay_origin, Some("2".repeat(32)));
+        assert_eq!(entry.received_boot, Duration::ZERO);
+        assert_eq!(&entry.bytes[..], &bytes);
+        assert!(entry.bind(&plan, &fresh, permit()));
+        for field in 0..3 {
+            let mut foreign = fresh.clone();
+            match field {
+                0 => foreign.ip = "10.203.9.9".parse().unwrap(),
+                1 => foreign.fingerprint = "other".into(),
+                _ => foreign.instance = "other".into(),
+            };
+            assert!(!entry.bind(&plan, &foreign, permit()));
+            assert!(entry.origin_guard(&plan, &foreign, permit()).is_err());
+        }
     }
     #[test]
     fn queued_before_dispatch_suspend_or_missing_boot_stamp_cannot_gain_fresh_age() {

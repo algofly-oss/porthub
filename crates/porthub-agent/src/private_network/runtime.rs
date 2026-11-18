@@ -69,6 +69,14 @@ fn refresh_provider(base:&Snapshot,handle:&super::sparse::Handle,own:&str,readin
     let view=super::exit_plumbing::project(base,&handle.exit_leases());let wanted=super::exit_plumbing::provider_clients(&view,own);
     if wanted!=*clients{*plan=readiness.request(wanted.clone())?;*clients=wanted;}Ok(())
 }
+#[cfg(feature="private-sparse")]
+fn incoming_exit_permit(base:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:&str,origin:Option<Arc<porthub_network::policy::PeerInfo>>)->Result<Option<porthub_mesh::udp::SendPermit>>{
+    let permit=super::authority_event::send_exit_permit(base,handle,peer)?;
+    Ok(match origin.filter(|origin|origin.relay_origin.is_some()){
+        Some(origin)=>{let handle=handle.clone();permit.map(|permit|permit.constrain(move||handle.matches_relay_origin(&origin)))},
+        None=>permit,
+    })
+}
 #[cfg(all(target_os="linux",feature="private-sparse"))]
 fn retain_provider(queue:&mut pending_exit::Queue,bytes:bytes::Bytes,origin:Arc<porthub_network::policy::PeerInfo>,base:&super::authority_event::Authority<()>,received_at:Instant,received_boot:Option<Duration>,binding:Option<(&super::exit_forwarding::Plan,porthub_mesh::udp::SendPermit)>)->bool {
     #[cfg(feature="netns-tests")]
@@ -782,8 +790,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             },
             Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at,origin,received_boot})=>{
                 if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                #[cfg(feature="private-sparse")]
+                if !direct&&origin.as_ref().is_some_and(|origin|origin.relay_origin.as_deref().is_none_or(|stamp|stamp.len()!=32||!stamp.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))){continue;}
                 if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||sparse_handle.by_id(&peer).is_none()){
-                    sparse_handle.request_peer(&peer);
+                    sparse_handle.request_peer_once(&peer);
                     #[cfg(all(target_os="linux",feature="private-sparse"))]
                     if let (Some(origin),Some(base),Some(envelope))=(origin.as_ref(),installed_authority.as_ref(),porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,bytes.clone())) {
                         if origin.id==peer&&origin.ip==envelope.source&&peer_ips.get(&profile.peer_id)==Some(&envelope.destination)
@@ -798,8 +808,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
                     let Some(packet) = Packet::parse(&envelope.payload) else { continue; };
                     let is_reply = peer_ips.get(&profile.peer_id) == Some(&packet.destination());
-                    #[cfg(all(target_os="linux",feature="private-sparse"))]
-                    if sparse_handle.enabled()&&origin.as_ref().is_some_and(|origin|sparse_handle.by_id(&peer).is_none_or(|current|!pending_exit::same_peer(origin,&current))){continue;}
+                    #[cfg(feature="private-sparse")]
+                    if sparse_handle.enabled(){if let Some(origin)=origin.as_ref(){
+                        let Some(current)=sparse_handle.by_id(&peer) else{continue;};
+                        if origin.id!=current.id||origin.ip!=current.ip||origin.fingerprint!=current.fingerprint||origin.instance!=current.instance{continue;}
+                        if origin.relay_origin.as_ref().is_some_and(|stamp|current.relay_origin.as_ref()!=Some(stamp)){
+                            sparse_handle.request_peer_once(&peer);
+                            #[cfg(target_os="linux")]
+                            if !is_reply {if let Some(base)=installed_authority.as_ref(){retain_provider(&mut pending_provider,envelope.payload,origin.clone(),base,received_at,received_boot,None);}}
+                            continue;
+                        }
+                    }}
                     #[cfg(target_os = "linux")]
                     let can_forward = exit_clients.contains(&packet.source());
                     #[cfg(not(target_os = "linux"))]
@@ -815,17 +834,22 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         #[cfg(all(target_os="linux",feature="private-sparse"))]
                         if !is_reply&&sparse_handle.enabled(){
                             let Some(base)=installed_authority.as_ref() else{continue;};
-                            let Some(current)=sparse_handle.by_id(&peer) else{continue;};
-                            let Ok(Some(original))=super::authority_event::send_exit_permit(Some(base),&sparse_handle,&peer) else{continue;};
+                            let Ok(Some(original))=incoming_exit_permit(Some(base),&sparse_handle,&peer,origin.clone()) else{continue;};
                             if !exit_refresh.ready(&exit_native_plan){
-                                let observed=origin.clone().unwrap_or_else(||Arc::new(current.clone()));
+                                let Some(observed)=origin.clone() else{continue;};
                                 retain_provider(&mut pending_provider,envelope.payload,observed,base,received_at,received_boot,Some((&exit_native_plan,original)));continue;
                             }
                             let ready=exit_refresh.clone();let plan=exit_native_plan.clone();let live=original.clone().constrain(move||ready.ready(&plan));
                             if let Some(tun)=&device{
                                 let delivered=pending_exit::during(live,async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(Some(base),&sparse_handle,&peer,tun,&envelope.payload)=>result}}).await?;
-                                if delivered.is_none()&&original.valid(){let observed=origin.clone().unwrap_or_else(||Arc::new(current.clone()));retain_provider(&mut pending_provider,envelope.payload,observed,base,received_at,received_boot,Some((&exit_native_plan,original)));}
+                                if delivered.is_none()&&original.valid(){if let Some(observed)=origin.clone(){retain_provider(&mut pending_provider,envelope.payload,observed,base,received_at,received_boot,Some((&exit_native_plan,original)));}}
                             }
+                            continue;
+                        }
+                        #[cfg(feature="private-sparse")]
+                        if sparse_handle.enabled(){
+                            let Ok(Some(permit))=incoming_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer,origin.clone()) else{continue;};
+                            if let Some(tun)=&device{let _=super::authority_event::during_permit(permit,async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,tun,&envelope.payload)=>result}}).await?;}
                             continue;
                         }
                         if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,tun,&envelope.payload)=>result?}; }
@@ -1128,14 +1152,18 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             #[cfg(all(target_os="linux",feature="private-sparse"))]
             for _ in 0..pending_provider.len().min(16){
                 let Some(mut entry)=pending_provider.pop() else{break;};let peer=entry.origin.id.clone();
-                let Some(current)=sparse_handle.by_id(&peer) else{sparse_handle.request_peer(&peer);pending_provider.pending(entry);continue;};
-                if !pending_exit::same_peer(&entry.origin,&current){continue;}
+                let Some(current)=sparse_handle.by_id(&peer) else{if !entry.refresh_requested{sparse_handle.request_peer_once(&peer);entry.refresh_requested=true;}pending_provider.pending(entry);continue;};
+                if !pending_exit::same_identity(&entry.origin,&current){continue;}
+                if !pending_exit::same_peer(&entry.origin,&current){
+                    if !entry.refresh_requested{sparse_handle.request_peer_once(&peer);entry.refresh_requested=true;}
+                    pending_provider.pending(entry);continue;
+                }
                 let Some(packet)=Packet::parse(&entry.bytes) else{continue;};
                 if !exit_clients.contains(&packet.source())||!policy.check_exit(&entry.bytes,&peer,true){continue;}
-                let Ok(Some(original))=super::authority_event::send_exit_permit(Some(&entry.base),&sparse_handle,&peer) else{continue;};
+                let Ok(Some(original))=incoming_exit_permit(Some(&entry.base),&sparse_handle,&peer,Some(entry.origin.clone())) else{continue;};
                 if !entry.bind(&exit_native_plan,&current,original){continue;}
                 if !exit_refresh.ready(&exit_native_plan){pending_provider.pending(entry);continue;}
-                let Ok(Some(current_permit))=super::authority_event::send_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer) else{continue;};
+                let Ok(Some(current_permit))=incoming_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer,Some(entry.origin.clone())) else{continue;};
                 let Ok(guard)=entry.guard(&exit_native_plan,&current,current_permit,&exit_refresh) else{continue;};
                 if let Some(tun)=&device{
                     let delivered=pending_exit::during(guard,async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,tun,&entry.bytes)=>result}}).await?;
@@ -1501,4 +1529,35 @@ mod stream_retirement_tests {
         owners.spawn(async{(1,Err(anyhow::anyhow!("retired-native-cleanup-error")))});
         let error=stream_owner_completed(2,false,owners.join_next().await).unwrap_err();ensure!(error.to_string().contains("retired-native-cleanup-error"),"old-owner cleanup failure was hidden or replaced");Ok(())
     }
+}
+
+#[cfg(all(test,feature="private-sparse"))]
+mod relay_origin_runtime_tests {
+ use super::*;
+ use std::sync::atomic::{AtomicUsize,Ordering};
+ fn fixture()->(super::super::sparse::Handle,super::super::authority_event::Authority<()>,porthub_network::policy::PairLease){
+  let expiry=chrono::Utc::now()+chrono::Duration::seconds(15);let epoch="a".repeat(64);
+  let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"sparse":{"protocol":1,"epoch":epoch,"exit_epoch":"e".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+  let pair:porthub_network::policy::PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":"a".repeat(64),"revision":1,"expires_at":expiry,"local":base.peers[0],"peer":{"id":"b","ip":"10.203.1.2","fingerprint":"remote","instance":"remote-instance","hostname":"b.phub","relay_origin":"1".repeat(32)},"grants":[],"exit":{"epoch":"e".repeat(64),"route_id":"route","client":"a","router":"b","traffic_mode":"internet_only"}})).unwrap();
+  let authority=super::super::authority_event::Authority::new((),super::super::authority_event::request_start(None).unwrap(),expiry);
+  let(handle,_)=super::super::sparse::channel();handle.update_base_authority(&base,authority.clone());let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};handle.installed_authority(&query,pair.clone(),authority.clone());(handle,authority,pair)
+ }
+ #[tokio::test]
+ async fn relayed_reply_pending_write_rechecks_incarnation_without_requiring_provider_ack(){
+  struct Pending(Arc<AtomicUsize>);impl std::future::Future for Pending{type Output=Result<()>;fn poll(self:std::pin::Pin<&mut Self>,_:&mut std::task::Context<'_>)->std::task::Poll<Self::Output>{self.0.fetch_add(1,Ordering::SeqCst);std::task::Poll::Pending}}
+  let(handle,base,mut pair)=fixture();let origin=Arc::new(pair.peer.clone());let permit=incoming_exit_permit(Some(&base),&handle,"b",Some(origin)).unwrap().unwrap();assert!(permit.valid());
+  let direct=super::super::authority_event::send_exit_permit(Some(&base),&handle,"b").unwrap().unwrap();let polls=Arc::new(AtomicUsize::new(0));let task=tokio::spawn(super::super::authority_event::during_permit(permit,Pending(polls.clone())));
+  tokio::time::timeout(Duration::from_millis(200),async{while polls.load(Ordering::SeqCst)==0{tokio::task::yield_now().await;}}).await.unwrap();let before=polls.load(Ordering::SeqCst);
+  pair.peer.relay_origin=Some("2".repeat(32));let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};handle.installed_authority(&query,pair,base.clone());
+  assert!(direct.valid(),"stamp-only change must preserve independent direct RTC authority");
+  assert!(tokio::time::timeout(Duration::from_millis(200),task).await.unwrap().unwrap().unwrap().is_none());assert_eq!(polls.load(Ordering::SeqCst),before,"old relay reply polled native write after rebind");
+ }
+ #[test]
+ fn stamp_mismatch_requests_one_fresh_pair_without_evicting_old_direct_authority(){
+  let(handle,base,mut pair)=fixture();let mut new_origin=pair.peer.clone();new_origin.relay_origin=Some("2".repeat(32));
+  let old=super::super::authority_event::send_exit_permit(Some(&base),&handle,"b").unwrap().unwrap();assert!(!handle.matches_relay_origin(&new_origin));
+  assert!(handle.request_peer_once("b"));for _ in 0..1000{assert!(!handle.request_peer_once("b"));}assert!(old.valid());assert_eq!(handle.by_id("b").unwrap().relay_origin,Some("1".repeat(32)));
+  pair.peer=new_origin.clone();let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};handle.installed_authority(&query,pair,base);assert!(handle.matches_relay_origin(&new_origin));
+  for field in 0..3{let mut foreign=new_origin.clone();match field{0=>foreign.ip="10.203.2.9".parse().unwrap(),1=>foreign.fingerprint="foreign".into(),_=>foreign.instance="foreign".into()};assert!(!handle.matches_relay_origin(&foreign));}
+ }
 }

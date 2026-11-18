@@ -351,3 +351,13 @@ mod tests {
         assert!(task.await.unwrap().is_err());
     }
 }
+
+/// Guard a final native operation without conflating a withdrawn local veto
+/// with an I/O failure. None means the operation was not polled after retirement.
+pub(crate) async fn during_permit<T>(permit:porthub_mesh::udp::SendPermit,operation:impl std::future::Future<Output=Result<T>>)->Result<Option<T>>{
+    tokio::pin!(operation);let mut tick=tokio::time::interval(std::time::Duration::from_millis(50));tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {let guarded=std::future::poll_fn(|cx|{
+        if !permit.valid(){return std::task::Poll::Ready(Ok(None));}
+        operation.as_mut().poll(cx).map(|result|result.map(Some))
+    });tokio::select!{result=guarded=>return result,_=tick.tick()=>if !permit.valid(){return Ok(None);}}}
+}

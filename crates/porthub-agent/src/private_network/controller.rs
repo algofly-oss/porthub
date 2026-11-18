@@ -564,7 +564,7 @@ pub(crate) async fn run_watched_sparse_owned(
                 readers.spawn(read_packets(
                     prepared.packets,
                     session.clone(),
-                    Arc::new(prepared.info.clone()),
+                    direct_reader_origin(&prepared.info),
                     events.clone(),
                     cancel.clone(),
                 ));
@@ -833,6 +833,7 @@ pub(crate) fn exit_ingress_boot(bytes:&[u8])->Option<Duration> {
     }
     let _=bytes;None
 }
+fn direct_reader_origin(info:&PeerInfo)->Arc<PeerInfo>{let mut origin=info.clone();origin.relay_origin=None;Arc::new(origin)}
 fn peer_packet(peer:String,bytes:Bytes,relayed:bool,origin:Option<Arc<PeerInfo>>)->Event {
     let received_boot=exit_ingress_boot(&bytes);
     Event::Packet{peer,bytes,origin,received_boot,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
@@ -958,6 +959,11 @@ mod exit_response_tests {
 #[cfg(test)]
 mod received_origin_tests {
  use super::*;
+ #[test]fn direct_reader_clears_server_relay_incarnation_once_without_changing_crypto_identity(){
+  let info:PeerInfo=serde_json::from_value(serde_json::json!({"id":"peer","ip":"10.203.0.2","fingerprint":"pin","instance":"instance","hostname":"peer.phub","relay_origin":"a".repeat(32)})).unwrap();
+  let captured=direct_reader_origin(&info);assert!(captured.relay_origin.is_none());assert_eq!(info.relay_origin.as_deref(),Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+  assert_eq!(captured.id,info.id);assert_eq!(captured.ip,info.ip);assert_eq!(captured.fingerprint,info.fingerprint);assert_eq!(captured.instance,info.instance);
+ }
  #[test]fn received_packet_keeps_original_reader_identity_without_authorizing_payload(){
   let original:Arc<PeerInfo>=Arc::new(serde_json::from_value(serde_json::json!({"id":"peer","ip":"10.203.0.2","fingerprint":"old-pin","instance":"old-instance","hostname":"peer.phub"})).unwrap());
   let Event::Packet{origin:Some(retained),bytes,..}=peer_packet("peer".into(),Bytes::from_static(b"fixture"),false,Some(original.clone())) else{panic!("origin missing")};

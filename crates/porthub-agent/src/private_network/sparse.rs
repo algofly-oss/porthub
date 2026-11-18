@@ -338,6 +338,24 @@ impl Handle {
                 value: ip.to_string(),
             })
     }
+    /// Only one outstanding ordinary lookup per peer. A relay-origin mismatch
+    /// requests fresh metadata without evicting existing private/exit authority.
+    pub(crate) fn request_peer_once(&self,id:&str)->bool{
+        let query=Lookup{kind:"peer".into(),value:id.into()};
+        if self.state.lock().unwrap_or_else(|p|p.into_inner()).wanted.contains_key(&query){return false;}
+        self.request_peer(id)
+    }
+    /// No allocation or lease refresh: a retained relay record must still bind
+    /// the CURRENT exact EXIT incarnation at every final native-write poll.
+    pub(crate) fn matches_relay_origin(&self,origin:&PeerInfo)->bool{
+        let Some(stamp)=origin.relay_origin.as_ref() else{return false;};
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if self.revoked()||state.deadline.is_none_or(|d|d<=now)||state.authority.as_ref().is_some_and(|a|a.check().is_err()){return false;}
+        let Some(cached)=state.cache.get(&origin.id) else{return false;};
+        if !cached.exit_valid(now)||state.exit_epoch.as_deref()!=cached.lease.exit.as_ref().map(|exit|exit.epoch.as_str()){return false;}
+        let peer=&cached.lease.peer;
+        peer.id==origin.id&&peer.ip==origin.ip&&peer.fingerprint==origin.fingerprint&&peer.instance==origin.instance&&peer.relay_origin.as_ref()==Some(stamp)
+    }
     pub fn request_peer(&self, id: &str) -> bool {
         !id.is_empty()
             && id.len() <= 60
