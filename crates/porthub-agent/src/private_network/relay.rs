@@ -218,6 +218,7 @@ async fn dispatch_record(frame: Bytes, events: &mpsc::Sender<Event>) {
                 let _ = events
                     .send(Event::Packet {
                         origin: None, // relay data has no direct-reader generation witness
+                        received_boot: super::controller::exit_ingress_boot(&frame[1+length..]),
                         peer: peer.into(),
                         bytes: frame.slice(1 + length..),
                         direct: false,

@@ -1,6 +1,11 @@
 //! Local native intent projection, never a source of packet authorization.
 use porthub_network::policy::{ExitRole, ExitRoute, PairLease, Snapshot};
 
+pub(crate) fn provider_clients(view:&Snapshot,own:&str)->std::collections::BTreeSet<std::net::Ipv4Addr>{
+    view.exit_routes.iter().filter(|route|route.routing_peers.iter().any(|peer|peer==own)).flat_map(|route|&route.clients)
+        .filter_map(|id|view.peers.iter().find(|peer|&peer.id==id).map(|peer|peer.ip)).collect()
+}
+
 pub(crate) fn online_peers(view:&Snapshot)->std::collections::HashSet<String> {view.peers.iter().filter(|peer|peer.online).map(|peer|peer.id.clone()).collect()}
 
 pub(crate) fn project(base: &Snapshot, leases: &[PairLease]) -> Snapshot {

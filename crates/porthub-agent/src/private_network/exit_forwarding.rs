@@ -20,11 +20,13 @@ const DIRECTORY: &str = "/run/porthub-exits";
 const TABLE: &str = "porthub_exit_return";
 
 /// Readiness is metadata only; packet authority remains the caller's concern.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Plan {
     generation: u64,
-    clients: BTreeSet<std::net::Ipv4Addr>,
+    clients: std::sync::Arc<BTreeSet<std::net::Ipv4Addr>>,
 }
+impl PartialEq for Plan {fn eq(&self,other:&Self)->bool{self.generation==other.generation&&std::sync::Arc::ptr_eq(&self.clients,&other.clients)}}
+impl Eq for Plan {}
 #[derive(Clone)]
 pub(crate) struct Readiness {
     desired: tokio::sync::watch::Sender<Plan>,
@@ -38,7 +40,7 @@ pub(crate) struct Requests {
 pub(crate) fn readiness_channel() -> (Readiness, Requests) {
     let (desired, requests) = tokio::sync::watch::channel(Plan {
         generation: 0,
-        clients: BTreeSet::new(),
+        clients: std::sync::Arc::new(BTreeSet::new()),
     });
     let (applied, observed) = tokio::sync::watch::channel(None);
     (
@@ -58,7 +60,7 @@ impl Readiness {
     pub(crate) fn request(&self, clients: BTreeSet<std::net::Ipv4Addr>) -> Result<Plan> {
         let mut result = Ok(());
         self.desired.send_if_modified(|current| {
-            if current.clients == clients {
+            if *current.clients == clients {
                 return false;
             }
             let Some(next) = current.generation.checked_add(1) else {
@@ -67,7 +69,7 @@ impl Readiness {
             };
             *current = Plan {
                 generation: next,
-                clients,
+                clients: std::sync::Arc::new(clients),
             };
             true
         });
@@ -81,6 +83,8 @@ impl Readiness {
     pub(crate) fn ready(&self, plan: &Plan) -> bool {
         !self.failed.load(std::sync::atomic::Ordering::SeqCst)
             && !self.applied.has_changed().is_err()
+            // Plan equality is generation+immutable publication Arc identity,
+            // never a per-packet source-set scan or cross-channel value match.
             && *self.desired.borrow() == *plan
             && self.applied.borrow().as_ref() == Some(plan)
     }
@@ -145,6 +149,13 @@ mod readiness_tests {
         [std::net::Ipv4Addr::new(10, 203, 0, n)].into()
     }
     #[test]
+    fn cloned_publication_is_shared_but_equal_foreign_channel_is_not_its_ack(){
+        let(a,worker)=readiness_channel();let plan=a.request(clients(1)).unwrap();worker.acknowledge(&plan,true);let clone=plan.clone();
+        assert!(std::sync::Arc::ptr_eq(&plan.clients,&clone.clients));assert!(a.ready(&clone));
+        let(b,other)=readiness_channel();let foreign=b.request(clients(1)).unwrap();other.acknowledge(&foreign,true);
+        assert_ne!(plan,foreign);assert!(!a.ready(&foreign));assert!(!b.ready(&plan));
+    }
+    #[test]
     fn only_exact_successful_generation_and_source_set_is_ready() {
         let (ready, worker) = readiness_channel();
         let first = ready.request(clients(1)).unwrap();
@@ -174,7 +185,7 @@ mod readiness_tests {
         let (ready, worker) = readiness_channel();
         ready.desired.send_modify(|plan| {
             plan.generation = u64::MAX;
-            plan.clients = clients(1);
+            plan.clients = clients(1).into();
         });
         let old = ready.desired.borrow().clone();
         worker.acknowledge(&old, true);

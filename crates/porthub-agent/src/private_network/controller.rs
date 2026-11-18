@@ -200,6 +200,7 @@ pub enum Event {
     Packet {
         // Immutable direct-reader identity, metadata only (never a grant).
         origin: Option<Arc<PeerInfo>>,
+        received_boot: Option<Duration>,
         peer: String,
         bytes: Bytes,
         direct: bool,
@@ -824,8 +825,17 @@ mod picker_schedule_tests {
 // Protocol `direct` means the peer RTC carrier (including TURN), not the
 // physically direct path. Keep QoS/path selection unchanged; telemetry gets a
 // separate actual carrier-path classification.
+pub(crate) fn exit_ingress_boot(bytes:&[u8])->Option<Duration> {
+    #[cfg(all(target_os="linux",feature="private-sparse"))]
+    if bytes.get(9)==Some(&porthub_mesh::control_packet::EXIT) {
+        use super::authority_clock::SuspendClock;
+        return super::authority_clock::NativeClock.elapsed_since_boot().ok();
+    }
+    let _=bytes;None
+}
 fn peer_packet(peer:String,bytes:Bytes,relayed:bool,origin:Option<Arc<PeerInfo>>)->Event {
-    Event::Packet{peer,bytes,origin,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
+    let received_boot=exit_ingress_boot(&bytes);
+    Event::Packet{peer,bytes,origin,received_boot,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
 }
 
 async fn read_packets(
