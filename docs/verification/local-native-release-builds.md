@@ -1,5 +1,13 @@
 # Local native release builds
 
+For builds on another machine, configure an SSH host entry and its readiness
+probe. The adapter checks the native toolchain before it accepts work.
+[SSH builder setup](../../scripts/ssh-native-builder.README.md)
+
+The PortHub core can serve verified artifacts from a read-only mount.
+[Artifact endpoint configuration](../native-build-depot.md)
+
+
 Run this on each explicitly authorized build host, in a clean checkout at the
 same full commit. It does not provision hosts, register runners, deploy, install
 services, or publish. SSH/staging remains a separate explicit operator action.
