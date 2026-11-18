@@ -52,6 +52,8 @@ fn icmp_echo(target: std::net::Ipv4Addr) -> Result<()> {
     Ok(())
 }
 async fn consumer(target: &str) -> Result<()> {
+    let phase_started=std::time::Instant::now();
+    let phase=|name:&'static str|println!("native_exit_phase phase={name} elapsed_ms={}",phase_started.elapsed().as_millis());
     let expected: Vec<IpAddr> = ["203.0.113.2", "203.0.113.3"].into_iter().map(|s| s.parse().unwrap()).collect();
     tokio::time::timeout(Duration::from_secs(60), async {
         let mut seen = std::collections::BTreeSet::new();
@@ -102,6 +104,7 @@ async fn consumer(target: &str) -> Result<()> {
         ensure!(tokio::time::timeout(Duration::from_secs(3), half_closed.read_line(&mut final_reply)).await?? == 0, "server close was not delivered");
         println!("{mode}: half-close preserved final response and orderly shutdown");
     }
+    phase("single_outage_begin");
     let offline = expected.iter().find(|ip| **ip != original).unwrap();
     established.get_mut().write_all(format!("offline:{offline}\n").as_bytes()).await?;
     let mut confirmation = String::new(); established.read_line(&mut confirmation).await?;
@@ -112,6 +115,7 @@ async fn consumer(target: &str) -> Result<()> {
         ensure!(ip == original, "offline exit remained eligible");
         ensure!(ping(&mut established).await? == original, "healthy established flow broke");
     }
+    phase("single_outage_survivor16_complete");
     println!("offline exit excluded: 16 new connections used the surviving exit; established connection preserved");
     let control = std::env::var("PORTHUB_TEST_CONTROL_TARGET")?;
     async fn command(control: &str, command: &str) -> Result<()> {
@@ -122,11 +126,17 @@ async fn consumer(target: &str) -> Result<()> {
         ensure!(reply.trim() == "updated", "fixture command failed");
         Ok(())
     }
+    phase("all_outage_stop_begin");
     command(&control, "exits:stop").await?;
+    phase("all_outage_stopped");
     ensure!(open(target).await.is_err(), "blocked exit route leaked normal internet access");
+    phase("all_outage_first_blocked");
     tokio::time::sleep(Duration::from_secs(20)).await;
     ensure!(open(target).await.is_err(), "blocked exit route leaked after presence expiry");
+    phase("all_outage_after_presence_blocked");
+    phase("fallback_enable_begin");
     command(&control, "fallback:on").await?;
+    phase("fallback_policy_requested");
     let (mut direct, direct_ip) = tokio::time::timeout(Duration::from_secs(40), async {
         loop {
             if let Ok(pair) = open(target).await {
@@ -135,8 +145,11 @@ async fn consumer(target: &str) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }).await.context("authorized normal internet fallback did not activate")?;
+    phase("fallback_active");
     ensure!(direct_ip == "198.18.10.2".parse::<IpAddr>()?, "unexpected fallback source");
+    phase("recovery_begin");
     command(&control, "exits:start").await?;
+    phase("recovery_started");
     tokio::time::timeout(Duration::from_secs(45), async {
         loop {
             ensure!(ping(&mut direct).await? == direct_ip, "existing direct connection moved on exit recovery");
@@ -146,7 +159,9 @@ async fn consumer(target: &str) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }).await.context("recovered exits did not resume new connections")??;
+    phase("recovery_connections_verified");
     command(&control, "fallback:off").await?;
+    phase("fallback_disabled");
     println!("all-exit outage: default blocking, opt-in direct fallback, recovery and direct TCP pinning verified");
     Ok(())
 }
