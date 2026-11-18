@@ -70,8 +70,8 @@ def relative(root, path):
 
 
 def manifest(root, name):
-    data = tomllib.loads((root / name).read_text())
-    workspace = tomllib.loads((root / 'Cargo.toml').read_text()).get('workspace', {})
+    data = tomllib.loads((root / name).read_text(encoding='utf-8'))
+    workspace = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8')).get('workspace', {})
     data = copy.deepcopy(data)
     for key, value in list(data.get('package', {}).items()):
         if isinstance(value, dict) and value.get('workspace') is True:
@@ -136,7 +136,7 @@ def dep_paths(text):
 
 
 def lock_packages(root):
-    return tomllib.loads((root / 'Cargo.lock').read_text())['package']
+    return tomllib.loads((root / 'Cargo.lock').read_text(encoding='utf-8'))['package']
 
 
 def locked(packages, node):
@@ -226,14 +226,14 @@ def input_state(root, path, kind):
 
 
 def toolchain(root):
-    data = tomllib.loads((root / 'rust-toolchain.toml').read_text())['toolchain']
+    data = tomllib.loads((root / 'rust-toolchain.toml').read_text(encoding='utf-8'))['toolchain']
     # Installing rustfmt/clippy or changing their installation profile does not
     # change generated binaries. Compiler changes do.
     return {'channel': data['channel']}
 
 
 def patch_state(root, nodes):
-    data = tomllib.loads((root / 'Cargo.toml').read_text())
+    data = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8'))
     names = {node['name'] for node in nodes}
     result = {}
     for registry, patches in data.get('patch', {}).items():
@@ -247,7 +247,7 @@ def patch_state(root, nodes):
 
 
 def profile_state(root, name, nodes):
-    profiles = tomllib.loads((root / 'Cargo.toml').read_text()).get('profile', {})
+    profiles = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8')).get('profile', {})
     active = {node['name'] for node in nodes}
     visited = set()
     def resolve(current):
@@ -306,7 +306,7 @@ def shipping_environment(root, target):
     path = root/'deploy/component-platforms.toml'
     if not path.is_file():
         return None
-    data = tomllib.loads(path.read_text())
+    data = tomllib.loads(path.read_text(encoding='utf-8'))
     if data.get('schema_version') != 1 or set(data.get('defaults',{})) != {'CARGO_INCREMENTAL'}:
         raise ValueError('Unsupported shipping compiler environment recipe')
     config = data['targets'].get(target)
@@ -366,7 +366,7 @@ def build_state(root, recipe, target, paths, nodes, environment=None):
     state = {'recipe': recipe, 'target': target, 'toolchain': toolchain(root),
             'profile': profile_state(root, recipe['profile'], nodes),
             'environment': normalize_environment(root, compiler_environment(target, recipe['profile'])) if environment is None else environment,
-            'resolver': tomllib.loads((root / 'Cargo.toml').read_text()).get('workspace', {}).get('resolver'),
+            'resolver': tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8')).get('workspace', {}).get('resolver'),
             'patches': patch_state(root, nodes),
             'inputs': [input_state(root, path, kind) for path, kind in sorted(paths)],
             'dependencies': [dependency_state(packages, node) for node in nodes]}
@@ -377,7 +377,7 @@ def build_state(root, recipe, target, paths, nodes, environment=None):
 
 
 def read_recipes(root):
-    data = tomllib.loads((root / 'deploy/components.toml').read_text())
+    data = tomllib.loads((root / 'deploy/components.toml').read_text(encoding='utf-8'))
     if data.get('schema_version') != SCHEMA:
         raise ValueError('Unsupported component build recipe schema')
     return data['tools']
@@ -418,7 +418,7 @@ def record(root, tool, target, binary, dep_info, revision, version=None, tree=No
     paths = set()
     dependency_paths = []
     for information in [dep_info, *script_dep_infos]:
-        dependency_paths.extend(dep_paths(information.read_text()))
+        dependency_paths.extend(dep_paths(information.read_text(encoding='utf-8')))
     for value in dependency_paths:
         path = Path(value)
         if not path.is_absolute():
@@ -496,7 +496,7 @@ def verify_reuse(receipt, binary):
 def read_receipt(path):
     if path.stat().st_size > MAX_RECEIPT:
         raise ValueError('Build receipt exceeds limit')
-    return validate_receipt(json.loads(path.read_text()))
+    return validate_receipt(json.loads(path.read_text(encoding='utf-8')))
 
 
 def build_and_record(root, tool, target, revision, version=None, binary_output=None):

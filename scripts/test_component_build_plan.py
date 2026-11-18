@@ -71,6 +71,19 @@ recipe_version=1
         self.deps('tool')
         self.receipt = self.record('tool')
 
+    def test_manifest_input_hash_is_utf8_even_on_windows_legacy_locale(self):
+        path = self.root/'support/Cargo.toml'
+        text = path.read_bytes().decode('utf-8').replace('name="support"', 'name="support"\nauthors=["Félix Saparelli"]')
+        path.write_bytes(text.encode('utf-8'))
+        expected = buildplan.input_state(self.root, 'support/Cargo.toml', 'manifest')
+        def legacy_read_text(path, encoding=None, errors=None, **unused):
+            return path.read_bytes().decode(encoding or 'cp1252', errors or 'strict')
+        with mock.patch.object(Path, 'read_text', legacy_read_text):
+            observed = buildplan.input_state(self.root, 'support/Cargo.toml', 'manifest')
+            author = buildplan.manifest(self.root, 'support/Cargo.toml')['package']['authors'][0]
+        self.assertEqual(author, 'Félix Saparelli')
+        self.assertEqual(observed, expected)
+
     def write(self, name, text):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
