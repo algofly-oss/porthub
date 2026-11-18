@@ -564,7 +564,7 @@ mod tests {
 
 pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}").to_ascii_lowercase();
-    if text.contains("native source quarantined") || text.contains("retained source") { "native source quarantined; safe address repair required" }
+    if text.contains("native source quarantined") || text.contains("native source address quarantined") || text.contains("retained source") { "native source quarantined; safe address repair required" }
     else if text.contains("private address changed") { "private address changed; rebuilding the private tunnel" }
     else if text.contains("lease expired") { "private policy expired; check clock synchronization and gateway connectivity" }
     else if text.contains("resolve1") || text.contains("systemd-resolved") { "private DNS unavailable; check systemd-resolved installation and service state" }
@@ -590,5 +590,5 @@ fn private_stage_diagnostic_is_typed_and_never_echoes_error_text() {
     let error=Err::<(),_>(anyhow::anyhow!("secret-profile/private-controller")).context(PrivateStage::NativeOwner).unwrap_err();
     assert_eq!(private_failure_stage(&error),"native-owner");
     assert_eq!(private_failure_stage(&anyhow::anyhow!("native-owner secret")),"runtime");
-    assert_eq!(private_failure_reason(&anyhow::anyhow!("native source quarantined after LAN/VPN/VM conflict")),"native source quarantined; safe address repair required");
+    assert_eq!(private_failure_reason(&anyhow::anyhow!("native source address quarantined; a safe new private address allocation is required")),"native source quarantined; safe address repair required");
 }
