@@ -487,7 +487,29 @@ def perform_candidate(args, root, roles, current, images, base, depot):
     activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others,
              lambda: check_routes(args.probe_url), roles, before_role,
              lambda: selection.apply(record, verify_selection))
+    if 'core' in roles:
+        retain_core_backups(core_data(current['core']), args.project, record, root, origins,
+                            args.revision, getattr(args, 'keep_core_backups', 2),
+                            getattr(args, 'backup_retention_root', []))
     print('PortHub roles healthy ('+', '.join(roles)+'); unselected roles retained; previous immutable image references at '+str(record))
+
+
+def retain_core_backups(source, project, record, root, origins, revision, keep=2, extra_roots=()):
+    # activate() has already verified candidate health and ordinary Compose
+    # selection. Cleanup errors must never roll back that healthy deployment.
+    try:
+        from backup_retention import complete, prune
+        complete(record, project, source, revision)
+        roots = [root, *(Path(previous) for previous, _ in origins.values()), *extra_roots]
+        identifiers = run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).split()
+        if len(identifiers) > 256:
+            raise ValueError('Container inventory exceeds bounded retention inspection')
+        containers = json.loads(run(['docker', 'inspect', '--type', 'container', *identifiers])) if identifiers else []
+        bound_sources = [Path(mount['Source']) for container in containers for mount in container.get('Mounts', []) if mount.get('Type') == 'bind']
+        result = prune(source, project, record, roots, keep, protected_sources=bound_sources)
+        print('Core backup retention: ' + json.dumps(result, sort_keys=True), flush=True)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, ImportError) as error:
+        print('Core backup retention deferred (' + type(error).__name__ + '); recovery/configuration records retained', flush=True)
 
 
 def main():
@@ -500,6 +522,8 @@ def main():
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--native-build-depot', type=Path, help='First-time opt-in: existing dedicated read-only artifact depot; later upgrades preserve it automatically')
     parser.add_argument('--native-build-depot-owner-uid', type=int, help='First-time opt-in: trusted artifact publisher UID')
+    parser.add_argument('--keep-core-backups', type=int, choices=range(2, 17), default=2, help='Automatically retain this many verified completed-upgrade core snapshots (default: 2)')
+    parser.add_argument('--backup-retention-root', type=Path, action='append', default=[], help='Additional exact previous deployment root with marked completed-upgrade snapshots; remembered across later release directories')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.project):

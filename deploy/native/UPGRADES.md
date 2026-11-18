@@ -69,9 +69,16 @@ The private `core-backup` snapshot retains ownership metadata, SHA-256 hashes,
 online/cold byte counts and cold-phase timing. Files and directories are synced
 before core replacement. The cold phase retains its 90-second deadline. Run
 with sudo when deployment data belongs to the service UID. Stage `upgrade.py`,
-`native_backup.py` and `migrate.py` together. A cold-phase failure restores the
+`native_backup.py`, `backup_retention.py` and `migrate.py` together. A cold-phase failure restores the
 attempted core role while edge and firewall remain running. Keep the snapshot
-with the upgrade records.
+with the upgrade records until it is superseded. After a successful core upgrade,
+automatic retention keeps the current snapshot and the newest other verified
+recovery point (default two; `--keep-core-backups` accepts 2–16). A private
+registry beside core state follows snapshots across versioned release roots.
+Only marked successful-upgrade snapshots are pruned; legacy snapshots require
+separate review. Configuration/image records and live or container-mounted
+backups are preserved. See [backup retention](BACKUP-RETENTION.md) for interrupted
+cleanup, filesystem safety and legacy handling.
 
 Rollback restores images and configuration; it does not restore database files.
 Assess schema compatibility separately before upgrading. Keep public application probes and a real
