@@ -88,7 +88,11 @@ async fn main() -> Result<()> {
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::signal::ctrl_c().await;
+            // A detached Windows worker may have no console to register with.
+            // Only an actual interrupt should stop its watch.
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
         }
         shutdown.cancel();
     });
