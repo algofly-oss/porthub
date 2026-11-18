@@ -313,23 +313,34 @@ async fn renumber_control(command:&str)->Result<String>{
     ensure!(line.len()<=4096,"owned renumber control response exceeds bound");Ok(line.trim().to_owned())
 }
 async fn renumber_state()->Result<serde_json::Value>{Ok(serde_json::from_str(&renumber_control("renumber:state").await?)?)}
-async fn renumber_tcp(target:std::net::Ipv4Addr,payload:&[u8])->Result<()>{
+async fn renumber_tcp(target:std::net::Ipv4Addr,payload:&[u8],stage:&str)->Result<()>{
     use tokio::io::AsyncReadExt;
+    let began=std::time::Instant::now();
+    println!("native_auto_renumber_tcp stage={stage} phase=connect_start elapsed_ms=0");
+    // Match the existing native paired fixture's bounded cold-connect budget.
+    // The tiny transaction retains3s AFTER connection; the outer180s gate stays.
+    let mut stream=tokio::time::timeout(Duration::from_secs(30),TcpStream::connect((target,443))).await.context("owned renumber cold TCP connect deadline")??;
+    println!("native_auto_renumber_tcp stage={stage} phase=connected elapsed_ms={}",began.elapsed().as_millis());
     tokio::time::timeout(Duration::from_secs(3),async{
-        let mut stream=TcpStream::connect((target,443)).await?;
-        stream.write_all(&(payload.len()as u16).to_be_bytes()).await?;stream.write_all(payload).await?;stream.shutdown().await?;
-        let mut got=vec![0;payload.len()];stream.read_exact(&mut got).await?;ensure!(got==payload,"new private TCP payload mismatch");
-        let mut end=[0];ensure!(stream.read(&mut end).await?==0,"private TCP FIN not received");Ok::<(),anyhow::Error>(())
-    }).await.context("owned renumber TCP DATA/FIN deadline")?
+        stream.write_all(&(payload.len()as u16).to_be_bytes()).await.context("owned TCP length write")?;
+        stream.write_all(payload).await.context("owned TCP request write")?;
+        println!("native_auto_renumber_tcp stage={stage} phase=request_written elapsed_ms={}",began.elapsed().as_millis());
+        stream.shutdown().await.context("owned TCP request FIN")?;
+        println!("native_auto_renumber_tcp stage={stage} phase=request_fin elapsed_ms={}",began.elapsed().as_millis());
+        let mut got=vec![0;payload.len()];stream.read_exact(&mut got).await.context("owned TCP response read")?;ensure!(got==payload,"new private TCP payload mismatch");
+        println!("native_auto_renumber_tcp stage={stage} phase=response_read elapsed_ms={}",began.elapsed().as_millis());
+        let mut end=[0];ensure!(stream.read(&mut end).await.context("owned TCP response FIN")?==0,"private TCP FIN not received");
+        println!("native_auto_renumber_tcp stage={stage} phase=response_fin elapsed_ms={}",began.elapsed().as_millis());Ok::<(),anyhow::Error>(())
+    }).await.context("owned renumber already-connected TCP DATA/FIN deadline")?
 }
 async fn renumber_provider()->Result<()>{
     use tokio::io::AsyncReadExt;
     let tcp=tokio::net::TcpListener::bind("0.0.0.0:443").await?;let udp=tokio::net::UdpSocket::bind("0.0.0.0:443").await?;
     let mut tick=tokio::time::interval(Duration::from_millis(100));let mut bytes=[0;256];let mut tcp_transactions=0usize;let mut udp_transactions=0usize;
     tokio::time::timeout(Duration::from_secs(180),async{loop{tokio::select!{
-        accepted=tcp.accept()=>{let(mut stream,_)=accepted?;tokio::time::timeout(Duration::from_secs(3),async{
-            let mut size=[0;2];stream.read_exact(&mut size).await?;let n=usize::from(u16::from_be_bytes(size));ensure!(n>0&&n<=256,"owned app payload bound");
-            let mut value=vec![0;n];stream.read_exact(&mut value).await?;let mut end=[0];ensure!(stream.read(&mut end).await?==0,"owned app request FIN absent");stream.write_all(&value).await?;stream.shutdown().await?;Ok::<(),anyhow::Error>(())
+        accepted=tcp.accept()=>{let(mut stream,_)=accepted?;println!("native_auto_renumber_provider phase=accepted transaction={}",tcp_transactions+1);tokio::time::timeout(Duration::from_secs(3),async{
+            let mut size=[0;2];stream.read_exact(&mut size).await.context("provider length read")?;println!("native_auto_renumber_provider phase=header transaction={}",tcp_transactions+1);let n=usize::from(u16::from_be_bytes(size));ensure!(n>0&&n<=256,"owned app payload bound");
+            let mut value=vec![0;n];stream.read_exact(&mut value).await.context("provider payload read")?;println!("native_auto_renumber_provider phase=payload transaction={}",tcp_transactions+1);let mut end=[0];ensure!(stream.read(&mut end).await.context("provider request FIN read")?==0,"owned app request FIN absent");println!("native_auto_renumber_provider phase=request_fin transaction={}",tcp_transactions+1);stream.write_all(&value).await.context("provider response write")?;stream.shutdown().await.context("provider response FIN")?;println!("native_auto_renumber_provider phase=response_fin transaction={}",tcp_transactions+1);Ok::<(),anyhow::Error>(())
         }).await??;tcp_transactions+=1;},
         received=udp.recv_from(&mut bytes)=>{let(n,peer)=received?;udp.send_to(&bytes[..n],peer).await?;udp_transactions+=1;},
         _=tick.tick()=>{if renumber_control("native:consumer-done?").await?=="ready"{break;}}
@@ -350,7 +361,7 @@ async fn renumber_consumer(profile:&porthub_agent::private_profile::Profile,path
     let initial=tokio::time::timeout(Duration::from_secs(60),async{loop{let state=renumber_state().await?;if state["ready"]==true{return Ok::<_,anyhow::Error>(state)}tokio::time::sleep(Duration::from_millis(100)).await;}}).await.context("initial native renumber peers not ready")??;
     let old:Ipv4Addr=initial["source"].as_str().context("old source missing")?.parse()?;let old_peer:Ipv4Addr=initial["target"].as_str().context("old target missing")?.parse()?;
     ensure!(old==Ipv4Addr::new(10,234,240,10)&&old_peer==Ipv4Addr::new(10,234,240,11),"initial native assignments differ");
-    renumber_tcp(old_peer,&payload).await?;
+    renumber_tcp(old_peer,&payload,"before_collision").await?;
     let old_socket=tokio::net::UdpSocket::bind((old,0)).await?;old_socket.connect((old_peer,443)).await?;old_socket.send(&payload).await?;
     let mut response=[0;256];let n=tokio::time::timeout(Duration::from_secs(3),old_socket.recv(&mut response)).await??;ensure!(&response[..n]==payload,"initial owned UDP failed");
     println!("native_auto_renumber phase=initial_private_tcp_udp_ready");
@@ -381,7 +392,7 @@ async fn renumber_consumer(profile:&porthub_agent::private_profile::Profile,path
         let link=connection.get_link_by_name(&tun_name).await?.context("new native owner missing")?;
         let addresses=connection.get_addresses_by_index(link.ifindex()).await?;ensure!(addresses.iter().any(|a|a.local()==Some(&IpAddr::V4(new_own))||a.address()==Some(&IpAddr::V4(new_own))),"new API assignment not installed natively");
         let _old_send=old_socket.send(&payload).await;ensure!(!renumber_udp_seen(&foreign,old,old_peer).await?,"old connected socket escaped foreign route before new traffic");
-        renumber_tcp(new_peer,&payload).await?;
+        renumber_tcp(new_peer,&payload,"after_reallocation").await?;
         let _old_send=old_socket.send(&payload).await;ensure!(!renumber_udp_seen(&foreign,old,old_peer).await?,"old connected socket escaped after reallocation");
         ensure!(read_sentinel().await?==stamp,"foreign sentinel route changed");
         ensure!(renumber_control("native:consumer-complete").await?=="updated","consumer completion not acknowledged");
