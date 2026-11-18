@@ -34,7 +34,7 @@ def inspect(kind, name):
     return json.loads(run(['docker', kind, 'inspect', name]))[0]
 
 
-def validate(current, images, configuration, revision, version, architecture, project, roles=ROLES):
+def validate(current, images, configuration, revision, version, architecture, project, roles=ROLES, depot=None):
     if not re.fullmatch(r'[a-f0-9]{40}', revision) or not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('A full source revision and numeric version are required')
     for role in roles:
@@ -65,7 +65,16 @@ def validate(current, images, configuration, revision, version, architecture, pr
         # State/socket/certificate mounts must keep their source and access mode.
         previous = {mount['Destination']: (mount['Source'], not mount['RW']) for mount in old['Mounts'] if mount['Type'] == 'bind'}
         candidate = {mount['target']: (mount['source'], mount.get('read_only', False)) for mount in service.get('volumes', []) if mount['type'] == 'bind'}
-        if previous != candidate:
+        permitted = dict(previous)
+        if role == 'core' and depot is not None:
+            permitted['/native-builds'] = (str(depot['path']), True)
+            matches = [mount for mount in service.get('volumes', []) if mount.get('target') == '/native-builds']
+            if len(matches) != 1 or matches[0].get('type') != 'bind' or matches[0].get('bind', {}).get('create_host_path') is not False:
+                raise ValueError('Depot requires one explicit read-only existing-directory bind')
+            environment = service.get('environment', {})
+            if environment.get('PORTHUB_NATIVE_BUILD_DEPOT_ROOT') != '/native-builds' or str(environment.get('PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID')) != str(depot['uid']):
+                raise ValueError('Depot environment differs from validated mount identity')
+        if permitted != candidate:
             raise ValueError('Candidate Compose changes existing persistent or socket mounts')
     origins = {}
     for role in roles:
@@ -75,6 +84,74 @@ def validate(current, images, configuration, revision, version, architecture, pr
             raise ValueError('Selected role has no recoverable previous Compose deployment')
         origins[role] = origin
     return origins
+
+
+
+def native_build_depot(current, root, path=None, uid=None):
+    core = current.get('core')
+    if core is None:
+        if path is not None or uid is not None:
+            raise ValueError('Depot opt-in requires a selected core upgrade')
+        return None
+    existing = [mount for mount in core['Mounts'] if mount['Destination'] == '/native-builds']
+    environment = {}
+    for value in core['Config'].get('Env', []):
+        key, separator, item = value.partition('=')
+        if separator and key.startswith('PORTHUB_NATIVE_BUILD_DEPOT_'):
+            if key in environment: raise ValueError('Ambiguous existing depot environment')
+            environment[key] = item
+    old_uid = environment.get('PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID')
+    if existing:
+        if (len(existing) != 1 or existing[0]['Type'] != 'bind' or existing[0].get('RW') is not False
+                or environment.get('PORTHUB_NATIVE_BUILD_DEPOT_ROOT') != '/native-builds'
+                or not old_uid or not re.fullmatch(r'0|[1-9][0-9]{0,9}', old_uid)):
+            raise ValueError('Existing depot mount/environment is not safely recoverable')
+        if path is not None and Path(path) != Path(existing[0]['Source']) or uid is not None and uid != int(old_uid):
+            raise ValueError('An existing depot cannot be silently relocated or rebound')
+        path, uid = Path(existing[0]['Source']), int(old_uid)
+    elif environment:
+        raise ValueError('Existing depot environment has no matching read-only mount')
+    elif path is None and uid is None:
+        return None
+    if path is None or uid is None or type(uid) is not int or not 0 <= uid <= 4294967294:
+        raise ValueError('Depot opt-in requires its existing absolute host path and publisher UID')
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts or not re.fullmatch(r'[A-Za-z0-9_./-]+', str(path)):
+        raise ValueError('Depot requires a simple absolute path without traversal or interpolation')
+    if any(parent.is_symlink() for parent in (path, *path.parents)) or not path.is_dir():
+        raise ValueError('Depot path must be an existing directory without symlinks')
+    metadata = path.stat()
+    if metadata.st_uid not in (0, uid) or metadata.st_mode & 0o022:
+        raise ValueError('Depot directory ownership or write permissions are unsafe')
+    path = path.resolve()
+    protected = [Path('/'), root.resolve()]
+    protected.extend(Path(mount['Source']).resolve() for container in current.values()
+        for mount in container['Mounts'] if mount['Type'] == 'bind' and mount['Destination'] != '/native-builds')
+    for other in protected:
+        if path == other or path in other.parents or other != Path('/') and other in path.parents:
+            raise ValueError('Depot must be separate from release, state, socket and certificate paths')
+    if any(path == blocked or blocked in path.parents for blocked in map(Path,('/etc','/dev','/proc','/sys','/run','/var/lib/docker'))):
+        raise ValueError('System directories cannot be used as the artifact depot')
+    return {'path': path, 'uid': uid}
+
+
+@contextmanager
+def candidate_compose(root, project, depot):
+    base = ['docker', 'compose', '--project-name', project, '--project-directory', str(root)]
+    if depot is None:
+        yield [*base, '-f', str(root/'docker-compose.yml')]
+        return
+    overlay = root/'docker-compose.native-builds.yml'
+    if overlay.is_symlink() or not overlay.is_file():
+        raise ValueError('Native build depot overlay is unavailable')
+    # Only nonsecret opt-in fields are supplied before ReleaseSelection commits
+    # them to the ordinary private .env. The temporary file is always removed.
+    with tempfile.TemporaryDirectory(prefix='porthub-upgrade-depot-') as temporary:
+        environment = Path(temporary)/'depot.env'
+        environment.write_text('PORTHUB_NATIVE_BUILD_DEPOT_HOST_PATH='+str(depot['path'])+'\nPORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID='+str(depot['uid'])+'\n')
+        environment.chmod(0o600)
+        yield [*base, '--env-file', str(root/'.env'), '--env-file', str(environment),
+            '-f', str(root/'docker-compose.yml'), '-f', str(overlay)]
 
 
 def override(images, version):
@@ -203,7 +280,7 @@ def replace_private(path, payload, metadata):
 
 class ReleaseSelection:
     """Preflight and transaction for the ordinary Compose restart configuration."""
-    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub"):
+    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub", depot=None):
         self.path = root / '.env'
         self.metadata = self.path.lstat()
         if not stat.S_ISREG(self.metadata.st_mode) or self.metadata.st_mode & 0o077:
@@ -229,6 +306,15 @@ class ReleaseSelection:
             changes['PORTHUB_VERSION'] = version
         if set(images) == set(ROLES):
             changes['PORTHUB_SOURCE_REVISION'] = revision
+        if depot is not None:
+            # Reject unrelated operator overlays instead of replacing them.
+            compose_values = [line.split('=',1)[1].strip().strip('\"\'') for line in self.original.decode().splitlines()
+                if re.match(r'^\s*(?:export\s+)?COMPOSE_FILE\s*=',line)]
+            if any(value not in ('docker-compose.yml','docker-compose.yml:docker-compose.native-builds.yml') for value in compose_values):
+                raise ValueError('Depot persistence cannot replace custom Compose file selections')
+            changes.update({'COMPOSE_FILE':'docker-compose.yml:docker-compose.native-builds.yml',
+                'PORTHUB_NATIVE_BUILD_DEPOT_HOST_PATH':str(depot['path']),
+                'PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID':str(depot['uid'])})
         lines = self.original.decode('utf-8').splitlines(keepends=True)
         self.updated = ''.join(line for line in lines if not any(
             re.match(r'^\s*(?:export\s+)?' + key + r'\s*=', line) for key in changes))
@@ -322,10 +408,15 @@ def perform(args):
     roles = tuple(role for role in ROLES if role in args.roles)
     current = {role: inspect('container', args.project+'-'+role) for role in roles}
     images = {role: inspect('image', 'porthub-ci:'+role+'-'+args.revision) for role in roles}
+    depot = native_build_depot(current, root, getattr(args,'native_build_depot',None), getattr(args,'native_build_depot_owner_uid',None))
+    with candidate_compose(root, args.project, depot) as base:
+        return perform_candidate(args, root, roles, current, images, base, depot)
+
+
+def perform_candidate(args, root, roles, current, images, base, depot):
     architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(os.uname().machine, os.uname().machine)
-    base = ['docker', 'compose', '--project-name', args.project, '--project-directory', str(root), '-f', str(root/'docker-compose.yml')]
     configuration = json.loads(run([*base, 'config', '--format', 'json']))
-    origins = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles)
+    origins = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles, depot)
     for previous_root, previous_files in origins.values():
         files = [Path(name) for name in previous_files.split(',')]
         if not Path(previous_root).is_dir() or any(not path.is_absolute() or not path.is_file() for path in files):
@@ -341,7 +432,7 @@ def perform(args):
                              if value.startswith('PORTHUB_VERSION=')), None)
     if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
-    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project)
+    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project, depot=depot)
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
@@ -381,7 +472,11 @@ def perform(args):
             backup_core(current['core'],record/'core-backup',prepared=prepared_backup)
             print('Verified PortHub core backup retained at '+str(record/'core-backup'),flush=True)
     def verify_selection():
-        normal = json.loads(run([*base, 'config', '--format', 'json']))
+        ordinary = base if depot is None else ['docker', 'compose', '--project-name', args.project,
+            '--project-directory', str(root), '--env-file', str(root/'.env')]
+        normal = json.loads(run([*ordinary, 'config', '--format', 'json']))
+        if depot is not None:
+            validate(current, images, normal, args.revision, args.version, architecture, args.project, roles, depot)
         for role, image in images.items():
             if image_reference(normal['services'][role]['image']) != image['Id']:
                 raise RuntimeError('Ordinary Compose configuration selects a different release image')
@@ -403,6 +498,8 @@ def main():
     parser.add_argument('--project', default='porthub')
     parser.add_argument('--roles', nargs='+', choices=ROLES, default=list(ROLES), help='Replace only these roles; omitted roles must keep running unchanged')
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
+    parser.add_argument('--native-build-depot', type=Path, help='First-time opt-in: existing dedicated read-only artifact depot; later upgrades preserve it automatically')
+    parser.add_argument('--native-build-depot-owner-uid', type=int, help='First-time opt-in: trusted artifact publisher UID')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.project):

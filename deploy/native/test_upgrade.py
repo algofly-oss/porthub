@@ -128,6 +128,111 @@ class Upgrade(unittest.TestCase):
                 upgrade.activate(['candidate'],['previous'],lambda:None,roles=('core','edge'))
         self.assertEqual([call[-1] for call in calls],['core','core'])
 
+class NativeBuildDepot(unittest.TestCase):
+    def setUp(self):
+        self.temporary=self.enterContext(tempfile.TemporaryDirectory())
+        self.root=Path(self.temporary)
+        self.release=self.root/'release';self.release.mkdir()
+        (self.release/'docker-compose.yml').write_text('services: {}\n')
+        (self.release/'docker-compose.native-builds.yml').write_text('services: {}\n')
+        (self.release/'.env').write_text('SECRET=retained\n');(self.release/'.env').chmod(0o600)
+        self.path=self.root/'depot';self.path.mkdir(mode=0o755)
+        self.fixture=Upgrade();self.fixture.setUp()
+        self.current=self.fixture.current;self.configuration=self.fixture.configuration
+        self.uid=os.getuid()
+
+    def opted(self):
+        return upgrade.native_build_depot(self.current,self.release,self.path,self.uid)
+
+    def add_candidate(self,path=None,readonly=True):
+        core=self.configuration['services']['core']
+        core['volumes'].append({'type':'bind','source':str(path or self.path),'target':'/native-builds',
+            'read_only':readonly,'bind':{'create_host_path':False}})
+        core['environment']={'PORTHUB_NATIVE_BUILD_DEPOT_ROOT':'/native-builds','PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID':str(self.uid)}
+
+    def validate(self,depot):
+        return upgrade.validate(self.current,self.fixture.images,self.configuration,self.fixture.revision,'1.9.0','arm64','porthub',depot=depot)
+
+    def existing(self):
+        self.current['core']['Mounts'].append({'Type':'bind','Source':str(self.path),'Destination':'/native-builds','RW':False})
+        self.current['core']['Config']['Env']=['PORTHUB_NATIVE_BUILD_DEPOT_ROOT=/native-builds','PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID='+str(self.uid)]
+
+    def test_first_opt_in_allows_only_the_validated_readonly_extra_mount(self):
+        depot=self.opted();self.add_candidate()
+        self.assertEqual(set(self.validate(depot)),set(upgrade.ROLES))
+        with self.assertRaises(ValueError):self.validate(None)
+        self.configuration['services']['core']['volumes'][0]['source']='/changed-live-state'
+        with self.assertRaises(ValueError):self.validate(depot)
+
+    def test_wrong_depot_source_rw_duplicate_or_autocreate_is_rejected(self):
+        depot=self.opted();self.add_candidate()
+        baseline=copy.deepcopy(self.configuration)
+        for mutate in [lambda:self.configuration['services']['core']['volumes'][-1].update(read_only=False),
+            lambda:self.configuration['services']['core']['volumes'][-1].update(source='/other'),
+            lambda:self.configuration['services']['core']['volumes'][-1]['bind'].update(create_host_path=True),
+            lambda:self.configuration['services']['core']['volumes'].append(copy.deepcopy(self.configuration['services']['core']['volumes'][-1])),
+            lambda:self.configuration['services']['core']['environment'].update(PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID='123456')]:
+            self.configuration=copy.deepcopy(baseline);mutate()
+            with self.assertRaises(ValueError):self.validate(depot)
+
+    def test_previously_enabled_depot_is_preserved_without_flags(self):
+        self.existing();self.add_candidate()
+        depot=upgrade.native_build_depot(self.current,self.release)
+        self.assertEqual(depot,{'path':self.path,'uid':self.uid})
+        self.validate(depot)
+        with self.assertRaises(ValueError):upgrade.native_build_depot(self.current,self.release,self.root/'other',self.uid)
+
+    def test_invalid_old_depot_or_env_only_cannot_be_adopted(self):
+        self.existing();self.current['core']['Mounts'][-1]['RW']=True
+        with self.assertRaises(ValueError):upgrade.native_build_depot(self.current,self.release)
+        self.current['core']['Mounts'].pop()
+        with self.assertRaises(ValueError):upgrade.native_build_depot(self.current,self.release)
+
+    def test_relative_symlink_worldwritable_state_or_release_overlap_rejected(self):
+        linked=self.root/'linked';linked.symlink_to(self.path,target_is_directory=True)
+        for path in [Path('relative'),linked,self.release,self.root]:
+            with self.assertRaises(ValueError):upgrade.native_build_depot(self.current,self.release,path,self.uid)
+        self.path.chmod(0o777)
+        with self.assertRaises(ValueError):self.opted()
+        self.path.chmod(0o755)
+        self.current['core']['Mounts'][0]['Source']=str(self.path/'live-state')
+        with self.assertRaises(ValueError):self.opted()
+
+    def test_default_stays_off_and_unselected_core_cannot_opt_in(self):
+        self.assertIsNone(upgrade.native_build_depot(self.current,self.release))
+        with self.assertRaises(ValueError):upgrade.native_build_depot({},self.release,self.path,self.uid)
+
+    def test_overlay_and_private_temp_env_used_then_removed(self):
+        with upgrade.candidate_compose(self.release,'porthub',self.opted()) as command:
+            self.assertIn(str(self.release/'docker-compose.native-builds.yml'),command)
+            env=Path(command[command.index('--env-file',command.index('--env-file')+1)+1])
+            self.assertEqual(env.stat().st_mode&0o777,0o600)
+            self.assertIn(str(self.path),env.read_text())
+        self.assertFalse(env.exists())
+        with upgrade.candidate_compose(self.release,'porthub',None) as command:
+            self.assertNotIn(str(self.release/'docker-compose.native-builds.yml'),command)
+
+    def test_failed_first_activation_rolls_back_without_the_new_overlay(self):
+        calls=[]
+        with upgrade.candidate_compose(self.release,'porthub',self.opted()) as candidate:
+            def run(command):
+                calls.append(command)
+                if str(self.release/'docker-compose.native-builds.yml') in command:
+                    raise RuntimeError('candidate depot unhealthy')
+            previous=['docker','compose','-f','/old/docker-compose.yml']
+            with patch.object(upgrade,'run',side_effect=run),self.assertRaisesRegex(RuntimeError,'candidate depot unhealthy'):
+                upgrade.activate(candidate,previous,lambda:None,roles=('core',))
+        self.assertEqual(len(calls),2)
+        self.assertIn(str(self.release/'docker-compose.native-builds.yml'),calls[0])
+        self.assertNotIn(str(self.release/'docker-compose.native-builds.yml'),calls[1])
+        self.assertIn('/old/docker-compose.yml',calls[1])
+        self.assertTrue(self.path.is_dir())
+
+    def test_missing_overlay_fails_without_creating_depot(self):
+        (self.release/'docker-compose.native-builds.yml').unlink()
+        with self.assertRaises(ValueError):
+            with upgrade.candidate_compose(self.release,'porthub',self.opted()):pass
+
 class ColdBackup(unittest.TestCase):
     def setUp(self):
         self.root=Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -317,6 +422,33 @@ class ReleaseSelection(unittest.TestCase):
             self.selection().apply(self.root, fail)
         self.assertEqual(self.tags, original_tags)
         self.assertEqual(self.env.read_bytes(), self.original)
+    def test_depot_opt_in_persists_normal_restart_and_rolls_back_exact_bytes(self):
+        depot={'path':Path('/owned/artifacts'),'uid':12345}
+        selection=upgrade.ReleaseSelection(self.root,self.current,self.images,self.config,'a'*40,'1.11.0',depot=depot)
+        selection.apply(self.root,lambda:None)
+        self.assertIn(b'COMPOSE_FILE=docker-compose.yml:docker-compose.native-builds.yml\n',self.env.read_bytes())
+        self.assertIn(b'PORTHUB_NATIVE_BUILD_DEPOT_HOST_PATH=/owned/artifacts\n',self.env.read_bytes())
+        self.assertIn(b'SECRET=keep-this-private\n',self.env.read_bytes())
+        # Separate failed transaction restores the prior deployment's exact env.
+        prior=self.env.read_bytes();tags=dict(self.tags)
+        selection=upgrade.ReleaseSelection(self.root,self.current,self.images,self.config,'a'*40,'1.11.0',depot=depot)
+        def failed():raise RuntimeError('depot probe failed')
+        record=self.root/'second-record';record.mkdir()
+        with self.assertRaisesRegex(RuntimeError,'depot probe failed'):selection.apply(record,failed)
+        self.assertEqual(self.env.read_bytes(),prior);self.assertEqual(self.tags,tags)
+
+    def test_first_depot_finalization_failure_restores_disabled_environment(self):
+        selection=upgrade.ReleaseSelection(self.root,self.current,self.images,self.config,'a'*40,'1.11.0',depot={'path':Path('/owned/artifacts'),'uid':12345})
+        def failed():raise RuntimeError('depot setup failed')
+        with self.assertRaises(RuntimeError):selection.apply(self.root,failed)
+        self.assertEqual(self.env.read_bytes(),self.original)
+
+    def test_depot_does_not_replace_custom_compose_overlays(self):
+        self.env.write_bytes(self.original+b'COMPOSE_FILE=docker-compose.yml:operator-private.yml\n')
+        with self.assertRaisesRegex(ValueError,'custom Compose'):
+            upgrade.ReleaseSelection(self.root,self.current,self.images,self.config,'a'*40,'1.11.0',depot={'path':Path('/owned/artifacts'),'uid':12345})
+        self.assertEqual(self.calls,[])
+
     def test_conflicting_immutable_tag_is_rejected_before_any_mutation(self):
         self.tags['porthub:core-1.11.0'] = 'sha256:'+'f'*64
         with self.assertRaisesRegex(ValueError, 'immutable'):
