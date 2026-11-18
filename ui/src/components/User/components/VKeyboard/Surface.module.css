@@ -48,6 +48,9 @@
 .wave{display:flex;align-items:center;justify-content:center;gap:3px;height:26px;min-width:72px}.wave span{width:3px;border-radius:3px;background:#ef5350;transition:height 80ms linear}@media(prefers-reduced-motion:reduce){.wave span{transition:none}}
 
 .landscape{max-width:max(1800px,calc(100dvh * 1180 / 820));grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}.portrait{max-width:480px;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}
+@media(min-width:900px) and (min-height:600px) and (pointer:fine){
+ .portrait{max-width:min(72vw,1080px)}
+}
 
 .header{flex-wrap:wrap}.clientPicker{flex:1 1 160px}
 

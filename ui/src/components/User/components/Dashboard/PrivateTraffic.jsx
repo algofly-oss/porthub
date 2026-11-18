@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { IconArrowRight, IconNetwork, IconPlayerPause, IconPlayerPlay } from '@tabler/icons-react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { IconArrowRight, IconChevronDown, IconInfoCircle, IconNetwork, IconPlayerPause, IconPlayerPlay } from '@tabler/icons-react';
 import InventorySelect from '@/components/ui/inventory-select';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,8 @@ export default function PrivateTraffic({ active, refresh }) {
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [measurementOpen, setMeasurementOpen] = useState(false);
+  const measurementId = useId();
   useEffect(() => { const timer = setTimeout(() => { setSearch(query.trim()); setPage(1); }, 250); return () => clearTimeout(timer); }, [query]);
   const resource = usePrivateTraffic({ range, machine, search, page, selected, enabled: active, paused, refresh });
   const flows = resource.data?.flows || [];
@@ -52,8 +54,20 @@ export default function PrivateTraffic({ active, refresh }) {
       })}
     </div>
     {pagination && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-5 py-3"><span className="text-xs text-muted-foreground">Page {pagination.page} · {pagination.filtered_pairs} matching of {pagination.total_pairs} directions · totals cover all directions</span><div className="flex gap-2"><Button variant="secondary" disabled={resource.loading || pagination.page===1} onClick={()=>setPage(pagination.page-1)}>Previous</Button><Button variant="secondary" disabled={resource.loading || pagination.page*pagination.page_size>=pagination.filtered_pairs} onClick={()=>setPage(pagination.page+1)}>Next</Button></div></div>}
-    <div className="flex flex-wrap justify-between gap-2 border-t border-border px-5 py-3 text-[11px] leading-5 text-muted-foreground"><span>{coverage ? `${coverage.reporting_peers} of ${coverage.eligible_peers} peers reporting${coverage.unreported_peers ? ` · ${coverage.unreported_peers} unreported` : ''}` : 'Waiting for agent reports'}</span><span>{paused ? 'Updates paused' : resource.updated ? `Updated ${new Date(resource.updated).toLocaleTimeString()}` : 'Batched agent reports'}</span></div>
-    <details className="px-5 pb-4 text-xs leading-5 text-muted-foreground"><summary className="flex min-h-[44px] cursor-pointer items-center py-2">How traffic is measured</summary><p>Agents count private transport bytes locally and publish batched summaries, including direct connections that bypass the server. Only sender-reported transport bytes contribute to volume, rates and history. Receiver observations are separate diagnostics and are never substituted or added, because the two agents may sample at different times. Carrier bytes include transport retries and are not unique file sizes. Gaps indicate missing reports. Range averages cover the selected window. Pair rates use the actual observed interval (1–120 seconds), independently of the history range. Stale observations show no recent rate, even if uploaded later. Queue acceptance does not prove socket delivery. A missing sender report means unknown traffic, not an observed zero. Missing reports leave gaps even when a receiver observed bytes.</p></details>
+    <footer className="border-t border-border px-5 text-xs leading-5 text-muted-foreground">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap gap-x-3 text-[11px] tabular-nums">
+          <span>{coverage ? `${coverage.reporting_peers} of ${coverage.eligible_peers} peers reporting${coverage.unreported_peers ? ` · ${coverage.unreported_peers} unreported` : ''}` : 'Waiting for agent reports'}</span>
+          <span>{paused ? 'Updates paused' : resource.updated ? `Updated ${new Date(resource.updated).toLocaleTimeString()}` : 'Batched agent reports'}</span>
+        </div>
+        <button type="button" aria-expanded={measurementOpen} aria-controls={measurementId} onClick={() => setMeasurementOpen(open => !open)} className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-sm px-1 text-right hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 sm:min-h-[36px]">
+          <span className="max-[419px]:sr-only">How traffic is measured</span>
+          <IconInfoCircle size={18} aria-hidden="true" className="min-[420px]:hidden" />
+          <IconChevronDown size={15} aria-hidden="true" className={`max-[419px]:hidden ${measurementOpen ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+      <p id={measurementId} hidden={!measurementOpen} className="max-w-prose pb-3">Agents count private transport bytes locally and publish batched summaries, including direct connections that bypass the server. Only sender-reported transport bytes contribute to volume, rates and history. Receiver observations are separate diagnostics and are never substituted or added, because the two agents may sample at different times. Carrier bytes include transport retries and are not unique file sizes. Gaps indicate missing reports. Range averages cover the selected window. Pair rates use the actual observed interval (1–120 seconds), independently of the history range. Stale observations show no recent rate, even if uploaded later. Queue acceptance does not prove socket delivery. A missing sender report means unknown traffic, not an observed zero. Missing reports leave gaps even when a receiver observed bytes.</p>
+    </footer>
   </section>;
 }
 function HistoryChart({ rows, interval, label, selected }) {
