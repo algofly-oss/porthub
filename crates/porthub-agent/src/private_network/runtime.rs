@@ -732,7 +732,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(feature="private-stream")]
                 if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
             },
-            Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at})=>{
+            Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at,origin:_})=>{
                 if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||sparse_handle.by_id(&peer).is_none()){sparse_handle.request_peer(&peer);continue;}
                 let now=received_at;

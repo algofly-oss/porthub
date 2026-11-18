@@ -217,6 +217,7 @@ async fn dispatch_record(frame: Bytes, events: &mpsc::Sender<Event>) {
             if let Ok(peer) = std::str::from_utf8(&rest[..length]) {
                 let _ = events
                     .send(Event::Packet {
+                        origin: None, // relay data has no direct-reader generation witness
                         peer: peer.into(),
                         bytes: frame.slice(1 + length..),
                         direct: false,

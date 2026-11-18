@@ -198,6 +198,8 @@ pub enum Event {
     Snapshot(super::authority_event::Authority<Snapshot>),
     Pair(super::authority_event::Authority<porthub_network::policy::PairResponse>),
     Packet {
+        // Immutable direct-reader identity, metadata only (never a grant).
+        origin: Option<Arc<PeerInfo>>,
         peer: String,
         bytes: Bytes,
         direct: bool,
@@ -561,7 +563,7 @@ pub(crate) async fn run_watched_sparse_owned(
                 readers.spawn(read_packets(
                     prepared.packets,
                     session.clone(),
-                    id.clone(),
+                    Arc::new(prepared.info.clone()),
                     events.clone(),
                     cancel.clone(),
                 ));
@@ -822,21 +824,22 @@ mod picker_schedule_tests {
 // Protocol `direct` means the peer RTC carrier (including TURN), not the
 // physically direct path. Keep QoS/path selection unchanged; telemetry gets a
 // separate actual carrier-path classification.
-fn peer_packet(peer:String,bytes:Bytes,relayed:bool)->Event {
-    Event::Packet{peer,bytes,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
+fn peer_packet(peer:String,bytes:Bytes,relayed:bool,origin:Option<Arc<PeerInfo>>)->Event {
+    Event::Packet{peer,bytes,origin,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
 }
 
 async fn read_packets(
     mut packets: mpsc::Receiver<Bytes>,
     session: Session,
-    peer: String,
+    origin: Arc<PeerInfo>,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
 ) {
+    let peer=origin.id.clone();
     loop {
         tokio::select! {_=cancel.cancelled()=>break,
             packet=packets.recv()=>{let Some(bytes)=packet else {break;};
-                let _=events.try_send(peer_packet(peer.clone(),bytes,session.is_relay()));
+                let _=events.try_send(peer_packet(peer.clone(),bytes,session.is_relay(),Some(origin.clone())));
             }
         }
     }
@@ -896,12 +899,12 @@ mod telemetry_carrier_tests {
         let mut receiver=super::super::probe::Quality::default();
         let now=Instant::now();let mut replies=0;
         for packet in sender.start("peer",true,123,now) {
-            let Event::Packet{bytes,direct,carrier_direct,..}=peer_packet("peer".into(),packet,true)else{unreachable!()};
+            let Event::Packet{bytes,direct,carrier_direct,..}=peer_packet("peer".into(),packet,true,None)else{unreachable!()};
             assert!(direct);assert!(!carrier_direct);
             replies+=receiver.handle("peer",direct,&bytes,now).unwrap().len();
         }
         assert_eq!(replies,super::super::probe::PROBE_PACKETS as usize);
-        let Event::Packet{direct,carrier_direct,..}=peer_packet("peer".into(),Bytes::new(),false)else{unreachable!()};assert!(direct&&carrier_direct);
+        let Event::Packet{direct,carrier_direct,..}=peer_packet("peer".into(),Bytes::new(),false,None)else{unreachable!()};assert!(direct&&carrier_direct);
     }
 }
 
@@ -940,4 +943,15 @@ mod exit_response_tests {
         response.lease.as_mut().unwrap().exit.as_mut().unwrap().router="b".into();
         response.epoch="f".repeat(64); assert!(validate_exit_response(&base,&sent,&response).is_err());
     }
+}
+
+#[cfg(test)]
+mod received_origin_tests {
+ use super::*;
+ #[test]fn received_packet_keeps_original_reader_identity_without_authorizing_payload(){
+  let original:Arc<PeerInfo>=Arc::new(serde_json::from_value(serde_json::json!({"id":"peer","ip":"10.203.0.2","fingerprint":"old-pin","instance":"old-instance","hostname":"peer.phub"})).unwrap());
+  let Event::Packet{origin:Some(retained),bytes,..}=peer_packet("peer".into(),Bytes::from_static(b"fixture"),false,Some(original.clone())) else{panic!("origin missing")};
+  assert!(Arc::ptr_eq(&retained,&original));let mut replacement=(*original).clone();replacement.fingerprint="new-pin".into();replacement.instance="new-instance".into();
+  assert_eq!(retained.fingerprint,"old-pin");assert_eq!(retained.instance,"old-instance");assert_ne!(retained.fingerprint,replacement.fingerprint);assert_eq!(&bytes[..],b"fixture");
+ }
 }
