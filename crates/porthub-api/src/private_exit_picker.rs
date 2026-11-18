@@ -72,59 +72,51 @@ fn accepts(route: &Document, peer: &Document, machine: &Document, role: &str) ->
 }
 /// Publish only this authenticated node's current router roles. This collection
 /// is a bounded-row index per configured router, never an authorization source.
-pub async fn publish(
-    app: &App,
-    owner: ObjectId,
-    peer: &Document,
-    machine: &Document,
-    routes: &[Document],
-    protocol: bool,
-    ready: bool,
-) -> ApiResult<()> {
-    app.private_sparse
-        .exit_indexes
-        .get_or_try_init(|| async {
-            use mongodb::{options::IndexOptions, IndexModel};
-            app.collection("private_exit_routers")
-                .create_index(
-                    IndexModel::builder()
-                        .keys(doc! {"workspace_id":1,"route_id":1,"peer":1})
-                        .options(IndexOptions::builder().unique(true).build())
-                        .build(),
-                )
-                .await?;
-            for name in ["private_exit_routers", "private_exit_picker_cursors"] {
-                app.collection(name)
-                    .create_index(
-                        IndexModel::builder()
-                            .keys(doc! {"expires_at":1})
-                            .options(
-                                IndexOptions::builder()
-                                    .expire_after(std::time::Duration::ZERO)
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .await?;
-            }
-            Ok::<_, ApiError>(())
-        })
-        .await?;
-    let id = store::string(peer, "_id");
-    let mut keep = Vec::new();
-    for route in routes
-        .iter()
-        .filter(|r| accepts(r, peer, machine, "routing_selectors"))
-    {
-        let route_id = store::id(route.get("_id"));
-        keep.push(route_id.clone());
-        let key = format!("{}:{}:{}", owner, route_id, id);
-        app.collection("private_exit_routers").update_one(doc!{"_id":key},doc!{"$set":{"workspace_id":owner,"route_id":route_id,"peer":id,"protocol":protocol,"ready":ready,"lan_networks":peer.get_array("lan_networks").cloned().unwrap_or_default(),"expires_at":DateTime::from_millis(DateTime::now().timestamp_millis()+15_000)}}).upsert(true).await?;
+pub async fn publish(app:&App,owner:ObjectId,peer:&Document,machine:&Document,routes:&[Document],protocol:bool,ready:bool)->ApiResult<()> {
+    let id=store::string(peer,"_id");
+    let matching:Vec<_>=routes.iter().filter(|r|accepts(r,peer,machine,"routing_selectors")).collect();
+    if matching.len()>256{return Err(ApiError::bad_request("Exit router role metadata exceeds its bounded route capacity"))}
+    app.private_sparse.exit_indexes.get_or_try_init(||async{
+        use mongodb::{IndexModel,options::IndexOptions};
+        app.collection("private_exit_routers").create_index(IndexModel::builder().keys(doc!{"workspace_id":1,"route_id":1,"peer":1}).options(IndexOptions::builder().unique(true).build()).build()).await?;
+        app.collection("private_exit_routers").create_index(IndexModel::builder().keys(doc!{"workspace_id":1,"peer":1,"route_id":1}).build()).await?;
+        for name in ["private_exit_routers","private_exit_picker_cursors"]{
+            app.collection(name).create_index(IndexModel::builder().keys(doc!{"expires_at":1}).options(IndexOptions::builder().expire_after(std::time::Duration::ZERO).build()).build()).await?;
+        }
+        Ok::<_,ApiError>(())
+    }).await?;
+
+    // Ordinary clients retain the original one indexed withdrawal operation;
+    // they do not pay an extra read to compare nonexistent router metadata.
+    if matching.is_empty(){
+        let deleted=app.collection("private_exit_routers").delete_many(doc!{"workspace_id":owner,"peer":id}).await?;
+        if deleted.deleted_count>0{app.private_sparse.exit_capture.invalidate_owner(owner);}
+        return Ok(())
     }
-    app.collection("private_exit_routers")
-        .delete_many(doc! {"workspace_id":owner,"peer":id,"route_id":{"$nin":keep}})
-        .await?;
+    let old:Vec<Document>=app.collection("private_exit_routers").find(doc!{"workspace_id":owner,"peer":id}).projection(doc!{"_id":0,"route_id":1,"lan_networks":1,"expires_at":1}).limit(257).await?.try_collect().await?;
+    if old.len()>256{return Err(ApiError::bad_request("Exit router role metadata exceeds its bounded route capacity"))}
+    let networks=peer.get_array("lan_networks").cloned().unwrap_or_default();
+    let stamp=network_stamp(peer);
+    let mut keep=Vec::new();
+    for route in matching{
+        let route_id=store::id(route.get("_id"));keep.push(route_id.clone());
+        let key=format!("{owner}:{route_id}:{id}");
+        app.collection("private_exit_routers").update_one(doc!{"_id":key},doc!{"$set":{"workspace_id":owner,"route_id":&route_id,"peer":id,"protocol":protocol,"ready":ready,"lan_networks":&networks,"expires_at":DateTime::from_millis(DateTime::now().timestamp_millis()+15_000)}}).upsert(true).await?;
+        let changed=!old.iter().any(|row|store::string(row,"route_id")==route_id&&same_active_network(row,stamp.as_ref(),DateTime::now().timestamp_millis()));
+        if changed{app.private_sparse.exit_capture.invalidate(owner,&route_id);}
+    }
+    let deleted=app.collection("private_exit_routers").delete_many(doc!{"workspace_id":owner,"peer":id,"route_id":{"$nin":&keep}}).await?;
+    if deleted.deleted_count>0{
+        for row in old.iter().filter(|row|!keep.iter().any(|id|id==store::string(row,"route_id"))){app.private_sparse.exit_capture.invalidate(owner,store::string(row,"route_id"));}
+    }
     Ok(())
+}
+fn same_active_network(row:&Document,networks:Option<&Vec<String>>,now:i64)->bool{
+    networks.is_some()&&network_stamp(row).as_ref()==networks&&row.get_datetime("expires_at").is_ok_and(|expiry|expiry.timestamp_millis()>now)
+}
+fn network_stamp(row:&Document)->Option<Vec<String>>{
+    let mut networks:Vec<String>=row.get_array("lan_networks").ok()?.iter().map(|value|value.as_str()?.parse::<porthub_mesh::lan_routes::Network>().ok().map(|n|n.to_string())).collect::<Option<_>>()?;
+    networks.sort();networks.dedup();Some(networks)
 }
 fn lan_prefix(peer: &Document, destination: Ipv4Addr) -> Option<u8> {
     peer.get_array("lan_networks")
@@ -469,7 +461,7 @@ pub fn intents(
 /// Exact union only: containment and sibling merges never capture an address
 /// outside an advertisement. The host's existing native conflict guard remains
 /// authoritative before any route is installed.
-fn exact_union(
+pub(crate) fn exact_union(
     mut input: Vec<porthub_mesh::lan_routes::Network>,
 ) -> Vec<porthub_mesh::lan_routes::Network> {
     use porthub_mesh::lan_routes::Network;
@@ -504,42 +496,10 @@ fn exact_union(
     }
     out
 }
-pub async fn capture_networks(
-    app: &App,
-    owner: ObjectId,
-    intents: &mut [porthub_network::policy::ExitIntent],
-) -> ApiResult<()> {
-    use porthub_mesh::{exit_policy::TrafficMode, lan_routes::Network};
-    for intent in intents.iter_mut().filter(|i| {
-        i.role == porthub_network::policy::ExitRole::Client
-            && i.traffic_mode != TrafficMode::InternetOnly
-    }) {
-        let mut rows=app.collection("private_exit_routers").find(doc!{"workspace_id":owner,"route_id":&intent.id,"expires_at":{"$gt":DateTime::now()}}).projection(doc!{"lan_networks":1}).batch_size(128).await?;
-        let mut networks = Vec::new();
-        let mut peers = 0;
-        while let Some(row) = rows.try_next().await? {
-            peers += 1;
-            for value in row.get_array("lan_networks").into_iter().flatten() {
-                if let Some(raw) = value.as_str() {
-                    networks.push(raw.parse::<Network>().map_err(|_| fail())?)
-                }
-            }
-            // Exact incremental compaction; no truncation/false encompassing prefix.
-            if networks.len() >= 4096 {
-                networks = exact_union(networks);
-            }
-        }
-        intent.lan_networks = if peers == 1 {
-            ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-                .into_iter()
-                .map(|s| s.parse().expect("RFC1918"))
-                .collect()
-        } else {
-            exact_union(networks)
-        };
-        if intent.lan_networks.len() > porthub_network::capture_routes::MAX_CAPTURE_PREFIXES {
-            return Err(ApiError::bad_request("Exit LAN capture plan exceeds exact native prefix capacity; no partial plan was published"));
-        }
+pub async fn capture_networks(app:&App,owner:ObjectId,intents:&mut[porthub_network::policy::ExitIntent])->ApiResult<()> {
+    use porthub_mesh::exit_policy::TrafficMode;
+    for intent in intents.iter_mut().filter(|i|i.role==porthub_network::policy::ExitRole::Client&&i.traffic_mode!=TrafficMode::InternetOnly){
+        intent.lan_networks=crate::private_exit_capture::networks(app,owner,&intent.id).await?;
     }
     Ok(())
 }
@@ -563,4 +523,11 @@ mod tests {
             .iter()
             .any(|n| n.contains("10.1.2.1".parse().unwrap())));
     }
+    #[test]fn expired_same_network_is_a_membership_revival_not_a_heartbeat(){
+        let now=DateTime::now().timestamp_millis();let networks=vec!["10.1.0.0/16".to_owned()];
+        let mut row=doc!{"lan_networks":&networks,"expires_at":DateTime::from_millis(now+1000)};
+        assert!(same_active_network(&row,Some(&networks),now));row.insert("expires_at",DateTime::from_millis(now));
+        assert!(!same_active_network(&row,Some(&networks),now));row.remove("expires_at");assert!(!same_active_network(&row,Some(&networks),now));
+    }
+
 }

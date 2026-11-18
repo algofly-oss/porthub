@@ -4,6 +4,7 @@ pub mod private_retired_sources;
 pub mod private_renumber;
 pub mod private_sparse;
 pub(crate) mod private_exit_picker;
+pub(crate) mod private_exit_capture;
 pub mod access_inventory;
 pub mod account_delete;
 pub mod application_proxy;

@@ -24,6 +24,7 @@ pub struct State {
     pub(crate) renumber_indexes:OnceCell<()>,
     indices: OnceCell<()>,
     pub(crate) exit_indexes:OnceCell<()>,
+    pub(crate) exit_capture:crate::private_exit_capture::CaptureCache,
     rules: Mutex<HashMap<String, (Arc<Index>, Instant)>>,
 }
 pub struct Rules {
