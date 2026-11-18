@@ -271,47 +271,11 @@ jobs:
     name: Publish versioned GitHub release
     if: inputs.verify_only != true && inputs.publish_release == true && inputs.core_only != true
     needs: [release-bundle]
-    env:
-      PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
-    concurrency:
-      group: porthub-release-publication
-      cancel-in-progress: false
-    runs-on: ubuntu-24.04
+    uses: ./.github/workflows/publish-client-bundle.yml
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.revision || github.sha }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: porthub-release-bundle
-          path: release-assets
-      - name: Verify publication and retry invariants
-        run: python3 scripts/test_publish_release.py
-      - name: Install trusted verifier toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: compact-publication-verifier-optimized
-      - name: Build trusted compact artifact verifier
-        env:
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: cargo build --locked --release -p porthub-api --bin porthub-api
-      - name: Publish all platform assets
-        id: publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PORTHUB_COMPACT_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
-        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --artifact-verifier "$GITHUB_WORKSPACE/target/release/porthub-api" --compact-gateway "$PORTHUB_COMPACT_GATEWAY" --execute
-      - name: Retain latest release plus explicitly protected tags
-        if: steps.publication.outputs.status != 'superseded'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PORTHUB_RETAIN_TAGS: ${{ vars.PORTHUB_RETAIN_TAGS }}
-        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$PORTHUB_SOURCE_REVISION" --remove-previews --execute
+    with:
+      revision: ${{ inputs.revision || github.sha }}
   native:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_native == 'true'

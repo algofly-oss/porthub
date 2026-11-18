@@ -25,6 +25,7 @@ on:
       - 'docker-compose.yml'
       - '.github/workflows/continuous-release.yml'
       - '.github/workflows/agent-platforms.yml'
+      - '.github/workflows/publish-client-bundle.yml'
       - '.github/workflows/media-helpers.yml'
       - '.github/workflows/server-platforms.yml'
   workflow_dispatch:
@@ -61,6 +62,7 @@ jobs:
           fetch-depth: 0
       - name: Verify automatic version preparation and retention
         run: |
+          python3 scripts/test_continuous_release_workflow.py
           python3 scripts/test_prepare_release.py
           python3 scripts/test_fetch_component_release.py
           python3 scripts/test_recover_component_builds.py
@@ -225,10 +227,10 @@ jobs:
           retention-days: 1
   clients:
     name: Validate and package clients
-    # The client workflow publishes after its platform gates. Require the
-    # server's real browser/SSH/native-helper integration gate first as well.
-    needs: [prepare, server]
-    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true'
+    # Default parallelism avoids serial delay when no local depot is configured.
+    # A configured depot keeps its server-gate head start unless opted in.
+    needs: [prepare]
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true' && (vars.PORTHUB_TRUSTED_NATIVE_DEPOT == '' || vars.PORTHUB_PARALLEL_CLIENT_BUILDS == 'true')
     uses: ./.github/workflows/agent-platforms.yml
     permissions:
       contents: write
@@ -238,7 +240,22 @@ jobs:
       previous_components: ${{ needs.prepare.outputs.previous_components == 'true' }}
       platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}
       verify_only: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true }}
-      publish_release: ${{ github.event_name != 'workflow_dispatch' || inputs.verify_only != true }}
+      publish_release: false
+  clients-after-server:
+    name: Validate and package clients after server
+    # Quota-sensitive default: let intermittent local builders finish first.
+    needs: [prepare, server]
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true' && vars.PORTHUB_TRUSTED_NATIVE_DEPOT != '' && vars.PORTHUB_PARALLEL_CLIENT_BUILDS != 'true'
+    uses: ./.github/workflows/agent-platforms.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      revision: ${{ needs.prepare.outputs.revision }}
+      previous_components: ${{ needs.prepare.outputs.previous_components == 'true' }}
+      platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}
+      verify_only: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true }}
+      publish_release: false
   server:
     name: Build production server roles
     needs: [prepare]
@@ -247,3 +264,12 @@ jobs:
     with:
       revision: ${{ needs.prepare.outputs.revision }}
       platform: arm64
+  publish:
+    name: Publish after all server and client gates
+    needs: [prepare, server, clients, clients-after-server]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.server.result == 'success' && ((needs.clients.result == 'success' && needs.clients-after-server.result == 'skipped') || (needs.clients.result == 'skipped' && needs.clients-after-server.result == 'success')) && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true' && (github.event_name != 'workflow_dispatch' || inputs.verify_only != true) }}
+    uses: ./.github/workflows/publish-client-bundle.yml
+    permissions:
+      contents: write
+    with:
+      revision: ${{ needs.prepare.outputs.revision }}
