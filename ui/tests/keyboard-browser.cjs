@@ -87,7 +87,15 @@ async function verifySurfaceDictation(browser){
     await page.screenshot({path:`${screenshots}/settings-${width}.png`});
     await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
   }
-  await page.setViewportSize({width:1440,height:1000});await page.getByRole('button',{name:'Switch to portrait layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).maxWidth==='480px'));await page.getByRole('button',{name:'Switch to landscape layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length===1));
+  await page.setViewportSize({width:1440,height:1000});
+  const controls=page.getByRole('textbox',{name:'Capture physical keyboard'});
+  await page.getByRole('button',{name:'Switch to portrait layout',exact:true}).click();
+  const portrait=await controls.boundingBox();
+  const expectedPortraitWidth=await page.evaluate(()=>matchMedia('(pointer:fine)').matches?Math.min(innerWidth*.72,1080):480);
+  assert.ok(Math.abs(portrait.width-expectedPortraitWidth)<=1,`Portrait width ${portrait.width}, expected ${expectedPortraitWidth}`);
+  await page.getByRole('button',{name:'Switch to landscape layout',exact:true}).click();
+  assert.ok((await controls.boundingBox()).width>portrait.width,'Landscape expands the keyboard');
+  assert.ok(await controls.evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length===1));
   // High-refresh-rate pointing must stay connected through the real relay and
   // native worker, even when samples arrive faster than input can be applied.
   await page.getByRole('button',{name:'Disconnect',exact:true}).click();
