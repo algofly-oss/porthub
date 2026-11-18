@@ -94,6 +94,29 @@ pub(crate) fn save(
     )
 }
 
+/// Apply local policy independently from parsing a possibly broken module.
+fn refresh_configuration(
+    path:&Path, public:&crate::profile::Profile, logs:&crate::logs::Buffer,
+    enabled:bool, updates:&watch::Sender<Option<PathBuf>>,
+) {
+    // Opt-out is authoritative even when the module or its profile cannot be
+    // parsed. Never keep an already-running worker merely because load failed.
+    if !enabled {
+        updates.send_if_modified(|current|current.take().is_some());
+        return;
+    }
+    match load(path,public) {
+        Ok(value)=>{
+            if let Some(value)=&value {
+                if let Ok(private)=crate::private_profile::Profile::load(&value.private_profile){logs.include_private(&private);}
+            }
+            let selected=value.filter(|value|value.enabled&&enabled).map(|value|value.private_profile);
+            updates.send_if_modified(|current|{if *current==selected{false}else{*current=selected;true}});
+        },
+        Err(_)=>tracing::warn!("private module change rejected; retaining the current configuration"),
+    }
+}
+
 pub(crate) struct Controller {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
@@ -181,31 +204,9 @@ impl Controller {
                     },
                     _ = fallback.tick(), if watcher.is_none() => {},
                 }
-                match load(&path, &public) {
-                    Ok(value) => {
-                        if let Some(value) = &value {
-                            if let Ok(private) =
-                                crate::private_profile::Profile::load(&value.private_profile)
-                            {
-                                logs.include_private(&private);
-                            }
-                        }
-                        let selected = value
-                            .filter(|value| value.enabled && crate::features::enabled(&path,crate::features::Feature::PrivateNetwork))
-                            .map(|value| value.private_profile);
-                        updates.send_if_modified(|current| {
-                            if *current == selected {
-                                false
-                            } else {
-                                *current = selected;
-                                true
-                            }
-                        });
-                    }
-                    Err(_) => tracing::warn!(
-                        "private module change rejected; retaining the current configuration"
-                    ),
-                }
+                refresh_configuration(&path,&public,&logs,
+                    crate::features::enabled(&path,crate::features::Feature::PrivateNetwork),&updates);
+
             }
             stop.cancel();
             let _ = supervisor.await;
@@ -400,6 +401,34 @@ mod tests {
         assert!(!output.contains(&public.token));
         assert!(!output.contains(&private.token));
         assert!(output.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn local_disable_cancels_running_worker_even_when_module_configuration_is_broken()->Result<()> {
+        let(public,private)=profiles();let mut directory=tempfile::Builder::new();
+        #[cfg(unix)]{use std::os::unix::fs::PermissionsExt;directory.permissions(std::fs::Permissions::from_mode(0o700));}
+        let root=directory.tempdir()?;let public_path=root.path().join("public.json");
+        let id=crate::service::RegistrationProfile::Private(private.clone()).identity();let private_path=root.path().join(format!("{id}.json"));
+        crate::profile::write_private(&private_path,&serde_json::to_vec(&private)?,false)?;
+        save(&public_path,&public,&Configuration{format_version:1,private_profile:private_path.clone(),enabled:true})?;
+        let logs=crate::logs::Buffer::default();let(updates,receiver)=watch::channel(None);let stop=CancellationToken::new();
+        let(events,mut observed)=tokio::sync::mpsc::unbounded_channel();
+        let task=tokio::spawn(supervise(receiver,stop.clone(),move|_,cancel|{let events=events.clone();async move{
+            events.send("started").unwrap();cancel.cancelled().await;events.send("stopped").unwrap();Ok(())
+        }}));
+        refresh_configuration(&public_path,&public,&logs,true,&updates);
+        assert_eq!(observed.recv().await,Some("started"));
+        crate::profile::write_private(&configuration_path(&public_path),b"{broken",true)?;
+        refresh_configuration(&public_path,&public,&logs,true,&updates);
+        assert_eq!(*updates.borrow(),Some(private_path)); // Enabled-on-error retains the running worker.
+        assert!(observed.try_recv().is_err());
+        refresh_configuration(&public_path,&public,&logs,false,&updates);
+        let parked=updates.borrow().is_none();
+        let stopped=tokio::time::timeout(Duration::from_secs(1),observed.recv()).await;
+        stop.cancel();task.await?;
+        assert!(parked,"local opt-out must override a malformed module/profile");
+        assert_eq!(stopped.ok().flatten(),Some("stopped"),"opt-out must cancel the actual supervised worker");
+        Ok(())
     }
 
     #[tokio::test]
