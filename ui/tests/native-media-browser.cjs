@@ -7,9 +7,13 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   const context=await browser.newContext({viewport,serviceWorkers:'block'}),state=makeDemoData(),source=state.machines[1],receiver=state.machines[2],unconfigured=state.machines[3];let plans=[],saved;
   const sourceId='media:'+'a'.repeat(64),cameraId='media:'+'c'.repeat(64),desktopSession='windows:'+'d'.repeat(64),now=Date.now();
   const machines=[{id:source._id,name:source.name,live:true,report:{protocol:2,microphone_enabled:true,camera_enabled:true,sources:[{uid:0,desktop_session:desktopSession,device:{id:cameraId,name:'Built-in camera',kind:'camera',capture_available:false,capture_state:'permission-unknown'}},{uid:0,desktop_session:desktopSession,device:{id:sourceId,name:'Built-in microphone',kind:'microphone',capture_available:false,capture_state:'permission-unknown'}}]}},{id:receiver._id,name:receiver.name,live:true,report:{protocol:2,receive_enabled:true,camera_receiver_available:true,receiver_available:true,receiver_identity:{vendor:0x1209,product:1}}},{id:unconfigured._id,name:unconfigured.name,live:true,report:{receive_enabled:true,receiver_available:false,receiver_identity:null,receiver_unavailable_reason:'Receiver USB identity required'}}];
+  const speakerId='media:'+'e'.repeat(64);
+  machines[0].report.speaker_enabled=true;
+  machines[0].report.sources.push({uid:0,desktop_session:desktopSession,device:{id:speakerId,name:'Desktop output',kind:'speaker',capture_state:'ready'}});
+  machines[1].report.speaker_receiver_available=true;
   await context.route('**/api/**',async route=>{const req=route.request(),path=new URL(req.url()).pathname;let data;
    if(path.endsWith('/discover'))data={requested:true};
-   else if(path==='/api/media/inventory')data={protocol:2,modes:['phm1-microphone-v1','phv1-camera-mjpeg-v1'],machines};
+   else if(path==='/api/media/inventory')data={protocol:2,modes:['phm1-microphone-v1','phv1-camera-mjpeg-v1','phs1-speaker-v1'],machines};
    else if(path==='/api/media/forwards'&&req.method()==='POST'){saved=req.postDataJSON();plans=[{...saved,id:'b'.repeat(32)}];data={plan:plans[0]};}
    else if(path==='/api/media/forwards')data={plans};
    else if(path.startsWith('/api/media/forwards/')){plans=[];data={ok:true};}
@@ -30,6 +34,15 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   assert.equal(saved.source_id,sourceId);assert.equal(saved.desktop_uid,0);assert.equal(saved.desktop_session,desktopSession);assert.equal(saved.mode,'phm1-microphone-v1');assert.equal(saved.persistent,true);assert.equal(saved.destination,receiver._id);assert.equal(saved.identity,undefined,'A session uses receiver-local identity without asking for VID/PID again');
   await panel.getByRole('button',{name:'Remove',exact:true}).click();await panel.getByText('Persistent configuration · Capture follows application use',{exact:true}).waitFor({state:'hidden'});
   await panel.getByText('Receiver setup and local permissions',{exact:true}).click();assert((await panel.innerText()).includes('receiving permissions are independent')); await panel.getByRole('radio',{name:'Camera',exact:true}).click();await chooseDropdown(panel.getByLabel('Camera',{exact:true}),'Built-in camera');await chooseDropdown(panel.getByLabel('Receiving machine',{exact:true}),receiver.name);await panel.getByRole('button',{name:'Share camera',exact:true}).scrollIntoViewIfNeeded();assert(await panel.getByRole('button',{name:'Share camera',exact:true}).isEnabled());await panel.getByRole('button',{name:'Share camera',exact:true}).click();await panel.getByText('Persistent configuration · Capture follows application use',{exact:true}).waitFor();assert.equal(saved.mode,'phv1-camera-mjpeg-v1');assert.equal(saved.source_id,cameraId);assert.equal(saved.desktop_uid,0);assert.equal(saved.desktop_session,desktopSession);assert.equal(saved.destination,receiver._id);assert.equal(saved.identity,undefined);await panel.getByRole('button',{name:'Remove',exact:true}).click();await panel.getByText('Persistent configuration · Capture follows application use',{exact:true}).waitFor({state:'hidden'});
+  await panel.getByRole('radio',{name:'Speaker',exact:true}).click();
+  await chooseDropdown(panel.getByLabel('Speaker',{exact:true}),'Desktop output');
+  await chooseDropdown(panel.getByLabel('Play audio on',{exact:true}),receiver.name);
+  await panel.getByRole('button',{name:'Forward audio'}).click();
+  await panel.getByText(`Audio from ${source.name} → ${receiver.name}`,{exact:true}).waitFor();
+  assert.equal(saved.source,source._id);
+  assert.equal(saved.destination,receiver._id);
+  assert.equal(saved.source_id,speakerId);
+  assert.equal(saved.mode,'phs1-speaker-v1');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);await page.getByRole('button',{name:'Close',exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:`/tmp/porthub-native-media-ui-${process.env.REVIEW_BROWSER||'chromium'}-${width}.png`});await context.close();console.log(`PASS native microphone/camera flow ${process.env.REVIEW_BROWSER||'chromium'} ${width}`);
  }}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
