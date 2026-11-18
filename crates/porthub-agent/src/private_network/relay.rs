@@ -235,6 +235,10 @@ async fn dispatch_downstream(frame:Bytes, origins:bool, events:&mpsc::Sender<Eve
         if !origins {return;}
         let Ok(records)=porthub_mesh::relay_origin::decode(frame) else{return;};
         if records.iter().any(|(origin,bytes)|bytes.get(12..16)!=Some(origin.ip.octets().as_slice())){return;}
+        #[cfg(all(target_os="linux",feature="netns-tests"))] {
+            static OBSERVATIONS:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+            if OBSERVATIONS.fetch_add(1,Ordering::Relaxed)<8{eprintln!("native_relay_origin decoded_records={}",records.len());}
+        }
         let received_at=Instant::now();
         let frame_boot=records.iter().find_map(|(_,bytes)|super::controller::exit_ingress_boot(bytes));
         let mut identities=std::collections::HashMap::new();
@@ -539,6 +543,10 @@ async fn connect_lane(
             .get("x-porthub-relay-prefix")
             .is_some_and(|value| value == "1");
     let origins=response.headers().get("x-porthub-relay-origin").is_some_and(|v|v=="1");
+    #[cfg(all(target_os="linux",feature="netns-tests"))] {
+        static OBSERVATIONS:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+        if OBSERVATIONS.fetch_add(1,Ordering::Relaxed)<8{eprintln!("native_relay_origin negotiated={origins}");}
+    }
     Ok(Some(ConnectedLane {
         origins,
         lane: usize::from(lane),
