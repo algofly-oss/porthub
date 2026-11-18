@@ -685,6 +685,133 @@ mod native_tests {
         );
     }
 
+    #[cfg(all(target_os = "linux", feature = "speech-cuda"))]
+    #[tokio::test]
+    #[ignore = "requires CUDA, nvidia-smi, pinned tiny model and public PCM fixture; run alone"]
+    async fn native_gpu_toggle_inference_and_disable_release() {
+        fn own_vram_mib() -> u64 {
+            let output = std::process::Command::new("nvidia-smi")
+                .args([
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+                .expect("nvidia-smi must be available");
+            assert!(output.status.success(), "nvidia-smi query failed");
+            let rows = String::from_utf8(output.stdout).unwrap();
+            rows.lines()
+                .filter_map(|row| {
+                    let (pid, memory) = row.split_once(',').expect("unexpected GPU query row");
+                    let pid: u32 = pid.trim().parse().expect("numeric GPU process id");
+                    (pid == std::process::id()).then(|| {
+                        memory
+                            .trim()
+                            .parse::<u64>()
+                            .expect("numeric own GPU memory")
+                    })
+                })
+                .sum()
+        }
+        async fn configure(speech: &Speech, settings: Settings) {
+            let (tx, rx) = oneshot::channel();
+            speech
+                .send
+                .send(Work::Configure(settings, tx))
+                .await
+                .unwrap();
+            rx.await.unwrap().unwrap();
+        }
+        async fn run(speech: &Speech, samples: Vec<f32>) -> Result<String, String> {
+            let (tx, rx) = oneshot::channel();
+            speech
+                .send
+                .send(Work::Run {
+                    generation: speech.generation.load(Ordering::SeqCst),
+                    pcm: samples,
+                    options: RunOptions {
+                        language: Some("en".into()),
+                        ..Default::default()
+                    },
+                    reply: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        }
+        let bytes = std::fs::read(std::env::var("PORTHUB_TEST_SPEECH_PCM").unwrap()).unwrap();
+        let model = spec("whisper-tiny").ok().unwrap();
+        let weights = std::fs::read(root().join(&model.filename)).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&weights)), model.sha256);
+        drop(weights);
+        assert!(
+            available().iter().any(|d| d["kind"] == "gpu"),
+            "actual GPU required"
+        );
+        let speech = Speech::new(Settings::default());
+        let baseline = own_vram_mib();
+        assert_eq!(speech.status().await["loaded"], false);
+        configure(
+            &speech,
+            Settings {
+                engine: "gpu".into(),
+                ..Settings::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            speech.status().await["loaded"],
+            false,
+            "GPU selection must stay lazy"
+        );
+        let text = run(&speech, pcm(&bytes).ok().unwrap()).await.unwrap();
+        assert!(
+            text.to_lowercase().contains("country"),
+            "public fixture transcript mismatch"
+        );
+        assert_eq!(speech.status().await["loaded"], true);
+        let loaded = own_vram_mib();
+        assert!(loaded > baseline, "no observed own-process GPU allocation");
+        configure(
+            &speech,
+            Settings {
+                enabled: false,
+                engine: "gpu".into(),
+                ..Settings::default()
+            },
+        )
+        .await;
+        assert_eq!(speech.status().await["loaded"], false);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let released = loop {
+            let now = own_vram_mib();
+            // CUDA may retain its context; require a measured allocation decrease,
+            // not disappearance of the process or return to global baseline.
+            if now < loaded {
+                break now;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "GPU allocation did not decrease after disable ACK: baseline={baseline}, loaded={loaded}, current={now} MiB");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(run(&speech, vec![0.; 16000])
+            .await
+            .unwrap_err()
+            .contains("disabled"));
+        configure(&speech, Settings::default()).await;
+        assert_eq!(
+            speech.status().await["loaded"],
+            false,
+            "CPU reenable must stay lazy"
+        );
+        let cpu_lazy = own_vram_mib();
+        assert!(
+            cpu_lazy <= released,
+            "lazy CPU reenable allocated GPU memory"
+        );
+        println!(
+            "{}",
+            json!({"actual_gpu_actor":true,"pid":std::process::id(),"vram_mib_baseline":baseline,"vram_mib_loaded":loaded,"vram_mib_disabled":released,"vram_mib_cpu_lazy":cpu_lazy,"model_sha256":model.sha256,"disabled_run_rejected":true,"cpu_reenable_lazy":true})
+        );
+    }
     #[tokio::test]
     #[ignore = "requires a downloaded pinned tiny model and 16kHz PCM fixture"]
     async fn native_cpu_dictation_and_explicit_unload() {
