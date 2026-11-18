@@ -47,8 +47,12 @@ nonce-owned stage. The controller independently checks raw binaries and closure.
 On a failed build, preserve the state/logs for diagnosis, then run the same
 adapter with `cleanup --config ... --host ... --revision ... --state ...`.
 Cleanup checks both the nonce path and ownership marker. It never sweeps other
-stages. Reusing an existing state path is rejected, preventing accidental loss of
-failed-stage provenance. No build/fetch command runs implicitly during probe.
+stages. A same-revision retry resumes only after remotely checking the retained ZIP
+SHA256 and identity. A different revision cannot reuse that state. A verified
+local ZIP remains successful if cleanup loses SSH; `cleanup_pending` records
+that condition and fetch retries verify the existing bytes before retrying
+cleanup. Cleanup refuses a live worker or unexpired upload/build lease; it never
+kills a worker. Failed-stage provenance is retained for explicit cleanup. No build/fetch command runs implicitly during probe.
 
 Tests: `python3 scripts/test_ssh_native_builder.py`. Real host availability and
 actual worker build results must be reported separately from these local tests.

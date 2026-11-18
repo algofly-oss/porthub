@@ -143,6 +143,7 @@ REMOTE = '''import hashlib,json,os,pathlib,shutil,subprocess,sys
 stage=pathlib.Path(__file__).resolve().parent
 job=json.loads((stage/'job.json').read_text())
 if (stage/'owner').read_text()!=job['nonce']: raise RuntimeError('Stage ownership mismatch')
+active=json.loads((stage/'active.json').read_text());active['pid']=os.getpid();(stage/'active.json').write_text(json.dumps(active))
 def sha(p):
  with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
 if sha(stage/'source.pack')!=job['pack_sha256']: raise RuntimeError('Source pack mismatch')
@@ -174,16 +175,37 @@ try:
 finally:
  shutil.rmtree(stage/'target',ignore_errors=True)
  shutil.rmtree(source,ignore_errors=True)
+ (stage/'finished').write_text('finished')
 '''
+
+
+def remote_result(host, record):
+    source = """import hashlib,json,pathlib
+p=pathlib.Path(%r)
+assert (p/'owner').read_text()==%r
+r=json.loads((p/'result.json').read_text())
+with (p/'components.zip').open('rb') as f: assert hashlib.file_digest(f,'sha256').hexdigest()==r['sha256']
+assert (p/'components.zip').stat().st_size==r['size']
+print(json.dumps(r))
+""" % (record['stage'],record['nonce'])
+    result=json.loads(inline(dict(host,python=record['python']),source,15))
+    if result['revision']!=record['revision'] or result['target']!=record['target']:
+        raise ValueError('Retained artifact identity mismatch')
+    return result
 
 
 def build(host, root, revision, state, timeout):
     if state.exists() or state.is_symlink():
-        raise ValueError('Build state already exists; fetch or clean previous stage first')
+        record=json.loads(state.read_text())
+        if record['revision']!=revision or record['target']!=host['target']:
+            raise ValueError('Retained build state identity mismatch')
+        record['result']=remote_result(host,record)
+        state.write_text(json.dumps(record))
+        return dict(record,resumed=True)
     tools = probe(host)
     nonce = os.urandom(16).hex()
     stage = tools['home'].replace('\\', '/') + '/.porthub-native-build-' + nonce
-    mkdir = "import pathlib; p=pathlib.Path(%r);p.mkdir(mode=0o700);(p/'owner').write_text(%r)" % (stage, nonce)
+    mkdir = "import pathlib,json,time;p=pathlib.Path(%r);p.mkdir(mode=0o700);(p/'owner').write_text(%r);(p/'active.json').write_text(json.dumps(dict(deadline=time.time()+%r)))" % (stage, nonce, timeout+180)
     inline(host, mkdir)
     record = dict(schema_version=1, revision=revision, target=host['target'], stage=stage, nonce=nonce, python=tools['python'])
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -201,35 +223,64 @@ def build(host, root, revision, state, timeout):
     return record
 
 
+CLEANUP = """import csv,json,os,pathlib,shutil,subprocess,time
+p=pathlib.Path(STAGE)
+if not p.exists(): raise SystemExit(0)
+assert (p/'owner').read_text()==NONCE
+if not (p/'finished').exists():
+ if (p/'active.json').exists():
+  active=json.loads((p/'active.json').read_text())
+  if time.time()<active['deadline']: raise RuntimeError('Owned stage still leased')
+  pid=active.get('pid')
+  if pid:
+   if os.name=='nt':
+    rows=subprocess.run(['tasklist','/FI','PID eq '+str(pid),'/FO','CSV','/NH'],capture_output=True,text=True,check=True,timeout=5).stdout
+    if any(len(row)>1 and row[1]==str(pid) for row in csv.reader(rows.splitlines())): raise RuntimeError('Owned worker still live')
+   else:
+    try: os.kill(pid,0)
+    except ProcessLookupError: pass
+    else: raise RuntimeError('Owned worker still live')
+ elif not (p/'result.json').exists() or (p/'source').exists() or (p/'target').exists():
+  raise RuntimeError('Unfinished legacy stage')
+shutil.rmtree(p)
+"""
+
+
 def cleanup(host, record):
     if not re.fullmatch(r'[0-9a-f]{32}',record['nonce']) or not record['stage'].replace('\\','/').endswith('/.porthub-native-build-'+record['nonce']):
         raise ValueError('Invalid owned stage')
-    code = "import pathlib,shutil;p=pathlib.Path(%r);assert (p/'owner').read_text()==%r;shutil.rmtree(p)" % (record['stage'],record['nonce'])
-    # Use the proven bootstrap executable saved at build time; never re-resolve aliases.
-    configured=dict(host,python=record['python'])
-    inline(configured, code)
+    code='STAGE=%r;NONCE=%r\n' % (record['stage'],record['nonce'])+CLEANUP
+    inline(dict(host,python=record['python']),code,15)
 
 
 def fetch(host, revision, state, archive):
     record = json.loads(state.read_text())
     if record['revision'] != revision or record['target'] != host['target'] or not re.fullmatch(r'[0-9a-f]{32}',record['nonce']):
         raise ValueError('Build state identity mismatch')
-    if archive.exists() or archive.is_symlink():
-        raise ValueError('Fetch destination already exists')
-    stage = record['stage']
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=archive.parent) as folder:
-        result = Path(folder)/'result.json'
-        copy(host, result, stage+'/result.json', False)
-        expected = json.loads(result.read_text())
-        if expected['revision'] != revision or expected['target'] != host['target'] or not 0 < expected['size'] <= 512*1024*1024:
-            raise ValueError('Remote result mismatch')
-        temporary = Path(folder)/'components.zip'
-        copy(host, temporary, stage+'/components.zip', False)
-        if temporary.stat().st_size != expected['size'] or digest(temporary) != expected['sha256']:
-            raise ValueError('Fetched archive mismatch')
-        temporary.rename(archive)
-    cleanup(host, record)
+    expected=record.get('result') or remote_result(host,record)
+    if not 0<expected['size']<=512*1024*1024:
+        raise ValueError('Invalid retained artifact size')
+    record['result']=expected
+    state.write_text(json.dumps(record))
+    if archive.is_symlink(): raise ValueError('Symlink fetch destination')
+    if archive.exists():
+        if archive.stat().st_size!=expected['size'] or digest(archive)!=expected['sha256']:
+            raise ValueError('Existing fetch destination differs')
+    else:
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=archive.parent) as folder:
+            temporary=Path(folder)/'components.zip'
+            copy(host,temporary,record['stage']+'/components.zip',False)
+            if temporary.stat().st_size!=expected['size'] or digest(temporary)!=expected['sha256']:
+                raise ValueError('Fetched archive mismatch')
+            temporary.rename(archive)
+    try:
+        cleanup(host,record)
+        record['cleanup_pending']=False
+    except Exception:
+        record['cleanup_pending']=True
+    state.write_text(json.dumps(record))
+    expected=dict(expected,cleanup_pending=record['cleanup_pending'])
     return expected
 
 
