@@ -28,7 +28,7 @@ export default function VKeyboard({active=true}){
   const refresh=useCallback(async()=>{setLoading(true);try{const {data}=await axios.get('/api/keyboard/targets');if(alive.current){setTargets(data.targets);setSelected(current=>current||data.targets.find(t=>t.online)?.id||data.targets[0]?.id||'');}}catch(e){if(alive.current)setError(e.response?.data?.detail||'Could not load keyboard clients');}finally{if(alive.current)setLoading(false);}},[]);
   const stop=useCallback(async()=>{const current=recorder.current;recorder.current=null;setRecording(false);await current?.stop();},[]);
   // The main microphone must not depend on first opening the Settings drawer.
-  useEffect(()=>{if(!active)return;let current=true;axios.get('/api/keyboard/speech').then(({data})=>{if(current&&alive.current)setStatus(data);}).catch(e=>{if(current&&alive.current)setError(e.response?.data?.detail||'Could not load dictation settings');});return()=>{current=false;};},[active]);
+  useEffect(()=>{if(!active)return;let current=true;axios.get('/api/keyboard/speech').then(({data})=>{if(current&&alive.current)setStatus(currentStatus=>currentStatus===status?data:currentStatus);}).catch(e=>{if(current&&alive.current)setError(e.response?.data?.detail||'Could not load dictation settings');});return()=>{current=false;};},[active]);
   const speechEnabled=status?.settings.enabled;
   useEffect(()=>{if(speechEnabled===false&&recorder.current){const current=recorder.current;recorder.current=null;setRecording(false);void current.stop(false);}},[speechEnabled]);
   const disconnect=useCallback(()=>{void stop();transport.current?.close();transport.current=null;setConnection({state:'disconnected'});},[stop]);
@@ -154,7 +154,7 @@ function DictationTimer({recording,processing}) {
   useEffect(()=>{
     if(!recording)return;
     const started=performance.now();const update=()=>setElapsed(Math.max(0,Math.floor((performance.now()-started)/1000)));
-    setElapsed(0);const timer=setInterval(update,250);
+    setElapsed(0);const timer=setInterval(update,1000);
     return()=>clearInterval(timer);
   },[recording]);
   const seconds=recording||processing?elapsed:0;

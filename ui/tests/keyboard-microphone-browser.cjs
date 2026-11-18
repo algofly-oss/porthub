@@ -3,7 +3,7 @@ const{launchBrowser,waitForWorkspaceLayout}=require('./browser.cjs');
 const{createKeyboardFixture}=require('./keyboard-local-fixture.cjs');
 (async()=>{
  const browser=await launchBrowser(),engine=process.env.REVIEW_BROWSER||'chromium',out=process.env.REVIEW_SCREENSHOT_DIR||'/tmp/porthub-vkeyboard-microphone';fs.mkdirSync(out,{recursive:true});
- try{for(const viewport of[{width:402,height:874},{width:320,height:760}]){
+ try{await verifySlowInitialSettings(browser,engine);for(const viewport of[{width:402,height:874},{width:320,height:760}]){
   const fixture=await createKeyboardFixture(browser,viewport,{reducedMotion:viewport.width===320?'reduce':'no-preference'}),{page}=fixture,label=`${engine}-${viewport.width}x${viewport.height}-microphone`;
   await fixture.context.addInitScript(()=>{localStorage.setItem('porthub.keyboard.layout','portrait');localStorage.setItem('porthub.keyboard.preferences',JSON.stringify({touchpad:false,mouseButtons:true,functionKeys:false,reverseScroll:false}));});
   try{
@@ -37,3 +37,22 @@ const{createKeyboardFixture}=require('./keyboard-local-fixture.cjs');
   }catch(error){await page.screenshot({path:`${out}/${label}-failure.png`,scale:'css'}).catch(()=>{});fs.writeFileSync(`${out}/${label}-failure.json`,JSON.stringify({error:String(error),errors:fixture.errors},null,2));throw error;}finally{await fixture.close();}
  }}finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1)});
+
+async function verifySlowInitialSettings(browser,engine){
+ const fixture=await createKeyboardFixture(browser,{width:402,height:874}),{page}=fixture;
+ let releaseInitial,finishedInitial;const held=new Promise(resolve=>releaseInitial=resolve),finished=new Promise(resolve=>finishedInitial=resolve);let requests=0;
+ await fixture.context.route('**/api/keyboard/speech',async route=>{const first=++requests===1;if(first)await held;await route.fulfill({json:{settings:{enabled:first,model:'fixture'},models:[{id:'fixture',installed:true,languages:['en'],translate:false}]},headers:{'x-fixture-settings':first?'stale':'new'}}).catch(()=>{});if(first)finishedInitial();});
+ try{
+  await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:8323'}/home?view=keyboard`);
+  await page.getByRole('button',{name:'Keyboard clients',exact:true}).waitFor();
+  const newer=page.waitForResponse(response=>response.headers()['x-fixture-settings']==='new');
+  await page.getByRole('button',{name:'Keyboard clients',exact:true}).click();await newer;
+  await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await waitForWorkspaceLayout(page);
+  const status=page.getByRole('button',{name:'Dictation status',exact:true});await status.getByText('Dictation off',{exact:true}).waitFor();
+  releaseInitial();await finished;await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await status.innerText(),'Dictation off','late initial settings cannot overwrite newer drawer state');
+  assert.equal(await page.getByRole('button',{name:'Start dictation',exact:true}).isEnabled(),false);
+  assert.equal(await page.evaluate(()=>window.fixtureMicrophoneRequests||0),0);assert.deepEqual(fixture.errors,[]);
+  console.log(`PASS ${engine} delayed initial speech settings preserve newer disabled state`);
+ }finally{releaseInitial();await fixture.close();}
+}
