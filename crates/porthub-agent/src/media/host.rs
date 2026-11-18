@@ -43,6 +43,7 @@ fn required(kind: Kind) -> Feature {
     match kind {
         Kind::Microphone => Feature::MicrophoneShare,
         Kind::Camera => Feature::CameraShare,
+        Kind::Speaker => Feature::MediaReceive,
     }
 }
 fn permitted(profile: &Path, kind: Kind) -> bool {
@@ -52,22 +53,25 @@ fn permitted(profile: &Path, kind: Kind) -> bool {
 struct Allowed {
     microphone: bool,
     camera: bool,
+    speaker: bool,
 }
 impl Allowed {
     fn read(value: &Value) -> Self {
         Self {
             microphone: value["microphone"] == true,
             camera: value["camera"] == true,
+            speaker: value["speaker"] == true,
         }
     }
     fn kind(self, kind: Kind) -> bool {
         match kind {
             Kind::Microphone => self.microphone,
             Kind::Camera => self.camera,
+            Kind::Speaker => self.speaker,
         }
     }
     fn any(self, own: &Path) -> bool {
-        [Kind::Microphone, Kind::Camera]
+        [Kind::Microphone, Kind::Camera, Kind::Speaker]
             .into_iter()
             .any(|kind| self.kind(kind) && permitted(own, kind))
     }
@@ -159,10 +163,11 @@ fn inventory_message(
     allowed: Allowed,
     request: Option<&str>,
 ) -> Value {
-    let mut value = json!({"type":"inventory","devices":visible(cache,own,allowed),"microphone_unavailable_reason":cache.microphone_unavailable_reason,"camera_unavailable_reason":cache.camera_unavailable_reason});
+    let mut value = json!({"type":"inventory","devices":visible(cache,own,allowed),"microphone_unavailable_reason":cache.microphone_unavailable_reason,"camera_unavailable_reason":cache.camera_unavailable_reason,"speaker_unavailable_reason":cache.speaker_unavailable_reason});
     for (kind, key) in [
         (Kind::Microphone, "microphone_unavailable_reason"),
         (Kind::Camera, "camera_unavailable_reason"),
+        (Kind::Speaker, "speaker_unavailable_reason"),
     ] {
         if !allowed.kind(kind) {
             value[key] = json!("Source sharing is disabled by this client");
@@ -252,6 +257,7 @@ async fn connection(
     let mut root_allowed = Allowed::read(&hello);
     send(&writer, &inventory_message(cache, own, root_allowed, None)).await?;
     let mut active = HashMap::<String, CancellationToken>::new();
+    let mut playback_inputs = HashMap::<String, tokio::sync::mpsc::Sender<Vec<u8>>>::new();
     let mut active_sources = HashMap::<String, String>::new();
     let mut active_kinds = HashMap::<String, Kind>::new();
     let mut own_policy = features::subscribe(own);
@@ -264,7 +270,7 @@ async fn connection(
         tokio::select! {biased;
             _=cancel.cancelled()=>break,
             changed=own_policy.changed()=>{if changed.is_err(){break;}retire(&active,&active_kinds,root_allowed,own);send(&writer,&inventory_message(cache,own,root_allowed,None)).await?;},
-            done=jobs.join_next(),if !jobs.is_empty()=>{if let Some(Ok((id,outcome)))=done{active.remove(&id);active_kinds.remove(&id);if let Some(source)=active_sources.remove(&id){if matches!(outcome,2|3){if let Some(device)=cache.sources.iter_mut().map(|s|&mut s.device).find(|d|d.id==source){device.capture_available=false;device.capture_state=if outcome==3{porthub_components::media::CaptureState::Unsupported}else{porthub_components::media::CaptureState::Denied};device.unavailable_reason=Some(if outcome==3{super::session::CaptureUnsupported.to_string()}else{super::session::CaptureDenied(device.kind).to_string()});}}}send(&writer,&json!({"type":match outcome{3=>"unsupported",2=>"denied",1=>"error",_=>"stopped"},"session":id})).await?;}},
+            done=jobs.join_next(),if !jobs.is_empty()=>{if let Some(Ok((id,outcome)))=done{active.remove(&id);playback_inputs.remove(&id);active_kinds.remove(&id);if let Some(source)=active_sources.remove(&id){if matches!(outcome,2|3){if let Some(device)=cache.sources.iter_mut().map(|s|&mut s.device).find(|d|d.id==source){device.capture_available=false;device.capture_state=if outcome==3{porthub_components::media::CaptureState::Unsupported}else{porthub_components::media::CaptureState::Denied};device.unavailable_reason=Some(if outcome==3{super::session::CaptureUnsupported.to_string()}else{super::session::CaptureDenied(device.kind).to_string()});}}}send(&writer,&json!({"type":match outcome{3=>"unsupported",2=>"denied",1=>"error",_=>"stopped"},"session":id})).await?;}},
             done=discoveries.join_next(),if !discoveries.is_empty()=>{
                 if let Some(Ok((request,result)))=done {
                     if discovery_request.as_deref()!=Some(request.as_str()){continue;}
@@ -276,7 +282,9 @@ async fn connection(
                 }
             },
             bytes=read.next()=>{
-                let value:Value=serde_json::from_slice(&bytes?)?;
+                let bytes=bytes?;
+                if bytes.first()==Some(&0)&&bytes.len()>=33 {let id=std::str::from_utf8(&bytes[1..33])?;let frame=host_wire::parse_pcm(&bytes,id).context("Invalid speaker PCM")?;let tx=playback_inputs.get(id).context("Unrequested speaker playback")?;tx.try_send(frame.pcm).map_err(|_|anyhow::anyhow!("Speaker playback queue overflow"))?;continue;}
+                let value:Value=serde_json::from_slice(&bytes)?;
                 match value["type"].as_str(){
                     Some("policy")=>{
                         #[cfg(windows)] super::windows_host::validate_policy(&value)?;
@@ -290,6 +298,22 @@ async fn connection(
                             let result=async{let manifest=manager.refresh(&stop).await?;inventory(&manager,&manifest,&stop).await}.await;
                             (request,result)
                         });
+                    },
+                    Some("capture-playback")|Some("render-playback")=>{
+                        let render=value["type"]=="render-playback";let id=value["session"].as_str().context("Missing speaker session")?.to_owned();
+                        ensure!(id.len()==32&&id.bytes().all(|v|v.is_ascii_hexdigit())&&!active.contains_key(&id)&&active.len()<4,"Invalid speaker session");
+                        ensure!(root_allowed.kind(Kind::Speaker)&&permitted(own,Kind::Speaker),"Speaker forwarding disabled by user policy");
+                        let source=value["source"].as_str().unwrap_or("");let selected=if !render{Some(visible(cache,own,root_allowed).into_iter().find(|d|d.id==source&&d.kind==Kind::Speaker&&d.can_request_capture()).context("Exact selected speaker unavailable")?)}else{None};
+                        let manifest=manager.cached()?.context("No verified audio helper")?;let stop=connection.child_token();active.insert(id.clone(),stop.clone());active_kinds.insert(id.clone(),Kind::Speaker);
+                        let(tx,mut rx)=tokio::sync::mpsc::channel::<Vec<u8>>(4);if render{playback_inputs.insert(id.clone(),tx);}
+                        let manager=manager.clone();let own=own.to_owned();let writer=writer.clone();
+                        jobs.spawn(async move{let result=async{let mut session=Session::spawn_local(&own,SessionRequest{operation:if render{Operation::RenderPlayback}else{Operation::CapturePlayback},session:id.clone(),name:"PortHub speaker forwarding".into(),source_id:selected.map(|d|d.id),video_format:None,camera_identity:None},&manager,&manifest,&stop).await?;
+                        send(&writer,&json!({"type":"started","session":id})).await?;
+                        let mut continuity=porthub_components::media::PcmContinuity::default();
+                        loop{tokio::select!{biased;_=stop.cancelled()=>break,
+                         frame=rx.recv(),if render=>{let Some(mut frame)=frame else{break;};let result=session.write_pcm(&frame).await;frame.fill(0);result?;},
+                         frame=session.read_network_frame(),if !render=>{let mut frame=frame?;ensure!(continuity.accept(&frame),"Playback capture discontinuity");let mut bytes=host_wire::pcm(&id,&frame).context("Invalid captured playback PCM")?;frame.pcm.fill(0);let result=host_wire::write(&mut *writer.lock().await,&bytes).await;bytes.fill(0);result?;}
+                        }}Ok::<(),anyhow::Error>(())}.await;(id,if result.is_err(){1}else{0})});
                     },
                     Some("capture")|Some("capture-camera")=>{
                         let kind=if value["type"]=="capture-camera"{Kind::Camera}else{Kind::Microphone};

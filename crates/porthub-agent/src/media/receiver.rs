@@ -82,17 +82,26 @@ pub async fn run(
 ) -> Result<()> {
     ensure!(plan.valid(), "Invalid native media forwarding plan");
     let kind = plan.kind().context("Unknown native media plan mode")?;
-    #[cfg(all(test,windows))]
-    super::windows_video_destination_fixture::verify_plan(profile,plan,control.profile().machine_id==plan.source,&parent).await?;
+    #[cfg(all(test, windows))]
+    super::windows_video_destination_fixture::verify_plan(
+        profile,
+        plan,
+        control.profile().machine_id == plan.source,
+        &parent,
+    )
+    .await?;
     let source = control.profile().machine_id == plan.source;
-    #[cfg(all(test,windows))]
-    super::windows_e2e_fixture::verify_plan(&plan,source)?;
+    #[cfg(all(test, windows))]
+    super::windows_e2e_fixture::verify_plan(&plan, source)?;
     #[cfg(all(test, target_os = "linux"))]
     super::windows_receiver_fixture::verify_plan(&plan, source)?;
     ensure!(
         source || control.profile().machine_id == plan.destination,
         "Media plan belongs to another endpoint"
     );
+    if kind == Kind::Speaker {
+        return super::playback::run(profile, control, plan, parent, status).await;
+    }
     if !source {
         ensure!(
             super::config::identity(profile).as_ref() == Some(&plan.identity),
@@ -102,6 +111,7 @@ pub async fn run(
     let feature = if source {
         match kind {
             Kind::Microphone => Feature::MicrophoneShare,
+            Kind::Speaker => Feature::MediaReceive,
             Kind::Camera => Feature::CameraShare,
         }
     } else {
@@ -117,6 +127,7 @@ pub async fn run(
     let (send, ready) = tokio::sync::oneshot::channel();
     let transport = async {
         match kind {
+            Kind::Speaker => unreachable!("speaker dispatched separately"),
             Kind::Microphone => {
                 crate::usb::media_transport::transfer(
                     network,

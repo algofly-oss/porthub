@@ -105,6 +105,27 @@ pub(crate) async fn transfer_camera<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await
 }
+pub(crate) async fn transfer_speaker<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    path: &Path,
+    control: Arc<Control>,
+    id: &str,
+    source: bool,
+    cancel: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<()> {
+    transfer_for(
+        stream,
+        path,
+        control,
+        id,
+        source,
+        cancel,
+        ready,
+        Feature::MediaReceive,
+    )
+    .await
+}
 async fn transfer_for<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     path: &Path,
@@ -118,15 +139,15 @@ async fn transfer_for<S: AsyncRead + AsyncWrite + Unpin>(
     ensure!(
         matches!(
             source_feature,
-            Feature::MicrophoneShare | Feature::CameraShare
+            Feature::MicrophoneShare | Feature::CameraShare | Feature::MediaReceive
         ),
         "Invalid media source purpose"
     );
     let diagnostic = |stage| {
-        #[cfg(all(test,windows))]
-        crate::media::windows_e2e_fixture::diagnostic(path,stage,usize::from(source));
-        #[cfg(not(all(test,windows)))]
-        let _=stage;
+        #[cfg(all(test, windows))]
+        crate::media::windows_e2e_fixture::diagnostic(path, stage, usize::from(source));
+        #[cfg(not(all(test, windows)))]
+        let _ = stage;
     };
     let work = async {
         diagnostic("websocket-start");
@@ -148,7 +169,10 @@ async fn transfer_for<S: AsyncRead + AsyncWrite + Unpin>(
         #[cfg(all(test, target_os = "linux"))]
         crate::media::e2e_fixture::verify_carrier(carrier.tcp.as_ref(), control.profile())?;
         #[cfg(all(test, target_os = "linux"))]
-        crate::media::windows_receiver_fixture::verify_carrier(carrier.tcp.as_ref(), control.profile())?;
+        crate::media::windows_receiver_fixture::verify_carrier(
+            carrier.tcp.as_ref(),
+            control.profile(),
+        )?;
         #[cfg(all(test, target_os = "linux"))]
         if source_feature == Feature::CameraShare {
             crate::media::video_e2e_fixture::verify_carrier(
@@ -156,10 +180,14 @@ async fn transfer_for<S: AsyncRead + AsyncWrite + Unpin>(
                 control.profile(),
             )?;
         }
-        #[cfg(all(test,windows))]
-        crate::media::windows_e2e_fixture::verify_carrier(carrier.tcp.as_ref(),control.profile())?;
-        #[cfg(all(test,windows))]
-        crate::media::windows_video_destination_fixture::verify_carrier(carrier.tcp.as_ref(),control.profile(),id)?;
+        #[cfg(all(test, windows))]
+        crate::media::windows_e2e_fixture::verify_carrier(carrier.tcp.as_ref(), control.profile())?;
+        #[cfg(all(test, windows))]
+        crate::media::windows_video_destination_fixture::verify_carrier(
+            carrier.tcp.as_ref(),
+            control.profile(),
+            id,
+        )?;
         let _ = ready.send(());
         if let Some(bulk) = carrier.tcp {
             bridge_bulk_with_policy(

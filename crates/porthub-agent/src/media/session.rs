@@ -21,14 +21,15 @@ use tokio_util::sync::CancellationToken;
 enum ReadyPlatform { PipeWire, Windows }
 fn validate_native_ready(request:&SessionRequest,ready:&serde_json::Value,platform:ReadyPlatform)->Result<()> {
     ensure!(request.valid(), "Invalid explicit media readiness request");
-    ensure!(ready["session"].as_str()==Some(request.session.as_str()) && ready["state"]==if request.operation==Operation::PublishMicrophone {"published"}else{"capturing"},"Media helper did not publish/capture the requested session");
+    ensure!(ready["session"].as_str()==Some(request.session.as_str()) && ready["state"]==if request.operation==Operation::RenderPlayback {"rendering"}else if request.operation==Operation::PublishMicrophone {"published"}else{"capturing"},"Media helper did not publish/capture the requested session");
     if request.operation==Operation::CaptureCamera {
         let backend=match platform {ReadyPlatform::PipeWire=>"v4l2",ReadyPlatform::Windows=>"windows-mf"};
         ensure!(ready["backend"]==backend && ready["source_id"].as_str()==request.source_id.as_deref() && serde_json::from_value::<porthub_components::media::VideoFormat>(ready["format"].clone()).ok()==request.video_format,"Camera helper negotiated a different source/format/backend");
     } else {
+        if request.operation==Operation::CapturePlayback {ensure!(ready["source_id"].as_str()==request.source_id.as_deref(),"Playback helper selected another output monitor");}
         match platform {
             ReadyPlatform::PipeWire=>ensure!(ready["node_id"].as_u64().is_some_and(|v|v<u32::MAX as u64),"Native PipeWire endpoint identity unavailable"),
-            ReadyPlatform::Windows=>ensure!(request.operation==Operation::CaptureMicrophone && ready["backend"]=="wasapi" && ready["endpoint_id"].as_str().is_some_and(|v|!v.is_empty()&&v.len()<=512),"Native Windows capture endpoint unavailable"),
+            ReadyPlatform::Windows=>ensure!(matches!(request.operation,Operation::CaptureMicrophone|Operation::CapturePlayback|Operation::RenderPlayback) && ready["backend"]=="wasapi" && ready["endpoint_id"].as_str().is_some_and(|v|!v.is_empty()&&v.len()<=512),"Native Windows capture endpoint unavailable"),
         }
         ensure!(ready["rate"]==48000&&ready["channels"]==1&&ready["format"]=="f32le","Media helper negotiated unsupported endpoint");
     }
@@ -78,7 +79,7 @@ fn feature(operation: Operation) -> Feature {
     match operation {
         Operation::CaptureMicrophone => Feature::MicrophoneShare,
         Operation::CaptureCamera => Feature::CameraShare,
-        Operation::PublishMicrophone => Feature::MediaReceive,
+        Operation::PublishMicrophone | Operation::CapturePlayback | Operation::RenderPlayback => Feature::MediaReceive,
     }
 }
 fn permitted(profile: &Path, operation: Operation) -> bool {
@@ -429,6 +430,18 @@ fn validate_pcm(frame: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playback_readiness_binds_selected_output_and_default_render_purpose() {
+        let mut request=SessionRequest{operation:Operation::CapturePlayback,session:"a".repeat(32),name:"Output".into(),source_id:Some("media:selected-output".into()),video_format:None,camera_identity:None};
+        let mut ready=serde_json::json!({"session":request.session,"state":"capturing","source_id":request.source_id,"node_id":9,"backend":"wasapi","endpoint_id":"exact-output","rate":48000,"channels":1,"format":"f32le"});
+        assert!(validate_native_ready(&request,&ready,ReadyPlatform::PipeWire).is_ok());
+        assert!(validate_native_ready(&request,&ready,ReadyPlatform::Windows).is_ok());
+        ready["source_id"]="media:other".into();assert!(validate_native_ready(&request,&ready,ReadyPlatform::PipeWire).is_err());assert!(validate_native_ready(&request,&ready,ReadyPlatform::Windows).is_err());
+        request.operation=Operation::RenderPlayback;request.source_id=None;ready["state"]="rendering".into();
+        assert!(validate_native_ready(&request,&ready,ReadyPlatform::PipeWire).is_ok());assert!(validate_native_ready(&request,&ready,ReadyPlatform::Windows).is_ok());
+        ready["state"]="capturing".into();assert!(validate_native_ready(&request,&ready,ReadyPlatform::Windows).is_err());
+    }
+
     #[test]
     fn native_ready_platform_and_operation_matrix()->Result<()> {
         use serde_json::json;
