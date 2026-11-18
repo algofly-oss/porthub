@@ -1,0 +1,12 @@
+services:
+  core:
+    environment:
+      PORTHUB_NATIVE_BUILD_DEPOT_ROOT: /native-builds
+      PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID: ${PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID:?Set the host artifact publisher UID}
+    volumes:
+      - type: bind
+        source: ${PORTHUB_NATIVE_BUILD_DEPOT_HOST_PATH:?Set the absolute host artifact directory}
+        target: /native-builds
+        read_only: true
+        bind:
+          create_host_path: false
