@@ -3,7 +3,7 @@ const{launchBrowser,waitForWorkspaceLayout}=require('./browser.cjs');
 const{createKeyboardFixture}=require('./keyboard-local-fixture.cjs');
 (async()=>{
  const browser=await launchBrowser(),engine=process.env.REVIEW_BROWSER||'chromium',out=process.env.REVIEW_SCREENSHOT_DIR||'/tmp/porthub-vkeyboard-microphone';fs.mkdirSync(out,{recursive:true});
- try{await verifySlowInitialSettings(browser,engine);for(const viewport of[{width:402,height:874},{width:320,height:760}]){
+ try{await verifySlowInitialSettings(browser,engine);for(const layout of ['portrait','auto'])await verifyMicrophoneLandscape(browser,engine,out,layout);for(const viewport of[{width:402,height:874},{width:320,height:760}]){
   const fixture=await createKeyboardFixture(browser,viewport,{reducedMotion:viewport.width===320?'reduce':'no-preference'}),{page}=fixture,label=`${engine}-${viewport.width}x${viewport.height}-microphone`;
   await fixture.context.addInitScript(()=>{localStorage.setItem('porthub.keyboard.layout','portrait');localStorage.setItem('porthub.keyboard.preferences',JSON.stringify({touchpad:false,mouseButtons:true,functionKeys:false,reverseScroll:false}));});
   try{
@@ -55,4 +55,24 @@ async function verifySlowInitialSettings(browser,engine){
   assert.equal(await page.evaluate(()=>window.fixtureMicrophoneRequests||0),0);assert.deepEqual(fixture.errors,[]);
   console.log(`PASS ${engine} delayed initial speech settings preserve newer disabled state`);
  }finally{releaseInitial();await fixture.close();}
+}
+
+async function verifyMicrophoneLandscape(browser,engine,out,layout){
+ const fixture=await createKeyboardFixture(browser,{width:874,height:402}),{page}=fixture,label=`${engine}-874x402-microphone-${layout}`;
+ await fixture.context.addInitScript(layout=>{localStorage.setItem('porthub.keyboard.layout',layout);localStorage.setItem('porthub.keyboard.preferences',JSON.stringify({touchpad:false}));},layout);
+ const geometry=async()=>page.evaluate(()=>({height:innerHeight,width:innerWidth,scrollWidth:document.documentElement.scrollWidth,keys:[...document.querySelectorAll('.vk')].filter(e=>e.getBoundingClientRect().width).map(e=>({top:e.getBoundingClientRect().top,bottom:e.getBoundingClientRect().bottom}))}));
+ const fits=async phase=>{const g=await geometry();assert.ok(g.keys.length>20&&g.keys.every(k=>k.top>=0&&k.bottom<=g.height+1)&&g.scrollWidth<=g.width+1,phase+': '+JSON.stringify(g));return g;};
+ try{
+  await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:8323'}/home?view=keyboard`);await page.getByRole('toolbar',{name:'Keyboard controls'}).waitFor();await waitForWorkspaceLayout(page);
+  assert.equal(await page.locator('[role="timer"]').isVisible(),false,'compact landscape has no large microphone timer stage');
+  const idle=await fits('idle');await page.screenshot({path:`${out}/${label}-idle.png`,scale:'css'});
+  await page.getByRole('button',{name:'Dictate',exact:true}).click();const stop=page.getByRole('button',{name:'Stop recording',exact:true});await stop.waitFor();await fixture.feed(.08);await fixture.feed(0);fixture.releaseFirst();
+  await page.getByLabel('Recognized text',{exact:true}).getByText('THE NEWEST SPOKEN WORDS ARE VISIBLE',{exact:false}).waitFor();await waitForWorkspaceLayout(page);
+  const recording=await fits('recording recognized text');assert.ok(await stop.isVisible());await page.screenshot({path:`${out}/${label}-recording.png`,scale:'css'});
+  await fixture.feed(.08);await fixture.feed(0);await stop.click();const busy=page.getByRole('button',{name:'Transcribing…',exact:true});await busy.waitFor();
+  const processing=await fits('processing');const icon=await busy.evaluate(e=>({height:e.getBoundingClientRect().height,spinner:parseFloat(getComputedStyle(e,'::after').height)}));assert.ok(icon.spinner>0&&icon.spinner<=icon.height,'processing spinner fits compact microphone key');
+  assert.equal(await page.getByRole('button',{name:'Start dictation',exact:true,includeHidden:true}).evaluate(e=>getComputedStyle(e).width),'44px','standalone microphone resets to compact size');
+  await page.screenshot({path:`${out}/${label}-processing.png`,scale:'css'});fixture.releaseSecond();await page.getByLabel('Recognized text',{exact:true}).getByText('FINAL WORDS AFTER STOP',{exact:false}).waitFor();
+  assert.deepEqual(fixture.errors,[]);fs.writeFileSync(`${out}/${label}.json`,JSON.stringify({idle,recording,processing,icon,errors:fixture.errors},null,2));console.log(`PASS ${engine} microphone-only compact landscape ${layout} 874x402`);
+ }catch(error){await page.screenshot({path:`${out}/${label}-failure.png`,scale:'css'}).catch(()=>{});throw error;}finally{await fixture.close();}
 }

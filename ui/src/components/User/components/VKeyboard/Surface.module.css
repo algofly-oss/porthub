@@ -170,3 +170,8 @@
 .noPad .mic svg{width:var(--dictation-icon-size,20px);height:var(--dictation-icon-size,20px)}
 .noPad .mic.recording svg{width:var(--dictation-stop-size,20px);height:var(--dictation-stop-size,20px)}
 .noPad .micBusy::after{width:var(--dictation-spinner-size,22px);height:var(--dictation-spinner-size,22px)}
+/* A portrait preference must not reserve the large microphone stage when a
+   phone rotates into the compact landscape keyboard. */
+@media(orientation:landscape) and (max-height:599px){
+ .portrait .noPad,.automatic .noPad{--dictation-mic-display:contents;--dictation-timer-display:none;--dictation-wrap:auto;--dictation-mic-size:44px;--dictation-wave-width:auto;--dictation-icon-size:20px;--dictation-stop-size:20px;--dictation-spinner-size:22px}
+}
