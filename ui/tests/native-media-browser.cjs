@@ -14,7 +14,10 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   await context.route('**/api/**',async route=>{const req=route.request(),path=new URL(req.url()).pathname;let data;
    if(path.endsWith('/discover'))data={requested:true};
    else if(path==='/api/media/inventory')data={protocol:2,modes:['phm1-microphone-v1','phv1-camera-mjpeg-v1','phs1-speaker-v1'],machines};
-   else if(path==='/api/media/forwards'&&req.method()==='POST'){saved=req.postDataJSON();plans=[{...saved,id:'b'.repeat(32)}];data={plan:plans[0]};}
+   else if(path==='/api/media/forwards'&&req.method()==='POST'){saved=req.postDataJSON();plans=[{...saved,id:'b'.repeat(32)}];if(saved.mode==='phs1-speaker-v1'){
+    machines[0].report.states=[{id:plans[0].id,state:'capturing'}];
+    machines[1].report.states=[{id:plans[0].id,state:'rendering'}];
+   }data={plan:plans[0]};}
    else if(path==='/api/media/forwards')data={plans};
    else if(path.startsWith('/api/media/forwards/')){plans=[];data={ok:true};}
    else if(path==='/api/usb/inventory')data={machines:machines.map(m=>({...m,online:true,report:{enabled:true,supported:true,can_export:true,can_import:true,devices:[],states:[]}}))};
@@ -39,6 +42,7 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   await chooseDropdown(panel.getByLabel('Play audio on',{exact:true}),receiver.name);
   await panel.getByRole('button',{name:'Forward audio'}).click();
   await panel.getByText(`Audio from ${source.name} → ${receiver.name}`,{exact:true}).waitFor();
+  await panel.getByRole('status').filter({hasText:'Sending system audio · Playing audio'}).waitFor();
   assert.equal(saved.source,source._id);
   assert.equal(saved.destination,receiver._id);
   assert.equal(saved.source_id,speakerId);

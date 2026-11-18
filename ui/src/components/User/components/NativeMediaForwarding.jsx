@@ -5,6 +5,7 @@ import SearchSelect from '@/components/ui/search-select';
 import {Button} from '@/components/ui/button';
 const canRequest=device=>['permission-unknown','ready'].includes(device?.capture_state);
 const labels={'permission-denied':'Permission denied',connecting:'Connecting',starting:'Starting capture',idle:'Waiting for an application',unavailable:'Unavailable',stopped:'Stopped'};
+const playbackLabels={...labels,starting:'Starting audio forwarding',capturing:'Sending system audio',rendering:'Playing audio',ready:'Ready'};
 const statusLabel=(state,camera)=>labels[state]||({ready:camera?'Camera input ready':'Microphone input ready',capturing:camera?'Capturing selected camera':'Capturing selected microphone',receiving:camera?'Receiving camera frames':'Receiving microphone audio'}[state])||'Waiting for client report';
 export default function NativeMediaForwarding({machineId,active}){
  const [machines,setMachines]=useState([]),[plans,setPlans]=useState([]),[source,setSource]=useState(''),[destination,setDestination]=useState(''),[kind,setKind]=useState('microphone'),[modes,setModes]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[available,setAvailable]=useState(true),[notice,setNotice]=useState('');
@@ -42,7 +43,10 @@ export default function NativeMediaForwarding({machineId,active}){
      {hostPlans.map(plan=>{
       const endpoints=[plan.source,plan.destination].map(id=>machines.find(m=>m.id===id));
       const playback=plan.mode===speakerMode;
-      const states=endpoints.map(endpoint=>playback?({receiving:'Playing audio',capturing:'Sending system audio',ready:'Ready'}[endpoint?.report?.states?.find(s=>s.id===plan.id)?.state]||labels[endpoint?.report?.states?.find(s=>s.id===plan.id)?.state]||'Waiting for client report'):statusLabel(endpoint?.report?.states?.find(s=>s.id===plan.id)?.state,plan.mode==='phv1-camera-mjpeg-v1'));
+      const states=endpoints.map(endpoint=>{
+       const state=endpoint?.report?.states?.find(entry=>entry.id===plan.id)?.state;
+       return playback?(playbackLabels[state]||'Waiting for client report'):statusLabel(state,plan.mode==='phv1-camera-mjpeg-v1');
+      });
       return <li key={plan.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2.5">
        <div className="min-w-0">
         <p className="break-words text-sm font-medium">{plan.name}</p>
