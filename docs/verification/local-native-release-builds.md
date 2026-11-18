@@ -1,5 +1,8 @@
 # Local native release builds
 
+The controller records the prepared release commit before probing builders.
+An interrupted first probe can resume against that commit on the next check.
+
 For builds on another machine, configure an SSH host entry and its readiness
 probe. The adapter checks the native toolchain before it accepts work.
 [SSH builder setup](../../scripts/ssh-native-builder.README.md)
