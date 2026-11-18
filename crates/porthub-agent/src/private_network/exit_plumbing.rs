@@ -1,6 +1,8 @@
 //! Local native intent projection, never a source of packet authorization.
 use porthub_network::policy::{ExitRole, ExitRoute, PairLease, Snapshot};
 
+pub(crate) fn online_peers(view:&Snapshot)->std::collections::HashSet<String> {view.peers.iter().filter(|peer|peer.online).map(|peer|peer.id.clone()).collect()}
+
 pub(crate) fn project(base: &Snapshot, leases: &[PairLease]) -> Snapshot {
     let mut projected = base.clone();
     let Some(sparse) = &base.sparse else {
@@ -129,5 +131,17 @@ mod tests {
         assert_eq!(active.exit_routes[0].routing_peers, ["a"]);
         assert_eq!(active.exit_routes[0].clients, ["b"]);
         assert!(project(&base, &[]).exit_routes[0].clients.is_empty());
+    }
+    #[test]
+    fn projected_pair_metadata_survives_self_only_base_and_withdraws_offline_peer() {
+        let(base,mut lease)=fixtures(porthub_network::policy::ExitRole::Client);
+        assert_eq!(base.peers.len(),1);lease.peer.online=true;
+        let projected=project(&base,&[lease.clone()]);let online=online_peers(&projected);
+        assert!(online.contains(&lease.peer.id));assert!(!online_peers(&base).contains(&lease.peer.id));
+        let route=&projected.exit_routes[0];let mut table=porthub_network::exit_selection::FlowTable::<u64>::new(base.self_.clone());
+        table.configure(route.routing_peers.iter().filter(|id|online.contains(*id)).cloned(),route.selection);
+        assert!(table.available(&lease.peer.id));
+        lease.peer.online=false;let offline=project(&base,&[lease.clone()]);
+        assert!(!online_peers(&offline).contains(&lease.peer.id),"offline projection must replace, not accumulate, old online markers");
     }
 }

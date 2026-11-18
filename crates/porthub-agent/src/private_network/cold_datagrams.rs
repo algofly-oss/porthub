@@ -4,7 +4,7 @@ use super::super::authority_event::{Authority, Domain, Owner};
 use bytes::Bytes;
 use porthub_network::policy::{ExitIntent, FlowId, Packet, Snapshot};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
@@ -45,6 +45,8 @@ pub(super) struct Datagram {
     pub(super) bytes: Bytes,
     pub(super) flow: FlowId,
     pub(super) tag: String,
+    pub(super) syn: Option<u32>,
+    flow_owner: std::sync::Arc<Owner>,
     pub(super) authority: Authority<()>,
     domain: Domain,
     deadline: Instant,
@@ -70,6 +72,7 @@ impl Datagram {
     pub(super) fn valid(&self, now: Instant) -> bool {
         now < self.deadline
             && self.domain.valid()
+            && self.flow_owner.domain().valid()
             && self.authority.check().is_ok()
             && self.age_remaining().is_some()
     }
@@ -83,6 +86,8 @@ impl Datagram {
         let domain = self.domain.clone();
         let deadline = self.deadline;
         let check_domain = domain.clone();
+        let flow_domain = self.flow_owner.clone();
+        let check_flow = flow_domain.clone();
         #[cfg(feature = "private-sparse")]
         let age = self.age.clone();
         #[cfg(feature = "private-sparse")]
@@ -93,10 +98,13 @@ impl Datagram {
                 if check_age.remaining_within(LIFETIME).is_err() {
                     return false;
                 }
-                check_domain.valid() && Instant::now() < deadline && a.check().is_ok()
+                check_domain.valid()
+                    && check_flow.domain().valid()
+                    && Instant::now() < deadline
+                    && a.check().is_ok()
             },
             move || {
-                if !domain.valid() {
+                if !domain.valid() || !flow_domain.domain().valid() {
                     return None;
                 }
                 #[cfg(feature = "private-sparse")]
@@ -115,12 +123,18 @@ impl Datagram {
         porthub_mesh::udp::SendPermit::combine(vec![original, current])
     }
 }
+struct FlowState {
+    syn: Option<u32>,
+    owner: std::sync::Arc<Owner>,
+    deadline: Instant,
+}
 #[derive(Default)]
 pub(super) struct Queue {
     scope: Option<Scope>,
     owner: Option<Owner>,
     items: VecDeque<Datagram>,
     bytes: usize,
+    flows: HashMap<FlowId, FlowState>,
     #[cfg(feature = "private-sparse")]
     clock: Option<std::sync::Arc<dyn super::super::authority_clock::SuspendClock>>,
 }
@@ -129,6 +143,7 @@ impl Queue {
         if self.scope != scope {
             self.owner.take(); // retires permits already queued to a carrier too
             self.items.clear();
+            self.flows.clear();
             self.bytes = 0;
             self.owner = scope.as_ref().map(|_| Owner::new());
             self.scope = scope;
@@ -141,7 +156,7 @@ impl Queue {
         let Some(owner) = self.owner.as_ref() else {
             return false;
         };
-        if !matches!(bytes.get(9), Some(1 | 17)) || bytes.len() > porthub_mesh::MAX_PACKET - 20 {
+        if bytes.len() > porthub_mesh::MAX_PACKET - 20 {
             return false;
         }
         let Some(packet) = Packet::parse(bytes) else {
@@ -162,7 +177,34 @@ impl Queue {
         {
             return false;
         }
+        let syn = packet.opening_sequence();
+        if !matches!(bytes.get(9), Some(1 | 17)) && syn.is_none() {
+            return false;
+        }
         let flow = packet.flow_id();
+        self.items.retain(|item| item.valid(now));
+        self.bytes = self.items.iter().map(|item| item.bytes.len()).sum();
+        self.flows.retain(|_, state| {
+            if state.deadline <= now {
+                state.owner.revoke();
+                return false;
+            }
+            // A sent-and-drained carrier must not consume a cold-flow rate
+            // budget. Outstanding entries/permits retain an Arc explicitly.
+            std::sync::Arc::strong_count(&state.owner) > 1
+        });
+        if self.flows.get(&flow).is_some_and(|state| state.syn != syn) {
+            if let Some(old) = self.flows.remove(&flow) {
+                old.owner.revoke();
+            } // retire OLD carrier SYN too
+        }
+        self.items.retain(|item| item.valid(now));
+        self.bytes = self.items.iter().map(|item| item.bytes.len()).sum();
+        // A retransmitted opening SYN is deduplicated while its first packet
+        // remains queued, including any immutable TCP Fast Open payload.
+        if syn.is_some() && self.flows.get(&flow).is_some_and(|state| state.syn == syn) {
+            return true;
+        }
         let same: Vec<_> = self.items.iter().filter(|item| item.flow == flow).collect();
         if self.items.len() >= PACKETS
             || self.bytes + bytes.len() > BYTES
@@ -172,18 +214,10 @@ impl Queue {
         {
             return false;
         }
-        if same.is_empty() {
-            let mut distinct = Vec::new();
-            for item in &self.items {
-                if !distinct.contains(&item.flow) {
-                    distinct.push(item.flow);
-                }
-            }
-            if distinct.len() >= FLOWS {
-                return false;
-            }
+        if !self.flows.contains_key(&flow) && self.flows.len() >= FLOWS {
+            return false;
         }
-        let tag = super::super::exit_picker::flow_tag(&flow.selection_tag(), None);
+        let tag = super::super::exit_picker::flow_tag(&flow.selection_tag(), syn);
         #[cfg(feature = "private-sparse")]
         let age = match super::super::authority_clock::RequestWindow::start(
             self.clock
@@ -193,10 +227,18 @@ impl Queue {
             Ok(age) => age,
             Err(_) => return false,
         };
+        let state = self.flows.entry(flow).or_insert_with(|| FlowState {
+            syn,
+            owner: std::sync::Arc::new(Owner::new()),
+            deadline: now + LIFETIME,
+        });
+        state.deadline = state.deadline.max(now + LIFETIME); // resource bookkeeping only; per-packet age never changes
         self.items.push_back(Datagram {
             bytes: Bytes::copy_from_slice(bytes),
             flow,
             tag,
+            syn,
+            flow_owner: state.owner.clone(),
             authority: authority.clone(),
             domain: owner.domain(),
             deadline: now + LIFETIME,
@@ -293,6 +335,112 @@ mod tests {
             assert!(q.pop(now).is_none());
         }
         assert!(!q.push(&packet(6, 100, 40), &a, now));
+    }
+    fn syn(sequence: u32, flags: u8) -> Vec<u8> {
+        let mut p = packet(6, 100, 40);
+        p[20..22].copy_from_slice(&100u16.to_be_bytes());
+        p[22..24].copy_from_slice(&443u16.to_be_bytes());
+        p[24..28].copy_from_slice(&sequence.to_be_bytes());
+        p[32] = 0x50;
+        p[33] = flags;
+        p
+    }
+    #[test]
+    fn opening_syn_deduplicates_without_renewal_and_reused_tuple_retires_old_carrier() {
+        let (a, _) = authority();
+        let now = Instant::now();
+        let mut q = Queue::default();
+        q.observe(Some(scope()));
+        assert!(!q.push(&syn(1, 0x12), &a, now));
+        assert!(!q.push(&syn(1, 0x10), &a, now));
+        assert!(q.push(&syn(1, 2), &a, now));
+        let item = q.pop(now).unwrap();
+        let deadline = item.deadline;
+        let first_tag = item.tag.clone();
+        let old = item.permit(porthub_mesh::udp::SendPermit::bounded(
+            || true,
+            || Some(Duration::from_secs(30)),
+        ));
+        q.pending(item);
+        assert!(q.push(&syn(1, 2), &a, now + Duration::from_secs(1)));
+        assert_eq!(q.len(), 1);
+        let item = q.pop(now).unwrap();
+        assert_eq!(item.deadline, deadline);
+        q.pending(item);
+        assert!(q.push(&syn(2, 2), &a, now + Duration::from_secs(1)));
+        assert!(!old.valid());
+        assert_eq!(q.len(), 1);
+        let item = q.pop(now).unwrap();
+        assert_eq!(item.syn, Some(2));
+        assert_ne!(item.tag, first_tag);
+        assert_eq!(&item.bytes[..], &syn(2, 2));
+        let queued = item.permit(porthub_mesh::udp::SendPermit::bounded(
+            || true,
+            || Some(Duration::from_secs(30)),
+        ));
+        assert!(q.push(&syn(3, 2), &a, now + Duration::from_secs(2)));
+        assert!(
+            !queued.valid(),
+            "reused tuple revived an old opening SYN already queued to transport"
+        );
+    }
+    #[test]
+    fn drained_carriers_allow_96_cold_opens_without_a_32_per_five_second_rate_cap() {
+        let (a, _) = authority();
+        let now = Instant::now();
+        let mut q = Queue::default();
+        q.observe(Some(scope()));
+        for port in 1..=96 {
+            assert!(q.push(&packet(17, port, 32), &a, now));
+            let item = q.pop(now).unwrap();
+            let permit = item.permit(porthub_mesh::udp::SendPermit::bounded(
+                || true,
+                || Some(Duration::from_secs(30)),
+            ));
+            assert!(permit.valid());
+            drop(item);
+            drop(permit);
+        }
+        assert_eq!(q.len(), 0);
+        assert!(q.flows.len() <= 1);
+    }
+    #[test]
+    fn retransmitted_syn_does_not_renew_or_duplicate_a_packet_already_in_carrier() {
+        let (a, _) = authority();
+        let now = Instant::now();
+        let mut q = Queue::default();
+        q.observe(Some(scope()));
+        let mut bytes = syn(42, 2);
+        bytes.extend_from_slice(b"TFO");
+        let size = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&size.to_be_bytes());
+        bytes[10..12].fill(0);
+        let mut sum: u32 = bytes[..20]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_be_bytes(*b) as u32)
+            .sum();
+        while sum >> 16 != 0 {
+            sum = (sum & 65535) + (sum >> 16);
+        }
+        bytes[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        assert!(q.push(&bytes, &a, now));
+        let item = q.pop(now).unwrap();
+        assert_eq!(&item.bytes[..], &bytes);
+        let permit = item.permit(porthub_mesh::udp::SendPermit::bounded(
+            || true,
+            || Some(Duration::from_secs(30)),
+        ));
+        drop(item);
+        assert!(q.push(&bytes, &a, now + Duration::from_secs(1)));
+        assert_eq!(q.len(), 0, "same opening SYN already retained by carrier");
+        q.flows
+            .get(&Packet::parse(&bytes).unwrap().flow_id())
+            .unwrap()
+            .owner
+            .revoke();
+        assert!(!permit.valid());
     }
     #[test]
     fn cold_datagram_bounds_are_global_and_per_flow() {

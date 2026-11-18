@@ -581,14 +581,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }else if capture_configured{device.as_ref().unwrap().update_capture_routes(&[]).await?;capture_configured=false;}
                 #[cfg(feature="private-stream")]
                 {authority.check()?;stream_router.as_ref().unwrap().update_pairs_authorized(&snapshot,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
-                online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
+                online_peers = super::exit_plumbing::online_peers(&route_snapshot);
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
                 private_status.dns_rules = snapshot.dns_rules.len();
                 private_status.exit = route_snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id)).map(|route| crate::runtime::ExitStatus {
                     name: route.name.clone(), traffic_mode: route.traffic_mode, selection: match route.selection { porthub_mesh::exit_policy::Selection::Sticky => "sticky", porthub_mesh::exit_policy::Selection::RoundRobin => "round robin", porthub_mesh::exit_policy::Selection::Random => "random" }.into(), state: "pending".into(),
                     peers: route.routing_peers.len()+usize::from(route.tor_enabled && route.traffic_mode.internet()), available: 0, allow_direct_fallback: route.allow_direct_fallback,
-                    peer_names: route.routing_peers.iter().take(16).filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.hostname.clone())).chain((route.tor_enabled && route.traffic_mode.internet()).then(||"Local Tor".into())).collect(),
+                    peer_names: route.routing_peers.iter().take(16).filter_map(|id| route_snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.hostname.clone())).chain((route.tor_enabled && route.traffic_mode.internet()).then(||"Local Tor".into())).collect(),
                 });
                 #[cfg(feature="local-tor")]
                 {
@@ -599,7 +599,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     .map(|route| {
                         exit_traffic_mode = route.traffic_mode;
                         exit_lan_peers = route.routing_peers.iter().filter_map(|id| {
-                            snapshot.peers.iter().find(|peer| &peer.id == id)
+                            route_snapshot.peers.iter().find(|peer| &peer.id == id)
                                 .map(|peer| (id.clone(), peer.lan_networks.clone()))
                         }).collect();
                         let mut peers=route.routing_peers.clone();
@@ -891,14 +891,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 tor.packet(bytes::Bytes::copy_from_slice(&buffer[..size]));continue;
             }
             let overlay_destination=sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination())));
-            // TCP retransmits SYNs; UDP and ICMP need their original cold
-            // datagram retained while the authenticated asynchronous picker runs.
-            if matches!(buffer.get(9),Some(1|17)) && !overlay_destination
+            // Retain only cold UDP/ICMP or an opening SYN while the authenticated
+            // picker runs. Established TCP data and SYN+ACK never enter this buffer.
+            if (matches!(buffer.get(9),Some(1|17))||parsed.opening_sequence().is_some()) && !overlay_destination
                 && peer_ips.get(&profile.peer_id)==Some(&parsed.source())
                 && !by_ip.contains_key(&parsed.destination()) && exit_traffic_mode.permits(parsed.destination())
-                && exit_selection.assigned_peer(&parsed.flow_id(),Instant::now(),None).is_none() {
+                && exit_selection.assigned_peer(&parsed.flow_id(),Instant::now(),parsed.opening_sequence()).is_none() {
                 if let (Some(intent),Some(authority))=(&sparse_exit_intent,&installed_authority) {
-                    let tag=super::exit_picker::flow_tag(&parsed.flow_id().selection_tag(),None);
+                    let tag=super::exit_picker::flow_tag(&parsed.flow_id().selection_tag(),parsed.opening_sequence());
                     if cold_datagrams.push(&buffer[..size],authority,Instant::now()) {
                         sparse_handle.exit_picker().request(&intent.id,&tag,parsed.destination(),false);
                     }
@@ -1048,7 +1048,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let Some(intent)=&sparse_exit_intent else{continue;};
                 let Some(parsed)=Packet::parse(&item.bytes) else{continue;};
                 if !intent.traffic_mode.permits(parsed.destination()) || sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination()))){continue;}
-                let selected=exit_selection.assigned_peer(&item.flow,Instant::now(),None).map(str::to_owned)
+                let selected=exit_selection.assigned_peer(&item.flow,Instant::now(),item.syn).map(str::to_owned)
                     .map(|id|porthub_network::policy::ExitChoice::Peer{id})
                     .or_else(||sparse_handle.exit_picker().request(&intent.id,&item.tag,parsed.destination(),false));
                 let Some(porthub_network::policy::ExitChoice::Peer{id:peer})=selected else{cold_datagrams.pending(item);continue;};
@@ -1060,7 +1060,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let prefer=if mode==super::strategy::Mode::Auto{path_quality.prefer_peer(&peer,default,Instant::now())}else{default};
                 let Some(use_direct)=paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer) else{cold_datagrams.pending(item);continue;};
                 if !item.valid(Instant::now())||work.is_cancelled(){continue;}
-                let assigned=exit_selection.select_for_peer(item.flow,Instant::now(),parsed.flow_ttl(),None,Some(&peer));
+                let assigned=exit_selection.select_for_peer(item.flow,Instant::now(),parsed.flow_ttl(),item.syn,Some(&peer));
                 // Pair/choice publication precedes the next health tick's
                 // availability view. Retain the ORIGINAL datagram, not a new TTL.
                 if assigned.is_none(){cold_datagrams.pending(item);continue;}
@@ -1111,11 +1111,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if sparse_handle.enabled() {
                 if let Some(base)=&sparse_authority {
                     let projection=super::exit_plumbing::project(base,&sparse_handle.exit_leases());
-                    online_peers.extend(projection.peers.iter().filter(|peer|peer.online).map(|peer|peer.id.clone()));
+                    online_peers=super::exit_plumbing::online_peers(&projection);
                     if let Some(intent)=&sparse_exit_intent {
                         let mut peers=projection.exit_routes.iter().find(|route|route.id==intent.id).map(|route|route.routing_peers.clone()).unwrap_or_default();
                         #[cfg(feature="local-tor")]
                         if intent.tor_enabled&&intent.traffic_mode.internet(){peers.push(super::tor_exit::LOCAL_TOR.into());}
+                        exit_lan_peers=peers.iter().filter_map(|id|projection.peers.iter().find(|peer|&peer.id==id).map(|peer|(id.clone(),peer.lan_networks.clone()))).collect();
+                        if let Some(status)=private_status.exit.as_mut() {
+                            status.peer_names=peers.iter().take(16).filter_map(|id|projection.peers.iter().find(|peer|&peer.id==id).map(|peer|peer.hostname.clone())).collect();
+                            #[cfg(feature="local-tor")]
+                            if peers.iter().any(|peer|peer==super::tor_exit::LOCAL_TOR){status.peer_names.push("Local Tor".into());}
+                        }
                         exit_route=Some((peers,intent.selection,intent.allow_direct_fallback));
                     }
                     #[cfg(target_os="linux")]
