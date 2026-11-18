@@ -180,6 +180,72 @@ async fn read_stable(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn retained_publication_reacquires_allocation_without_blocking_contender() {
+        // Construct only a client handle; this test issues NO Mongo operation.
+        // Port1 also prevents accidentally addressing an installed Mongo service.
+        let options =
+            mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:1/?directConnection=true")
+                .await
+                .unwrap();
+        let client = mongodb::Client::with_options(options).unwrap();
+        let app = App::new(
+            crate::config::Config::default(),
+            client.database("unused_fence_test"),
+        );
+        let owner = ObjectId::new();
+        let mut migration = exclusive(&app, owner).await.ok().unwrap();
+        assert!(migration.require_allocation().is_ok());
+        migration.release_allocation();
+        assert!(migration.require_allocation().is_err());
+
+        let workspace = owner.to_hex();
+        let publication = app.private_sparse.workspace_fences.acquire(&workspace);
+        tokio::pin!(publication);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut publication)
+                .await
+                .is_err()
+        );
+        {
+            let allocation = app.private_network_lock.lock().await;
+            let reacquire = migration.reacquire_allocation();
+            tokio::pin!(reacquire);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut reacquire)
+                    .await
+                    .is_err()
+            );
+            // A global holder cannot queue behind the retained publication owner.
+            let contender = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stable_with_allocation(&app, owner),
+            )
+            .await
+            .expect("allocation holder waited for publication");
+            assert!(matches!(contender, Err(error) if error.status == StatusCode::CONFLICT));
+            drop(allocation);
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut reacquire)
+                .await
+                .unwrap();
+        }
+        assert!(migration.require_allocation().is_ok());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut publication)
+                .await
+                .is_err()
+        );
+        drop(migration);
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(1), publication)
+                .await
+                .unwrap()
+                .ok()
+                .unwrap(),
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn same_workspace_waits_but_other_workspace_progresses() {
         let fences = Arc::new(Fences::default());
         let first = fences.acquire("a").await.ok().unwrap();
