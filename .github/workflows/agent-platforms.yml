@@ -80,6 +80,8 @@ jobs:
       has_native: ${{ steps.reuse.outputs.has_native || steps.select.outputs.has_native }}
       has_linux: ${{ steps.reuse.outputs.has_linux || steps.select.outputs.has_linux }}
       reuse_plan: ${{ steps.reuse.outputs.plan }}
+      local_native: ${{ steps.select.outputs.local_native }}
+      has_local_native: ${{ steps.select.outputs.has_local_native }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -127,11 +129,72 @@ jobs:
           test "$VERIFY_ONLY" != true
           python3 scripts/test_reuse_client_artifacts.py
           python3 scripts/reuse-client-artifacts.py --run-id "$SOURCE_RUN"
+      - name: Request native validation before choosing any hosted platform
+        id: local-request
+        if: inputs.core_only == true && inputs.verify_only != true && inputs.reuse_run_id == '' && vars.PORTHUB_TRUSTED_NATIVE_DEPOT != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, pathlib, subprocess
+          source = subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          pathlib.Path('native-build-request.json').write_text(json.dumps({
+              'schema_version':1,'repository':os.environ['GITHUB_REPOSITORY'],
+              'run_id':int(os.environ['GITHUB_RUN_ID']),'head_sha':os.environ['GITHUB_SHA'],
+              'source_revision':source,'purpose':'core_only_validation'},sort_keys=True))
+          PYTHON
+      - name: Publish bounded core-only native validation request
+        if: steps.local-request.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-request
+          path: native-build-request.json
+          if-no-files-found: error
+          retention-days: 1
       - id: select
         if: inputs.reuse_run_id == ''
         env:
           PORTHUB_BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
+          PORTHUB_CORE_ONLY: ${{ inputs.core_only }}
+          PORTHUB_VERIFY_ONLY: ${{ inputs.verify_only }}
+          PORTHUB_LOCAL_DEPOT: ${{ vars.PORTHUB_TRUSTED_NATIVE_DEPOT }}
+          PORTHUB_LOCAL_CORE_WAIT_SECONDS: ${{ steps.local-request.outcome == 'success' && '1800' || '0' }}
         run: python3 scripts/select-agent-platforms.py
+      - name: Retain source-pinned locally validated native cores
+        if: steps.select.outputs.has_local_native == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-core-native-stage
+          path: local-core-native/
+          if-no-files-found: error
+          retention-days: 3
+  local-native-core:
+    name: ${{ matrix.artifact }} (local native)
+    needs: [select-platforms]
+    if: inputs.core_only == true && inputs.verify_only != true && needs.select-platforms.outputs.has_local_native == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.select-platforms.outputs.local_native) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: local-core-native-stage
+          path: local-core-native
+      - name: Reverify exact native tests, executable hash and source closure
+        env:
+          PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: python3 scripts/local-core-lane.py verify --root "$GITHUB_WORKSPACE" --source "$PORTHUB_SOURCE_REVISION" --target "$TARGET" --directory "local-core-native/$ARTIFACT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-${{ matrix.artifact }}
+          path: local-core-native/${{ matrix.artifact }}/
+          if-no-files-found: error
+          retention-days: 3
   media-helpers:
     needs: [select-platforms]
     if: inputs.promote_run_id == '' && inputs.verify_only != true && inputs.core_only != true && (inputs.platform == '' || inputs.platform == 'all')

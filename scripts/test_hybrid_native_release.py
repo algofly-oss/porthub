@@ -46,6 +46,42 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(r.run_once(root,REPOSITORY,'main',config,state)['status'],'no_eligible_prepared_release')
                 commands.assert_not_called();loader.assert_not_called()
 
+    def test_native_core_request_uses_explicit_validation_command_and_new_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config=root/'builders.json'
+            config.write_text(json.dumps({'builders':[{'target':'native','build':['plain-build'],'validation_build':['validated-build']}]}));config.chmod(0o600)
+            state=root/'state';state.mkdir(mode=0o700)
+            (state/'checkpoint.json').write_text(json.dumps({'schema_version':1,'sources':{SOURCE:{'complete':True,'run_id':122}}}))
+            controller=Mock();controller.control.return_value={'targets':{'native':{'status':'local_verified'}}}
+            request={'schema_version':1,'source_revision':SOURCE,'purpose':'core_only_validation'}
+            def git(repo,*args):
+                if args[:3]==('remote','get-url','origin'):return 'git@github.com:'+REPOSITORY+'.git'
+                return ''
+            metadata=self.run_metadata(path='.github/workflows/agent-platforms.yml',event='workflow_dispatch')
+            with patch.object(r,'requests',return_value=iter([({},metadata)])),patch.object(r,'read_request',return_value=request),patch.object(r,'git',side_effect=git),patch.object(r,'load_controller',return_value=controller):
+                result=r.run_once(root,REPOSITORY,'main',config,state)
+            self.assertEqual(result['status'],'processed')
+            call=controller.control.call_args.args
+            self.assertEqual(call[2]['builders'][0]['build'],['validated-build'])
+            self.assertEqual(call[3].name,'core-validation-outputs')
+            checkpoint=json.loads((state/'checkpoint.json').read_text())
+            self.assertTrue(checkpoint['sources'][SOURCE]['complete'])
+            self.assertTrue(checkpoint['sources'][SOURCE+':core_only_validation']['complete'])
+
+    def test_plain_builder_is_not_silently_promoted_to_validation(self):
+        original={'builders':[{'target':'a','build':['plain']},{'target':'b','validation_build':['exact','--validate-core']}]}
+        selected=r.validation_config(original)
+        self.assertEqual([row['target'] for row in selected['builders']],['b'])
+        self.assertEqual(selected['builders'][0]['build'],['exact','--validate-core'])
+        self.assertEqual(original['builders'][0]['build'],['plain'])
+
+    def test_active_main_core_workflow_is_eligible_but_not_arbitrary_workflow(self):
+        artifact={'name':'native-build-request','expired':False,'id':456,'size_in_bytes':1024,'digest':'sha256:'+'a'*64}
+        for metadata in [self.run_metadata(path='.github/workflows/agent-platforms.yml',event='workflow_dispatch'),self.run_metadata()]:
+            with patch.object(r,'gh',side_effect=[{'workflow_runs':[metadata]},{'artifacts':[artifact]}]) as gh:
+                self.assertEqual(len(list(r.requests(REPOSITORY,'main'))),1)
+                self.assertEqual(gh.call_count,2)
+
     def test_foreign_local_origin_stops_before_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);config=root/'config';config.write_text('{"builders":[]}');config.chmod(0o600)

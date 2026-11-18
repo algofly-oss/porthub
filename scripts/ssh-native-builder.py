@@ -175,7 +175,11 @@ if job['tools']['vcvars']:
  env['PATH']=str(pathlib.Path(sys.executable).parent)+os.pathsep+str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
 try:
  with (stage/'worker.log').open('wb') as log:
-  subprocess.run([sys.executable,str(source/'scripts/hybrid-native-build.py'),'worker','--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--tool','core','--timeout-seconds',str(job['timeout'])],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
+  if job.get('validate_core'):
+   argv=[sys.executable,str(source/'scripts/native-core-validation.py'),'--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--budget-seconds',str(job['timeout'])]
+  else:
+   argv=[sys.executable,str(source/'scripts/hybrid-native-build.py'),'worker','--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--tool','core','--timeout-seconds',str(job['timeout'])]
+  subprocess.run(argv,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
  archive=stage/'components.zip'
  (stage/'result.json').write_text(json.dumps(dict(revision=job['revision'],target=job['tools']['target'],sha256=sha(archive),size=archive.stat().st_size)))
 finally:
@@ -200,10 +204,10 @@ print(json.dumps(r))
     return result
 
 
-def build(host, root, revision, state, timeout):
+def build(host, root, revision, state, timeout, validate_core=False):
     if state.exists() or state.is_symlink():
         record=json.loads(state.read_text())
-        if record['revision']!=revision or record['target']!=host['target']:
+        if record['revision']!=revision or record['target']!=host['target'] or record.get('validate_core',False)!=validate_core:
             raise ValueError('Retained build state identity mismatch')
         record['result']=remote_result(host,record)
         state.write_text(json.dumps(record))
@@ -213,7 +217,7 @@ def build(host, root, revision, state, timeout):
     stage = tools['home'].replace('\\', '/') + '/.porthub-native-build-' + nonce
     mkdir = "import pathlib,json,time;p=pathlib.Path(%r);p.mkdir(mode=0o700);(p/'owner').write_text(%r);(p/'active.json').write_text(json.dumps(dict(deadline=time.time()+%r)))" % (stage, nonce, timeout+180)
     inline(host, mkdir)
-    record = dict(schema_version=1, revision=revision, target=host['target'], stage=stage, nonce=nonce, python=tools['python'])
+    record = dict(schema_version=1, revision=revision, target=host['target'], stage=stage, nonce=nonce, python=tools['python'],validate_core=validate_core)
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(json.dumps(record))
     with tempfile.TemporaryDirectory(prefix='porthub-ssh-build-') as directory:
@@ -300,13 +304,14 @@ def main():
     p.add_argument('--state',type=Path)
     p.add_argument('--archive',type=Path)
     p.add_argument('--timeout',type=int,default=780)
+    p.add_argument('--validate-core',action='store_true',help='Execute the complete applicable native core-only validation before packaging')
     a=p.parse_args(); host=config(a.config,a.host)
     if a.mode=='probe': result=probe(host)
     else:
         if not a.revision or not REV.fullmatch(a.revision) or not a.state: p.error('revision/state required')
         if a.mode=='build':
             if not a.root or not 1<=a.timeout<=1640: p.error('root and bounded timeout required')
-            result=build(host,a.root,a.revision,a.state,a.timeout)
+            result=build(host,a.root,a.revision,a.state,a.timeout,a.validate_core)
         elif a.mode=='cleanup':
             record=json.loads(a.state.read_text())
             if record['revision']!=a.revision or record['target']!=host['target']: raise ValueError('Cleanup identity mismatch')

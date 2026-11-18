@@ -36,12 +36,12 @@ def git(root,*args):
 def requests(repository,branch,completed_runs=()):
     # One small request when quiet. Only active trusted-main runs cause an
     # artifact lookup; never walk twenty completed runs every timer tick.
-    runs=gh(repository,'/actions/workflows/continuous-release.yml/runs?branch='+branch+'&per_page=10').get('workflow_runs',[])
+    runs=gh(repository,'/actions/runs?branch='+branch+'&per_page=10').get('workflow_runs',[])
     if not isinstance(runs,list) or len(runs)>10:raise ValueError('Invalid workflow run list')
     for run in runs:
         run_id=run.get('id')
         if run_id in completed_runs:continue
-        if (type(run_id)is not int or run.get('path')!='.github/workflows/continuous-release.yml'
+        if (type(run_id)is not int or run.get('path') not in ('.github/workflows/continuous-release.yml','.github/workflows/agent-platforms.yml')
                 or run.get('head_branch')!=branch or run.get('event') not in ('push','workflow_dispatch')
                 or run.get('status') not in ('queued','in_progress')
                 or (run.get('head_repository') or {}).get('full_name')!=repository):continue
@@ -72,7 +72,23 @@ def read_request(repository,artifact,run):
             or request.get('run_id')!=run['id'] or request.get('head_sha')!=run['head_sha']
             or not re.fullmatch('[a-f0-9]{40}',request.get('source_revision',''))):
         raise ValueError('Prepared request identity mismatch')
+    purpose=request.get('purpose','release_build')
+    if purpose not in ('release_build','core_only_validation') or (run['path'].endswith('agent-platforms.yml') and purpose!='core_only_validation'):
+        raise ValueError('Native request workflow/purpose mismatch')
     return request
+
+
+def validation_config(config):
+    # Commands remain operator-owned. Never inject flags into an arbitrary
+    # builder command or treat a plain build as completed native validation.
+    result=dict(config);builders=[]
+    for row in config['builders']:
+        command=row.get('validation_build')
+        if command:
+            if not isinstance(command,list) or not command or not all(isinstance(value,str) for value in command): raise ValueError('Invalid validation builder command')
+            builders.append(dict(row,build=command))
+    result['builders']=builders
+    return result
 
 
 def load_controller():
@@ -109,7 +125,11 @@ def run_once(root,repository,branch,config_path,state):
         complete_runs={row.get('run_id') for row in current['sources'].values() if row.get('complete')}
         for artifact,run in requests(repository,branch,complete_runs):
             request=read_request(repository,artifact,run);source=request['source_revision']
-            previous=current['sources'].get(source,{})
+            purpose=request.get('purpose','release_build')
+            key=source+(':core_only_validation' if purpose=='core_only_validation' else '')
+            active_config=validation_config(config) if purpose=='core_only_validation' else config
+            if purpose=='core_only_validation' and not active_config['builders']: continue
+            previous=current['sources'].get(key,{})
             if previous.get('complete') or time.time()-previous.get('attempted_at',0)<60:continue
             # Never execute a request from a fork/PR/arbitrary workflow ref. The
             # prepared commit must actually belong to the operator's main branch.
@@ -131,12 +151,12 @@ def run_once(root,repository,branch,config_path,state):
             checkout=owned/'repo'
             if not checkout.exists():git(root,'worktree','add','--detach',str(checkout),source)
             controller=load_controller()
-            report=controller.control(checkout,source,config,owned/'outputs')
-            current['sources'][source]={'attempted_at':int(time.time()),'run_id':run['id'],
-                'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
+            report=controller.control(checkout,source,active_config,owned/('core-validation-outputs' if purpose=='core_only_validation' else 'outputs'))
+            current['sources'][key]={'attempted_at':int(time.time()),'run_id':run['id'],
+                'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
             current['sources']=dict(list(current['sources'].items())[-32:])
             pending=state/'checkpoint.pending.json';pending.write_text(json.dumps(current,sort_keys=True));pending.replace(checkpoint)
-            return {'status':'processed','source_revision':source,'run_id':run['id'],'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
+            return {'status':'processed','source_revision':source,'run_id':run['id'],'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
         return {'status':'no_eligible_prepared_release'}
 
 
