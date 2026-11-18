@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically check prepared PortHub release metadata
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=10s
+Unit=porthub-native-build.service
+
+[Install]
+WantedBy=timers.target

@@ -39,6 +39,16 @@ class NativeBuildTests(unittest.TestCase):
         builder.previous_builds.assert_called_once()
         self.assertEqual(result['verified_builds'],1)
 
+    def test_linux_core_does_not_prepare_terminal_bundle(self):
+        builder = Mock()
+        builder.planner.shipping_environment.return_value = {'CARGO_INCREMENTAL':'0'}
+        builder.planner.read_recipes.return_value = {'core':{},'terminal':{}}
+        builder.previous_builds.return_value = {'core':{}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(module,'load',return_value=builder), patch.object(module.platform,'system',return_value='Linux'), patch.object(module.platform,'machine',return_value='x86_64'), patch.dict(module.os.environ,{'CARGO_INCREMENTAL':''}), patch.object(module.subprocess,'run') as process:
+            module.run(Path(directory),'a'*40,Path(directory)/'output',True,['core'])
+            process.assert_not_called()
+        builder.run.assert_called_once()
+
     def test_reject_conflicting_environment_and_short_revision(self):
         builder = Mock()
         builder.planner.shipping_environment.return_value = {'CARGO_INCREMENTAL':'0'}

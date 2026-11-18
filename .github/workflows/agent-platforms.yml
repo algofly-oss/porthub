@@ -468,6 +468,7 @@ jobs:
         shell: bash
         env:
           CARGO_INCREMENTAL: "0"
+          PORTHUB_LOCAL_DEPOT: ${{ vars.PORTHUB_TRUSTED_NATIVE_DEPOT }}
         run: |
           history=()
           if [ -f "$RUNNER_TEMP/porthub-catalog-history/catalog.json" ]; then history=(--catalog-history "$RUNNER_TEMP/porthub-catalog-history/catalog.json"); fi
@@ -475,6 +476,11 @@ jobs:
           if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
           tools=()
           if [ '${{ inputs.core_only }}' = 'true' ]; then tools=(--tool core); fi
+          manifest=""
+          if [ -n "$PORTHUB_LOCAL_DEPOT" ]; then manifest="${PORTHUB_LOCAL_DEPOT%/}/$PORTHUB_SOURCE_REVISION/manifest.json"; fi
+          if python scripts/run-with-timeout.py 170 python scripts/hybrid-native-build.py restore --source-revision "$PORTHUB_SOURCE_REVISION" --target '${{ matrix.target }}' --manifest-url "$manifest" --trusted-depot "$PORTHUB_LOCAL_DEPOT" --output local-component-builds "${previous[@]}"; then
+            previous=(--previous local-component-builds)
+          fi
           python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}" "${history[@]}" "${tools[@]}"
       - name: Restore shipping Linux terminal runtime
         id: shipping_terminal_cache
@@ -488,6 +494,7 @@ jobs:
         shell: bash
         env:
           CARGO_INCREMENTAL: "0"
+          PORTHUB_LOCAL_DEPOT: ${{ vars.PORTHUB_TRUSTED_NATIVE_DEPOT }}
         run: |
           shipping_target="$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')"
           terminal_bundle="$(python3 scripts/build-terminal-helper.py --target "$shipping_target")"
@@ -502,6 +509,11 @@ jobs:
           if [ -f "$RUNNER_TEMP/porthub-catalog-history/catalog.json" ]; then history=(--catalog-history "$RUNNER_TEMP/porthub-catalog-history/catalog.json"); fi
           previous=()
           if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          manifest=""
+          if [ -n "$PORTHUB_LOCAL_DEPOT" ]; then manifest="${PORTHUB_LOCAL_DEPOT%/}/$PORTHUB_SOURCE_REVISION/manifest.json"; fi
+          if python3 scripts/run-with-timeout.py 170 python3 scripts/hybrid-native-build.py restore --source-revision "$PORTHUB_SOURCE_REVISION" --target "$shipping_target" --manifest-url "$manifest" --trusted-depot "$PORTHUB_LOCAL_DEPOT" --output local-component-builds "${previous[@]}"; then
+            previous=(--previous local-component-builds)
+          fi
           python3 scripts/build-component-platform.py --target "$shipping_target" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}" "${history[@]}"
           python3 scripts/verify-static-components.py --builds component-builds
       - name: Save shipping Linux terminal runtime

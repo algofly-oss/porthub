@@ -54,12 +54,12 @@ def run(root, revision, output, execute=False, tools=None, previous=None):
             if os.environ.get(key) not in (None, '', value):
                 raise ValueError('Conflicting shipping compiler setting: ' + key)
             os.environ[key] = value
-        if platform.system() == 'Linux':
+        if platform.system() != 'Windows' and 'terminal' in selected:
             terminal = subprocess.run([sys.executable, str(root/'scripts/build-terminal-helper.py'), '--target', target],
                                       cwd=root, check=True, capture_output=True, text=True)
             bundle = terminal.stdout.strip().splitlines()[-1]
-            if not Path(bundle).is_dir():
-                raise ValueError('Terminal builder did not return a bundle directory')
+            if not Path(bundle).is_file():
+                raise ValueError('Terminal builder did not return a bundle file')
             os.environ['PORTHUB_TERMINAL_BUNDLE'] = bundle
         builder.run(root, target, revision, output, previous, selected)
         # Verify every resulting binary against the existing raw-hash/size receipt

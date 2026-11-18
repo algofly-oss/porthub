@@ -1,0 +1,11 @@
+[Unit]
+Description=Check prepared PortHub release for trusted native build requests
+
+[Service]
+Type=oneshot
+# Copy to the operator's user unit directory and replace all /owned paths.
+# This template is not installed or enabled by the repository.
+ExecStart=/usr/bin/python3 /owned/trusted/scripts/hybrid-native-release.py --root /owned/repository --repository algofly-oss/porthub --config /owned/private/builders.json --state /owned/private/native-state
+TimeoutStartSec=35min
+UMask=0077
+Nice=10

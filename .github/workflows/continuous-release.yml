@@ -121,6 +121,28 @@ jobs:
                   command += ['--previous-core-build', str(directory)]
           subprocess.run(command, check=True)
           PY
+      - name: Record prepared source for trusted native controllers
+        if: steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        env:
+          PREPARED_REVISION: ${{ steps.release.outputs.revision || steps.validation.outputs.revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          source = os.environ['PREPARED_REVISION']
+          if not re.fullmatch('[a-f0-9]{40}', source): raise SystemExit('Invalid prepared source')
+          pathlib.Path('native-build-request.json').write_text(json.dumps({
+              'schema_version': 1, 'repository': os.environ['GITHUB_REPOSITORY'],
+              'run_id': int(os.environ['GITHUB_RUN_ID']), 'head_sha': os.environ['GITHUB_SHA'],
+              'source_revision': source}, sort_keys=True))
+          PY
+      - name: Publish bounded native build request metadata
+        if: steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-request
+          path: native-build-request.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Retain verified prior builds for x86_64
         if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
         uses: actions/upload-artifact@v4
