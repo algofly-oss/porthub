@@ -80,7 +80,12 @@ home=pathlib.Path.home()
 cargo=shutil.which('cargo') or str(home/'.cargo/bin'/('cargo.exe' if os.name=='nt' else 'cargo'))
 rustc=shutil.which('rustc') or str(home/'.cargo/bin'/('rustc.exe' if os.name=='nt' else 'rustc'))
 for exe in (cargo,rustc): subprocess.run([exe,'--version'],check=True,capture_output=True,timeout=3)
-if not shutil.which('git'): raise RuntimeError('Git unavailable')
+git=shutil.which('git')
+if not git and os.name=='nt':
+ candidates=[pathlib.Path(os.environ.get('ProgramFiles','C:/Program Files'))/'Git/cmd/git.exe',pathlib.Path(os.environ.get('ProgramFiles','C:/Program Files'))/'Git/bin/git.exe',pathlib.Path(os.environ.get('LOCALAPPDATA',str(home/'AppData/Local')))/'Programs/Git/cmd/git.exe']
+ git=next((str(p) for p in candidates if p.is_file()),None)
+if not git: raise RuntimeError('Git unavailable')
+subprocess.run([git,'--version'],check=True,capture_output=True,timeout=3)
 vcvars=None
 if os.name=='nt':
  vs=pathlib.Path(os.environ.get('ProgramFiles(x86)','C:/Program Files (x86)'))/'Microsoft Visual Studio/Installer/vswhere.exe'
@@ -90,7 +95,7 @@ if os.name=='nt':
 elif not shutil.which('clang') and platform.system()=='Darwin': raise RuntimeError('Clang unavailable')
 arch={'arm64':'aarch64','aarch64':'aarch64','amd64':'x86_64','x86_64':'x86_64'}[platform.machine().lower()]
 target=arch+{'Darwin':'-apple-darwin','Windows':'-pc-windows-msvc','Linux':'-unknown-linux-musl'}[platform.system()]
-print(json.dumps(dict(python=sys.executable,cargo=cargo,rustc=rustc,vcvars=vcvars,target=target,home=str(home))))
+print(json.dumps(dict(python=sys.executable,git=git,cargo=cargo,rustc=rustc,vcvars=vcvars,target=target,home=str(home))))
 '''
 
 
@@ -148,16 +153,17 @@ def sha(p):
  with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
 if sha(stage/'source.pack')!=job['pack_sha256']: raise RuntimeError('Source pack mismatch')
 source=stage/'source'
+git=job['tools'].get('git','git')
 source.mkdir()
-subprocess.run(['git','init','--quiet',str(source)],check=True)
-subprocess.run(['git','-C',str(source),'config','core.autocrlf','false'],check=True)
-subprocess.run(['git','-C',str(source),'config','core.eol','lf'],check=True)
-with (stage/'source.pack').open('rb') as f: subprocess.run(['git','-C',str(source),'unpack-objects','-q'],stdin=f,check=True)
+subprocess.run([git,'init','--quiet',str(source)],check=True)
+subprocess.run([git,'-C',str(source),'config','core.autocrlf','false'],check=True)
+subprocess.run([git,'-C',str(source),'config','core.eol','lf'],check=True)
+with (stage/'source.pack').open('rb') as f: subprocess.run([git,'-C',str(source),'unpack-objects','-q'],stdin=f,check=True)
 (source/'.git/shallow').write_text(job['revision']+'\\n')
-subprocess.run(['git','-C',str(source),'update-ref','HEAD',job['revision']],check=True)
-subprocess.run(['git','-C',str(source),'reset','--hard',job['revision']],check=True,stdout=subprocess.DEVNULL)
+subprocess.run([git,'-C',str(source),'update-ref','HEAD',job['revision']],check=True)
+subprocess.run([git,'-C',str(source),'reset','--hard',job['revision']],check=True,stdout=subprocess.DEVNULL)
 env=os.environ.copy()
-env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+env.get('PATH','')
+env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
 env.update(CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TARGET_DIR=str(stage/'target'),RUST_MIN_STACK='33554432')
 if job['tools']['vcvars']:
  env={key.upper():value for key,value in env.items()}
@@ -166,7 +172,7 @@ if job['tools']['vcvars']:
  for line in text.splitlines():
   if '=' in line and not line.startswith('='):
    key,value=line.split('=',1); env[key.upper()]=value
- env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+env.get('PATH','')
+ env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
 try:
  with (stage/'worker.log').open('wb') as log:
   subprocess.run([sys.executable,str(source/'scripts/hybrid-native-build.py'),'worker','--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--tool','core','--timeout-seconds',str(job['timeout'])],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
