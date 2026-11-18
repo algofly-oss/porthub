@@ -133,7 +133,7 @@ def control(root, source, config, output):
     revision(source)
     load('component-build-plan').require_clean_source(root, source)
     prior = None
-    if output.exists():
+    if output.exists() and any(output.iterdir()):
         prior = json.loads((output/'manifest.json').read_text())
         if prior.get('source_revision') != source or prior.get('schema_version') != 1:
             raise ValueError('Controller resume source mismatch')
@@ -145,6 +145,11 @@ def control(root, source, config, output):
         raise ValueError('Depot base URL cannot contain a query')
     output.mkdir(parents=True, exist_ok=True)
     manifest = {'schema_version': 1, 'source_revision': source, 'targets': {}}
+    if prior is None:
+        # Record the exact revision before any remote work can be interrupted.
+        pending = output/'manifest.pending.json'
+        pending.write_text(json.dumps(manifest, sort_keys=True))
+        pending.replace(output/'manifest.json')
     report = {'schema_version': 1, 'source_revision': source, 'targets': {}}
     targets = set()
     for builder in config['builders']:

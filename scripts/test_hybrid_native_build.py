@@ -64,6 +64,19 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(again['targets'][TARGET]['status'],'local_verified_reused')
         self.assertEqual(calls.count('build'),1)
 
+    def test_interrupted_first_probe_can_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root/'output'
+            output.mkdir()
+            with patch.object(h, 'load'), patch.object(h, 'command', side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    h.control(root, SOURCE, self.config(), output)
+            self.assertEqual(json.loads((output/'manifest.json').read_text())['source_revision'], SOURCE)
+            with patch.object(h, 'load'), patch.object(h, 'command', side_effect=OSError):
+                result = h.control(root, SOURCE, self.config(), output)
+            self.assertEqual(result['targets'][TARGET]['failed_phase'], 'probe')
+
     def test_fast_builder_publishes_before_slow_builder_finishes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);source=self.fixture(root);published=threading.Event()
