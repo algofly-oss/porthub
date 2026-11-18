@@ -5,6 +5,20 @@ from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('native_gate',pathlib.Path(__file__).with_name('private-sparse-native-lifecycle.py'))
 gate=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(gate)
 class Outer(unittest.TestCase):
+ def test_native_approval_is_typed_and_sparse_default_closure_stays_closed(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=pathlib.Path(temp);agent=root/'crates/porthub-agent';module=agent/'src/private_network';module.mkdir(parents=True)
+   cargo=agent/'Cargo.toml';source=module/'stream_offer.rs'
+   cargo.write_text('[features]\ndefault=["private-stream"]\nprivate-stream=[]\nprivate-sparse=[]\n')
+   for value in ['true','false']:
+    source.write_text('const NATIVE_LIFECYCLE_APPROVED: bool = '+value+';\n')
+    self.assertEqual(gate.native_approval(root),value=='true')
+   source.write_text('const NATIVE_LIFECYCLE_APPROVED: bool = std::env::var("BYPASS");\n')
+   with self.assertRaisesRegex(RuntimeError,'typed'):gate.native_approval(root)
+   source.write_text('const NATIVE_LIFECYCLE_APPROVED: bool = true;\n')
+   cargo.write_text('[features]\ndefault=["middle"]\nmiddle=["private-sparse"]\nprivate-sparse=[]\n')
+   with self.assertRaisesRegex(RuntimeError,'default closure'):gate.native_approval(root)
+
  def test_checked_out_native_source_inputs_exist_for_each_contract(self):
   for contract in gate.TESTS:
    with self.subTest(contract=contract):gate.source_guard(contract)

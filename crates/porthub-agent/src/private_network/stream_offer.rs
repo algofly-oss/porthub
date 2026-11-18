@@ -1,5 +1,5 @@
 //! Native-owner-qualified negotiation, independent of ACL authorization.
-//! Release approval stays closed until the native lifecycle gates are proven.
+//! Native lifecycle evidence: docs/verification/private-sparse-native-approval.md.
 use super::{super::authority_event::Authority, super::device::Tun, Snapshot};
 use anyhow::{ensure, Result};
 use std::{
@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-const NATIVE_LIFECYCLE_APPROVED: bool = false;
+const NATIVE_LIFECYCLE_APPROVED: bool = true;
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     workspace: String,

@@ -3,10 +3,10 @@
 Default/source validation performs NO network/device/configuration operations.
 The exact ignored tests use production adapter/route/resolver implementations.
 """
-import argparse, hashlib, importlib.util, json, os, pathlib, platform, re, shutil, signal, subprocess, sys, tempfile, threading, time, uuid
+import argparse, hashlib, importlib.util, json, os, pathlib, platform, re, shutil, signal, subprocess, sys, tempfile, threading, time, tomllib, uuid
 PURPOSE='reviewed-disposable-sparse-lifecycle-v1'
 COMMAND_DEADLINE=None
-INPUTS=['Cargo.lock','rust-toolchain.toml','crates/porthub-agent/Cargo.toml',
+INPUTS=['docs/verification/private-sparse-native-approval.md','Cargo.lock','rust-toolchain.toml','crates/porthub-agent/Cargo.toml',
  'scripts/private-sparse-native-lifecycle.py','scripts/private-sparse-native-netns.py',
  *['crates/porthub-agent/src/private_network/'+name for name in ['native_lifecycle_fixture.rs','native_desktop_lifecycle_fixture.rs','native_resolver_lifecycle_fixture.rs','device.rs','device_windows.rs','device_macos.rs','address_route_macos.rs','owned_packet_loop.rs','native_source.rs','interfaces_windows.rs','interfaces_macos.rs','route_debounce.rs','topology.rs','dns.rs','dns_convergence_macos.rs','dns_windows.rs','windows_nrpt.rs','windows_nrpt.ps1','windows_state.rs','native_ownership.rs','native_owner.rs','stream_offer.rs']],
  'crates/porthub-network/src/native_repair.rs',
@@ -150,13 +150,26 @@ def exact_executable(build):
  binary=found[0]
  if not binary.is_file() or binary.stat().st_size>256*1024*1024:raise RuntimeError('native test executable invalid')
  return binary
+def native_approval(root):
+ source=(root/'crates/porthub-agent/src/private_network/stream_offer.rs').read_text()
+ declarations=re.findall(r'^const NATIVE_LIFECYCLE_APPROVED:\s*bool\s*=\s*(true|false)\s*;',source,re.M)
+ if len(declarations)!=1:raise RuntimeError('expected one typed compile-time native approval boolean')
+ features=tomllib.loads((root/'crates/porthub-agent/Cargo.toml').read_text()).get('features',{})
+ pending=list(features.get('default',[]));seen=set()
+ while pending:
+  feature=pending.pop()
+  if feature in seen:continue
+  seen.add(feature);pending.extend(features.get(feature,[]))
+ if 'private-sparse' in seen:raise RuntimeError('experimental sparse feature must remain outside default closure')
+ return declarations[0]=='true'
+
 def source_guard(contract):
  root=pathlib.Path(__file__).resolve().parents[1]
  for name in INPUTS:
   if not (root/name).is_file():raise RuntimeError('native source input absent: '+name)
  fixture=root/'crates/porthub-agent/src/private_network'/('native_resolver_lifecycle_fixture.rs' if contract=='linux' else 'native_desktop_lifecycle_fixture.rs')
  if not fixture.is_file():raise RuntimeError('actual native fixture source absent')
- if not re.search(r'const NATIVE_LIFECYCLE_APPROVED:\s*bool\s*=\s*false\s*;',fixture.with_name('stream_offer.rs').read_text()):raise RuntimeError('native production approval must remain false during fixture validation')
+ native_approval(root)
  for name in TESTS[contract]:
   leaf=name.split('::')[-1]
   source=fixture if 'dns_windows' not in name else fixture.with_name('dns_windows.rs')
