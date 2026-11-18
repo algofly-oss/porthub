@@ -322,6 +322,7 @@ pub fn stable_source_id(kind: Kind, hardware: &str, endpoint: &str) -> String {
     hash.update(match kind {
         Kind::Microphone => b"microphone" as &[u8],
         Kind::Camera => b"camera",
+        Kind::Speaker => b"speaker",
     });
     for value in [hardware, endpoint] {
         hash.update((value.len() as u64).to_be_bytes());
