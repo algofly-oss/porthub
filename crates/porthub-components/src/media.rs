@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Microphone,
     Camera,
+    Speaker,
 }
 /// Readonly enumeration never grants microphone permission. A supported source
 /// can be requested explicitly while permission is unknown; the OS decides on use.
@@ -65,7 +66,7 @@ impl LocalSource {
     pub fn valid(&self) -> bool {
         self.device.valid()
             && match self.device.kind {
-                Kind::Microphone => self.camera_identity.is_none(),
+                Kind::Microphone | Kind::Speaker => self.camera_identity.is_none(),
                 Kind::Camera => self.camera_identity.as_ref().is_some_and(|v| {
                     v.is_object() && serde_json::to_vec(v).is_ok_and(|b| b.len() <= 6144)
                 }),
@@ -116,6 +117,8 @@ pub enum Operation {
     CaptureMicrophone,
     PublishMicrophone,
     CaptureCamera,
+    CapturePlayback,
+    RenderPlayback,
 }
 pub const PCM_RATE: u32 = 48_000;
 pub const PCM_CHANNELS: u32 = 1;
@@ -128,14 +131,14 @@ impl SessionRequest {
             && self.name.len() <= 256
             && !self.name.chars().any(char::is_control)
             && match self.operation {
-                Operation::CaptureMicrophone => {
+                Operation::CaptureMicrophone | Operation::RenderPlayback => {
                     self.video_format.is_none()
                         && self.camera_identity.is_none()
                         && self.source_id.as_ref().is_some_and(|s| {
                             !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
                         })
                 }
-                Operation::PublishMicrophone => {
+                Operation::PublishMicrophone | Operation::CapturePlayback => {
                     self.source_id.is_none()
                         && self.video_format.is_none()
                         && self.camera_identity.is_none()
