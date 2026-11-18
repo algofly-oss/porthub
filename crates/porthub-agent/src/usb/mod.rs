@@ -643,9 +643,13 @@ async fn session(
     );
     let transfer=async {
         if let Some(bulk)=direct.tcp {
-            tracing::info!("USB selected authenticated bulk TCP path");
+            tracing::info!(transport = "tcp-tls", "USB selected authenticated bulk TCP path");
             bridge_bulk(stream,socket,bulk,features::subscribe(path),reroute,direct.restart).await
-        } else {bridge(stream,socket,direct.sctp,features::subscribe(path),reroute,direct.restart).await}
+        } else {
+            let transport = if direct.sctp.is_some() { "sctp" } else { "gateway" };
+            tracing::info!(transport, "USB forwarding transport selected");
+            bridge(stream,socket,direct.sctp,features::subscribe(path),reroute,direct.restart).await
+        }
     };
     #[cfg(windows)] {
         match &mut handoff {
