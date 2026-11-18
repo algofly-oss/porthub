@@ -80,6 +80,8 @@ pub struct LocalInventory {
     pub sources: Vec<LocalSource>,
     pub microphone_unavailable_reason: Option<String>,
     pub camera_unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub speaker_unavailable_reason: Option<String>,
 }
 impl LocalInventory {
     pub fn valid(&self) -> bool {
@@ -88,6 +90,7 @@ impl LocalInventory {
             && [
                 &self.microphone_unavailable_reason,
                 &self.camera_unavailable_reason,
+                &self.speaker_unavailable_reason,
             ]
             .iter()
             .all(|v| {
@@ -131,14 +134,14 @@ impl SessionRequest {
             && self.name.len() <= 256
             && !self.name.chars().any(char::is_control)
             && match self.operation {
-                Operation::CaptureMicrophone | Operation::RenderPlayback => {
+                Operation::CaptureMicrophone | Operation::CapturePlayback => {
                     self.video_format.is_none()
                         && self.camera_identity.is_none()
                         && self.source_id.as_ref().is_some_and(|s| {
                             !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
                         })
                 }
-                Operation::PublishMicrophone | Operation::CapturePlayback => {
+                Operation::PublishMicrophone | Operation::RenderPlayback => {
                     self.source_id.is_none()
                         && self.video_format.is_none()
                         && self.camera_identity.is_none()
