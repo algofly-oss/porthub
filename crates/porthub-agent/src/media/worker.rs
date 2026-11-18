@@ -99,8 +99,8 @@ async fn run(profile: PathBuf, control: Arc<Control>, cancel: CancellationToken)
            fixture_stage(&profile,if result.is_ok(){"session-ok"}else{"session-error"},1);
            // No exception text containing a native endpoint/path is sent to a peer.
            let error=result.is_err()&&!task_stop.is_cancelled();
-           let denied=result.as_ref().err().is_some_and(|e|e.is::<super::session::CaptureDenied>());
-           statuses.lock().unwrap_or_else(|e|e.into_inner()).insert(id.clone(),State{id,state:if denied{"permission-denied"}else if error{"unavailable"}else{"stopped"}.into(),error:error.then(||"Native media session could not continue; inspect local agent diagnostics".into())});
+           let denied=result.as_ref().err().is_some_and(|e|e.is::<super::session::CaptureDenied>());let old_receiver=result.as_ref().err().is_some_and(|e|e.is::<super::playback::RendererNotReady>());
+           statuses.lock().unwrap_or_else(|e|e.into_inner()).insert(id.clone(),State{id,state:if denied{"permission-denied"}else if error{"unavailable"}else{"stopped"}.into(),error:error.then(||if old_receiver{super::playback::RendererNotReady.to_string()}else{"Native media session could not continue; inspect local agent diagnostics".into()})});
            if let Err(error)=result{tracing::debug!(reason=%error,"Native media session stopped");}
           });
           active.insert(plan_id,Running{cancel:stop,task,configuration,required});

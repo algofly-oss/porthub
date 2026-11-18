@@ -164,6 +164,10 @@ async fn speaker_plans_capture_selected_source_and_render_destination_without_us
  case.status("POST","/api/media/client/report","",json!({"machine_id":id.to_hex(),"token":token,"protocol":2,"usb_enabled":false,"microphone_enabled":false,"camera_enabled":false,"speaker_enabled":true,"speaker_receiver_available":true,"speaker_unavailable_reason":null,"receive_enabled":true,"receiver_available":false,"receiver_identity":null,"receiver_unavailable_reason":"No USB receiver configured","sources":sources,"states":[]}),StatusCode::OK).await?;
  }
  let create=json!({"source":a.to_hex(),"destination":b.to_hex(),"desktop_uid":1000,"source_id":source_id,"name":"Source playback to destination speaker","persistent":true,"mode":"phs1-speaker-v1"});
+ // Official older cores do not advertise speaker support; no plan may be created.
+ case.status("POST","/api/media/client/report","",json!({"machine_id":b.to_hex(),"token":"speaker-b","protocol":2,"usb_enabled":false,"microphone_enabled":true,"camera_enabled":false,"receive_enabled":true,"receiver_available":false,"receiver_identity":null,"receiver_unavailable_reason":null,"sources":[],"states":[]}),StatusCode::OK).await?;
+ case.status("POST","/api/media/forwards",&cookie,create.clone(),StatusCode::CONFLICT).await?;
+ case.status("POST","/api/media/client/report","",json!({"machine_id":b.to_hex(),"token":"speaker-b","protocol":2,"usb_enabled":false,"microphone_enabled":false,"speaker_enabled":true,"speaker_receiver_available":true,"receive_enabled":true,"receiver_available":false,"receiver_identity":null,"receiver_unavailable_reason":null,"sources":[],"states":[]}),StatusCode::OK).await?;
  case.status("POST","/api/media/forwards",&other_cookie,create.clone(),StatusCode::CONFLICT).await?;
  let mut foreign=create.clone();foreign["destination"]=c.to_hex().into();case.status("POST","/api/media/forwards",&cookie,foreign,StatusCode::CONFLICT).await?;
  let mut wrong=create.clone();wrong["desktop_uid"]=1001.into();case.status("POST","/api/media/forwards",&cookie,wrong,StatusCode::CONFLICT).await?;

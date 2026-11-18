@@ -133,13 +133,21 @@ fn validate_renderer_ready(bytes: &[u8], plan: &str) -> Result<()> {
     );
     Ok(())
 }
+#[derive(Debug)]
+pub(super) struct RendererNotReady;
+impl std::fmt::Display for RendererNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Speaker receiver did not become ready; check it and update both clients")
+    }
+}
+impl std::error::Error for RendererNotReady {}
 async fn wait_renderer_ready<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut host_wire::Reader<R>,
     plan: &str,
 ) -> Result<()> {
     let bytes = tokio::time::timeout(Duration::from_secs(10), reader.next())
         .await
-        .context("Speaker renderer did not become ready")??;
+        .map_err(|_| RendererNotReady)??;
     validate_renderer_ready(&bytes, plan)
 }
 /// A bounded local audio queue must not hold desktop control processing.
@@ -182,6 +190,31 @@ mod queue_tests {
             validate_renderer_ready(br#"{"version":1,"plan":"foreign","extra":true}"#, &plan)
                 .is_err()
         );
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn old_receiver_without_ack_times_out_without_capture() -> Result<()> {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (a, _peer) = tokio::io::duplex(1024);
+        let captured = Arc::new(AtomicBool::new(false));
+        let flag = captured.clone();
+        let task = tokio::spawn(async move {
+            let mut reader = host_wire::Reader::new(a);
+            wait_renderer_ready(&mut reader, &"a".repeat(32)).await?;
+            flag.store(true, Ordering::SeqCst);
+            Ok::<(), anyhow::Error>(())
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert!(!task.is_finished());
+        assert!(!captured.load(Ordering::SeqCst));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = task.await?.unwrap_err();
+        assert!(error.is::<RendererNotReady>());
+        assert!(!captured.load(Ordering::SeqCst));
         Ok(())
     }
     #[test]
