@@ -23,6 +23,8 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+#[path="cold_datagrams.rs"]
+mod cold_datagrams;
 
 // A deliberately replaced stream owner may finish normally while the profile
 // remains live. Current-owner failure and cleanup errors remain actionable.
@@ -408,6 +410,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     };
     let mut exit_route = None;
     let mut sparse_exit_intent:Option<porthub_network::policy::ExitIntent>=None;
+    let mut cold_datagrams=cold_datagrams::Queue::default();
+    let mut cold_tick=tokio::time::interval(Duration::from_millis(50));
+    cold_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut exit_traffic_mode = porthub_mesh::exit_policy::TrafficMode::default();
     let mut exit_lan_peers: Vec<(String, Vec<porthub_mesh::lan_routes::Network>)> = Vec::new();
     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -475,6 +480,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     latest_snapshot=Some(cached_authority);
                     apply_cli_system_tor(&mut route_snapshot,&tor_settings.borrow());
                 }
+                // Derive the active intent once, after local CLI projection but
+                // before any await can leave old-scope payload permits live.
+                sparse_exit_intent=snapshot.sparse.as_ref().and_then(|s|s.exit_intents.iter().find(|intent|
+                    intent.role==porthub_network::policy::ExitRole::Client && route_snapshot.exit_routes.iter().any(|route|route.id==intent.id&&route.clients.contains(&profile.peer_id)))).cloned();
+                cold_datagrams.observe(sparse_exit_intent.as_ref().and_then(|intent|cold_datagrams::Scope::from(&snapshot,intent)));
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
                 local_address.check(own.ip)?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
@@ -597,8 +607,6 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         if route.tor_enabled && route.traffic_mode.internet() {peers.push(super::tor_exit::LOCAL_TOR.into());}
                         (peers,route.selection,route.allow_direct_fallback)
                     });
-                sparse_exit_intent=snapshot.sparse.as_ref().and_then(|s|s.exit_intents.iter().find(|intent|
-                    intent.role==porthub_network::policy::ExitRole::Client && route_snapshot.exit_routes.iter().any(|route|route.id==intent.id&&route.clients.contains(&profile.peer_id)))).cloned();
                 if let Some(intent)=&sparse_exit_intent {
                     let destination=if intent.traffic_mode.internet(){std::net::Ipv4Addr::new(1,1,1,1)}else{intent.lan_networks.first().map(|network|network.address()).unwrap_or(std::net::Ipv4Addr::new(10,0,0,1))};
                     sparse_handle.exit_picker().request(&intent.id,&"0".repeat(64),destination,true);
@@ -883,6 +891,20 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 tor.packet(bytes::Bytes::copy_from_slice(&buffer[..size]));continue;
             }
             let overlay_destination=sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination())));
+            // TCP retransmits SYNs; UDP and ICMP need their original cold
+            // datagram retained while the authenticated asynchronous picker runs.
+            if matches!(buffer.get(9),Some(1|17)) && !overlay_destination
+                && peer_ips.get(&profile.peer_id)==Some(&parsed.source())
+                && !by_ip.contains_key(&parsed.destination()) && exit_traffic_mode.permits(parsed.destination())
+                && exit_selection.assigned_peer(&parsed.flow_id(),Instant::now(),None).is_none() {
+                if let (Some(intent),Some(authority))=(&sparse_exit_intent,&installed_authority) {
+                    let tag=super::exit_picker::flow_tag(&parsed.flow_id().selection_tag(),None);
+                    if cold_datagrams.push(&buffer[..size],authority,Instant::now()) {
+                        sparse_handle.exit_picker().request(&intent.id,&tag,parsed.destination(),false);
+                    }
+                    continue;
+                }
+            }
             let exit_peer = if peer_ips.get(&profile.peer_id) == Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {
                 if !exit_traffic_mode.permits(parsed.destination()) { None }
                 else if sparse_exit_intent.is_some() && overlay_destination { None }
@@ -1015,6 +1037,43 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if changed.is_err(){interface_changes_open=false;}
             else {
 
+            }
+        },
+        _=cold_tick.tick(),if cold_datagrams.len()>0=>{
+            let scope=sparse_authority.as_ref().zip(sparse_exit_intent.as_ref())
+                .and_then(|(base,intent)|cold_datagrams::Scope::from(base,intent));
+            cold_datagrams.observe(scope);
+            for _ in 0..cold_datagrams.len().min(16) {
+                let Some(item)=cold_datagrams.pop(Instant::now()) else{break;};
+                let Some(intent)=&sparse_exit_intent else{continue;};
+                let Some(parsed)=Packet::parse(&item.bytes) else{continue;};
+                if !intent.traffic_mode.permits(parsed.destination()) || sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination()))){continue;}
+                let selected=exit_selection.assigned_peer(&item.flow,Instant::now(),None).map(str::to_owned)
+                    .map(|id|porthub_network::policy::ExitChoice::Peer{id})
+                    .or_else(||sparse_handle.exit_picker().request(&intent.id,&item.tag,parsed.destination(),false));
+                let Some(porthub_network::policy::ExitChoice::Peer{id:peer})=selected else{cold_datagrams.pending(item);continue;};
+                if sparse_handle.exit_pair_authority(&peer).is_none(){cold_datagrams.pending(item);continue;}
+                let peers=sessions.read().await;
+                let direct=peers.get(&peer).filter(|session|session.state()==porthub_mesh::State::Ready);
+                let relay_ready=relay_sender.is_ready();let mode=*strategy.borrow();
+                let default=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
+                let prefer=if mode==super::strategy::Mode::Auto{path_quality.prefer_peer(&peer,default,Instant::now())}else{default};
+                let Some(use_direct)=paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer) else{cold_datagrams.pending(item);continue;};
+                if !item.valid(Instant::now())||work.is_cancelled(){continue;}
+                let assigned=exit_selection.select_for_peer(item.flow,Instant::now(),parsed.flow_ttl(),None,Some(&peer));
+                if assigned!=Some(peer.as_str())||!policy.check_exit(&item.bytes,&peer,false){continue;}
+                let (Some(source),Some(destination))=(peer_ips.get(&profile.peer_id),peer_ips.get(&peer)) else{cold_datagrams.pending(item);continue;};
+                let Ok(Some(current))=super::authority_event::send_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer) else{continue;};
+                let permit=item.permit(current);
+                let packet=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT,*source,*destination,&item.bytes)?;
+                let n=packet.len();
+                let sent=if use_direct {direct.is_some_and(|session|session.send_guarded(packet,Some(permit)).is_ok())}
+                    else{relay_sender.send_exit_guarded(&peer,&packet,Some(permit)).is_ok()};
+                if sent {
+                    sparse_handle.exit_picker().committed(&intent.id,&item.tag);
+                    mark_activity(&mut last_activity,&peer,Instant::now());
+                    if let Some(c)=traffic_counters.get(&peer){c.add(true,use_direct&&direct.is_some_and(|s|!s.is_relay()),n);}
+                }else{cold_datagrams.pending(item);}
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
@@ -1188,6 +1247,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
+    cold_datagrams.observe(None); // revoke retained payloads AND final carrier permits before teardown
     if installed_authority.as_ref().is_some_and(|authority|authority.check().is_err()) {
         policy.revoke();sparse_handle.revoke_all();private_status.lease_valid=false;
         let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};

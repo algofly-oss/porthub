@@ -146,6 +146,9 @@ impl Sender {
     pub(crate) fn send_exit(&self,peer:&str,packet:&[u8])->Result<()> {
         self.send_scoped(peer,packet,None,CarrierScope::Exit)
     }
+    pub(crate) fn send_exit_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
+        self.send_scoped(peer,packet,permit,CarrierScope::Exit)
+    }
     pub(crate) fn send_probe(&self,peer:&str,packet:&[u8])->Result<()> {
         self.send_scoped(peer,packet,None,CarrierScope::Probe)
     }
@@ -1174,6 +1177,19 @@ mod exit_authority_tests {
         let touched=AtomicBool::new(false);assert!(old.during(async{touched.store(true,Ordering::SeqCst);Ok(())}).await.is_err());assert!(!touched.load(Ordering::SeqCst));
         sender.send("b",&packet(porthub_mesh::control_packet::PROBE)).unwrap();let private_record=queued(&mut inputs);assert!(private_record.check().is_ok());
         f.owner.revoke();assert!(!private.valid());assert!(private_record.check().is_err());
+    }
+    #[tokio::test]
+    async fn guarded_exit_carrier_keeps_origin_bound_until_actual_delivery() {
+        let(sender,mut inputs)=channel();sender.set_ready(0,true);let f=Fixture::new(&sender);
+        let clock=Arc::new(Clock(AtomicU64::new(0)));let age=RequestWindow::start(clock.clone()).unwrap();let check_age=age.clone();
+        let original=porthub_mesh::udp::SendPermit::bounded(move||check_age.remaining_within(Duration::from_secs(5)).is_ok(),move||age.remaining_within(Duration::from_secs(5)).ok());
+        assert!(sender.send_exit_guarded("b",&packet(porthub_mesh::control_packet::PROBE),Some(original.clone())).is_err());
+        sender.send_exit_guarded("b",&packet(porthub_mesh::control_packet::EXIT),Some(original)).unwrap();
+        let record=queued(&mut inputs);assert!(record.check().is_ok());clock.0.store(6000,Ordering::SeqCst);
+        assert!(f.handle.exit_pair_authority("b").is_some(),"current exit remains live");
+        let touched=AtomicBool::new(false);
+        assert!(record.during(async{touched.store(true,Ordering::SeqCst);Ok(())}).await.is_err());
+        assert!(!touched.load(Ordering::SeqCst),"expired originating datagram reached the queued write");
     }
     #[test]
     fn sparse_exit_carrier_cannot_omit_base_or_fall_back_to_legacy() {
