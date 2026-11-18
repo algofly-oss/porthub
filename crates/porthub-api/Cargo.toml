@@ -5,9 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-# Unpublished sparse-network prototype: not in default or release feature sets.
+# Negotiated bounded private-network policy; legacy peers retain their protocol.
 private-sparse = ["porthub-agent/private-sparse"]
-default = []
+default = ["private-sparse"]
 speech-cuda = ["transcribe-cpp/cuda"]
 speech-vulkan = ["transcribe-cpp/vulkan"]
 

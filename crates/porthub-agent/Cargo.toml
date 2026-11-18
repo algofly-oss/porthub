@@ -9,9 +9,9 @@ name = "porthub"
 path = "src/main.rs"
 
 [features]
-# Unpublished sparse-network prototype: not in default or release feature sets.
+# Negotiated bounded private-network policy; legacy peers retain their protocol.
 private-sparse = []
-default = ["private-stream", "local-tor", "terminal-direct"]
+default = ["private-stream", "local-tor", "terminal-direct", "private-sparse"]
 local-tor = ["private-stream", "dep:porthub-egress"]
 netns-tests = ["porthub-network/netns-tests"]
 private-stream = ["dep:smoltcp", "porthub-network/private-stream", "porthub-mesh/streams"]

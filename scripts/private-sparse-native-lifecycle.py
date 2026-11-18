@@ -160,7 +160,7 @@ def native_approval(root):
   feature=pending.pop()
   if feature in seen:continue
   seen.add(feature);pending.extend(features.get(feature,[]))
- if 'private-sparse' in seen:raise RuntimeError('experimental sparse feature must remain outside default closure')
+ if 'private-sparse' in seen and declarations[0]!='true':raise RuntimeError('sparse default closure requires typed native lifecycle approval')
  return declarations[0]=='true'
 
 def source_guard(contract):

@@ -1,8 +1,8 @@
-# Experimental native lifecycle approval
+# Native lifecycle prerequisite
 
-The compile-time native lifecycle prerequisite may be enabled for unpublished
-`private-sparse` builds after review of these retained, immutable hosted results.
-This feature remains absent from the agent's default feature closure. No
+The compile-time native lifecycle prerequisite is backed by these retained,
+immutable hosted results. Default `private-sparse` builds require this typed
+prerequisite in addition to the separate release gates below. No
 runtime environment variable can waive native ownership or negotiated transport
 checks. `NativeReady` still binds the current device, owner lifetime, identity,
 IP, fingerprint and authorization epoch; `quic3-credit` still requires server
@@ -28,4 +28,7 @@ exit selection, scale, release readiness or a production deployment. Those
 remain separate actual-runtime gates. The native wrapper continues to execute
 its original cases, source closure and independent cleanup after this constant
 changes; it accepts a typed compile-time boolean and rejects default activation
-of `private-sparse`.
+of `private-sparse` when native lifecycle approval is false. Enabling the Cargo
+defaults does not constitute release approval: the final integrated source must
+pass negotiated relay/native delivery, authorization, compatibility, and normal
+platform packaging checks before publication.
