@@ -571,6 +571,120 @@ mod tests {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires pinned tiny model and PCM; observes actual 60-second idle unload"]
+    async fn native_cpu_disable_and_idle_release_model_mapping() {
+        let bytes = std::fs::read(std::env::var("PORTHUB_TEST_SPEECH_PCM").unwrap()).unwrap();
+        let model = spec("whisper-tiny").ok().unwrap();
+        let path = root().join(&model.filename).canonicalize().unwrap();
+        let model_bytes = std::fs::read(&path).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&model_bytes)), model.sha256);
+        drop(model_bytes);
+        let mapped = || {
+            std::fs::read_to_string("/proc/self/maps")
+                .unwrap()
+                .lines()
+                .any(|line| line.ends_with(path.to_str().unwrap()))
+        };
+        let rss = || {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("VmRSS:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<u64>().ok())
+                })
+                .unwrap()
+                * 1024
+        };
+        let speech = Speech::new(Settings::default());
+        assert!(!mapped(), "run this ignored case alone in its own process");
+        let baseline = rss();
+        let mut measurements = Vec::new();
+        for disable in [true, false] {
+            let (tx, rx) = oneshot::channel();
+            speech
+                .send
+                .send(Work::Run {
+                    generation: speech.generation.load(Ordering::SeqCst),
+                    pcm: pcm(&bytes).ok().unwrap(),
+                    options: RunOptions {
+                        language: Some("en".into()),
+                        ..Default::default()
+                    },
+                    reply: tx,
+                })
+                .await
+                .unwrap();
+            let text = tokio::time::timeout(Duration::from_secs(30), rx)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(text.to_lowercase().contains("country"));
+            assert_eq!(speech.status().await["loaded"], true);
+            assert!(
+                mapped(),
+                "actual native weights must be mapped before testing release"
+            );
+            let loaded_rss = rss();
+            if disable {
+                let (tx, rx) = oneshot::channel();
+                speech
+                    .send
+                    .send(Work::Configure(
+                        Settings {
+                            enabled: false,
+                            ..Settings::default()
+                        },
+                        tx,
+                    ))
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(10), rx)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            } else {
+                tokio::time::timeout(IDLE + Duration::from_secs(10), async {
+                    while speech.status().await["loaded"] == true {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+                .expect("idle actor did not release model by its configured deadline");
+            }
+            assert_eq!(speech.status().await["loaded"], false);
+            assert!(
+                !mapped(),
+                "model weights remained mapped after actor unload"
+            );
+            measurements.push(json!({"trigger":if disable {"disable"} else {"idle"},"rss_loaded":loaded_rss,"rss_released":rss(),"weights_unmapped":true}));
+            if disable {
+                let (tx, rx) = oneshot::channel();
+                speech
+                    .send
+                    .send(Work::Configure(Settings::default(), tx))
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(10), rx)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(speech.status().await["loaded"], false);
+                assert!(!mapped(), "re-enabling must not eagerly reload weights");
+            }
+        }
+        println!(
+            "{}",
+            json!({"actual_speech_actor":true,"rss_baseline":baseline,"measurements":measurements,"idle_seconds":IDLE.as_secs()})
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires a downloaded pinned tiny model and 16kHz PCM fixture"]
     async fn native_cpu_dictation_and_explicit_unload() {
