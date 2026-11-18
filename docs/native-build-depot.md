@@ -47,6 +47,11 @@ buffering an archive in memory. Ranges are not required by this consumer.
 Encoded/traversal paths, extra segments, queries, missing or unsafe files, and
 empty/oversized files receive 404. Other methods receive 405.
 
+On first activation, add `--native-build-depot /absolute/host/path` and
+`--native-build-depot-owner-uid UID` to the normal native upgrade command.
+Run preflight before applying. Subsequent upgrades detect the existing mount
+and preserve its source, publisher UID, and read-only mode automatically.
+
 Publish ZIPs through the trusted uploader, which verifies the filename digest,
 then publish the manifest atomically. The HTTP reader does not substitute for
 consumer verification: the restore client checks the manifest/source contract,
