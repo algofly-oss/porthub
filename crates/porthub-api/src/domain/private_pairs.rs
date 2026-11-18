@@ -192,47 +192,64 @@ pub fn local_epoch(
     )
 }
 
-/// Prepared binding for negotiated exit-pair publication. Not advertised or used
-/// by current sync until the corresponding runtime intent/lease path is wired.
-/// Independent of ordinary rule books: exit edits must not revoke private ACLs,
-/// and private rule edits must not independently revoke valid exit permissions.
-/// Caller supplies only current enabled routes from this authenticated workspace.
+/// Exit data authority is independent of cold-flow scheduling. Selector order
+/// changes preference, not membership; do not retire established remote flows
+/// merely because the operator changes round-robin/sticky/circuit scheduling.
+/// Callers supply only current routes in which this exact node participates.
 pub fn local_exit_epoch(machine:&Value,peer:&Value,routes:&[Value])->String {
+    let routes=exit_projection(routes,false);
+    format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"exit_pair_protocol":1,"identity_epoch":local_epoch(machine,&[],&HashMap::new(),peer),"local_exit_capabilities":{"lan_exit":peer["lan_exit"],"tor_exit":peer["tor_exit"],"protocol":peer["exit_pair_protocol"]},"exit_routes":routes})).expect("typed exit epoch")))
+}
+/// Cursors and cold choices bind this generation in addition to permission.
+/// It may change without retiring an already-authorized exact NAT flow.
+pub fn local_exit_selection_epoch(machine:&Value,peer:&Value,routes:&[Value])->String {
+    format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"permission":local_exit_epoch(machine,peer,routes),"choices":exit_projection(routes,true)})).expect("typed exit selection epoch")))
+}
+fn exit_projection(routes:&[Value],selection:bool)->Vec<Value>{
+    let keys:&[&str]=if selection{&["_id","workspace_id","enabled","created_at","routing_selectors","distribution_selectors","selection","traffic_mode","tor_enabled","tor_circuit_groups","allow_direct_fallback"]}
+        else{&["_id","workspace_id","enabled","routing_selectors","distribution_selectors","traffic_mode","tor_enabled"]};
     let mut routes:Vec<_>=routes.iter().map(|route|{
         let mut selected=serde_json::Map::new();
-        for key in ["_id","workspace_id","enabled","created_at","routing_selectors","distribution_selectors","selection","traffic_mode","tor_enabled","tor_circuit_groups","allow_direct_fallback"] {
-            if let Some(value)=route.get(key){selected.insert(key.into(),value.clone());}
+        for &key in keys{
+            if let Some(value)=route.get(key){
+                let mut value=value.clone();
+                if !selection&&matches!(key,"routing_selectors"|"distribution_selectors"){
+                    if let Some(values)=value.as_array_mut(){values.sort_by_key(Value::to_string);values.dedup();}
+                }
+                selected.insert(key.into(),value);
+            }
         }
         Value::Object(selected)
     }).collect();
-    routes.sort_by_key(|route|route["_id"].to_string());
-    format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"exit_pair_protocol":1,"identity_epoch":local_epoch(machine,&[],&HashMap::new(),peer),"local_exit_capabilities":{"lan_exit":peer["lan_exit"],"tor_exit":peer["tor_exit"],"protocol":peer["exit_pair_protocol"]},"exit_routes":routes})).expect("typed exit epoch")))
+    routes.sort_by_key(|route|route["_id"].to_string());routes
 }
 #[cfg(test)]
 mod exit_epoch_tests {
     use super::*;
+    fn fixture()->(Value,Value,Value){
+        (json!({"_id":"m","user_id":"o","group_ids":["g"]}),json!({"_id":"o:m","owner_id":"o","workspace_id":"o","machine_id":"m","credential_hash":"credential","ip":"10.1.0.1","enabled":true}),json!({"_id":"r","workspace_id":"o","enabled":true,"created_at":1,"routing_selectors":[{"kind":"machine","id":"router"}],"distribution_selectors":[{"kind":"group","id":"g"}],"selection":"sticky","traffic_mode":"internet_only","tor_enabled":false,"tor_circuit_groups":4,"allow_direct_fallback":false}))
+    }
     #[test]
-    fn exit_epoch_binds_rules_selection_modes_roles_and_membership() {
-        let machine=json!({"_id":"m","user_id":"o","group_ids":["g"]});
-        let peer=json!({"_id":"o:m","owner_id":"o","workspace_id":"o","machine_id":"m","credential_hash":"credential","ip":"10.1.0.1","enabled":true});
-        let route=json!({"_id":"r","workspace_id":"o","enabled":true,"created_at":1,"routing_selectors":[{"kind":"machine","id":"router"}],"distribution_selectors":[{"kind":"group","id":"g"}],"selection":"sticky","traffic_mode":"internet_only","tor_enabled":false,"tor_circuit_groups":4,"allow_direct_fallback":false});
-        let hash=|m:&Value,r:Value|local_exit_epoch(m,&peer,&[r]);let original=hash(&machine,route.clone());
-        for (field,value) in [("enabled",json!(false)),("created_at",json!(2)),("routing_selectors",json!([])),("distribution_selectors",json!([])),("selection",json!("round_robin")),("traffic_mode",json!("lan_only")),("tor_enabled",json!(true)),("tor_circuit_groups",json!(8)),("allow_direct_fallback",json!(true))] {
-            let mut changed=route.clone();changed[field]=value;assert_ne!(original,hash(&machine,changed),"exit field {field} did not revoke old binding");
-        }
-        for field in ["lan_exit","tor_exit","exit_pair_protocol"] {
-            let mut changed=peer.clone();changed[field]=json!(1);
-            assert_ne!(original,local_exit_epoch(&machine,&changed,&[route.clone()]),"local capability {field} was not bound");
-        }
+    fn exit_permission_binds_identity_roles_membership_and_traffic_mode(){
+        let(machine,peer,route)=fixture();let hash=|m:&Value,r:Value|local_exit_epoch(m,&peer,&[r]);let original=hash(&machine,route.clone());
+        for(field,value)in[("enabled",json!(false)),("routing_selectors",json!([])),("distribution_selectors",json!([])),("traffic_mode",json!("lan_only")),("tor_enabled",json!(true))]{let mut changed=route.clone();changed[field]=value;assert_ne!(original,hash(&machine,changed),"permission field {field}");}
+        for field in ["lan_exit","tor_exit","exit_pair_protocol"]{let mut changed=peer.clone();changed[field]=json!(1);assert_ne!(original,local_exit_epoch(&machine,&changed,&[route.clone()]));}
         let mut removed=machine.clone();removed["group_ids"]=json!([]);assert_ne!(original,hash(&removed,route.clone()));
         let mut cosmetic=route.clone();cosmetic["name"]=json!("Renamed");cosmetic["updated_at"]=json!(42);assert_eq!(original,hash(&machine,cosmetic));
         assert_ne!(original,local_epoch(&machine,&[],&HashMap::new(),&peer));
     }
     #[test]
-    fn exit_epoch_ignores_cursor_order_but_preserves_selector_priority() {
+    fn selection_edits_invalidate_cold_choices_without_revoking_remote_permissions(){
+        let(machine,peer,route)=fixture();let permission=local_exit_epoch(&machine,&peer,&[route.clone()]);let selection=local_exit_selection_epoch(&machine,&peer,&[route.clone()]);
+        for(field,value)in[("created_at",json!(2)),("selection",json!("round_robin")),("tor_circuit_groups",json!(8)),("allow_direct_fallback",json!(true))]{let mut changed=route.clone();changed[field]=value;assert_eq!(permission,local_exit_epoch(&machine,&peer,&[changed.clone()]),"scheduling field {field} retired data permission");assert_ne!(selection,local_exit_selection_epoch(&machine,&peer,&[changed]));}
+    }
+    #[test]
+    fn selector_priority_changes_only_choice_generation_not_membership_permission(){
         let a=json!({"_id":"a","routing_selectors":[{"kind":"machine","id":"first"},{"kind":"machine","id":"second"}]});let b=json!({"_id":"b"});
-        let hash=|routes:&[Value]|local_exit_epoch(&json!({}),&json!({}),routes);
-        assert_eq!(hash(&[a.clone(),b.clone()]),hash(&[b.clone(),a.clone()]));
-        let mut reordered=a.clone();reordered["routing_selectors"].as_array_mut().unwrap().reverse();assert_ne!(hash(&[a,b.clone()]),hash(&[reordered,b]));
+        let permission=|routes:&[Value]|local_exit_epoch(&json!({}),&json!({}),routes);let selection=|routes:&[Value]|local_exit_selection_epoch(&json!({}),&json!({}),routes);
+        assert_eq!(permission(&[a.clone(),b.clone()]),permission(&[b.clone(),a.clone()]));
+        let mut reordered=a.clone();reordered["routing_selectors"].as_array_mut().unwrap().reverse();
+        assert_eq!(permission(&[a.clone(),b.clone()]),permission(&[reordered.clone(),b.clone()]));
+        assert_ne!(selection(&[a,b.clone()]),selection(&[reordered,b]));
     }
 }

@@ -599,7 +599,8 @@ async fn participating_exit_4097_uses_exact_bounded_picker_and_reciprocal_author
    ensure!(router["snapshot"]["sparse"]["exit_intents"][0]["role"]=="router","router intent missing");
   }
   let mut body=request(0,json!([]));
-  body["exit_pick"]=json!({"route_id":route.to_hex(),"flow_id":"a".repeat(64),"ordinal":0,"destination":"8.8.8.8"});
+  let initial=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  body["exit_pick"]=json!({"selection_epoch":initial["snapshot"]["sparse"]["selection_epoch"],"route_id":route.to_hex(),"flow_id":"a".repeat(64),"ordinal":0,"destination":"8.8.8.8"});
   let mut reply=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
   for _ in 0..8{
    if reply["exit_pick"]["status"]!="pending"{break}
@@ -624,10 +625,33 @@ async fn participating_exit_4097_uses_exact_bounded_picker_and_reciprocal_author
   let mut second=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
   for _ in 0..8{if second["exit_pick"]["status"]!="pending"{break}body["exit_pick"]["cursor"]=second["exit_pick"]["cursor"].clone();second=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;}
   ensure!(second["exit_pick"]["choice"]["id"]=="exit-growth-2","round robin selected only cached router");
+  let tcp=|flags:u8,reverse:bool|{
+   let mut packet=[0u8;40];packet[0]=0x45;packet[2..4].copy_from_slice(&40u16.to_be_bytes());packet[8]=64;packet[9]=6;
+   packet[12..16].copy_from_slice(if reverse{&[8,8,8,8]}else{&[10,211,0,1]});packet[16..20].copy_from_slice(if reverse{&[10,211,0,1]}else{&[8,8,8,8]});
+   packet[20..22].copy_from_slice(&(if reverse{443u16}else{1234u16}).to_be_bytes());packet[22..24].copy_from_slice(&(if reverse{1234u16}else{443u16}).to_be_bytes());packet[32]=0x50;packet[33]=flags;
+   let mut sum=packet[..20].chunks_exact(2).map(|p|u32::from(u16::from_be_bytes([p[0],p[1]]))).sum::<u32>();while sum>>16!=0{sum=(sum&65535)+(sum>>16)}packet[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());packet
+  };
+  ensure!(engine.check_exit(&tcp(2,false),"exit-growth-1",false)&&engine.check_exit(&tcp(18,true),"exit-growth-1",true)&&engine.check_exit(&tcp(16,false),"exit-growth-1",false),"TCP fixture did not establish normal exit flow");
+  let permission=second["snapshot"]["sparse"]["exit_epoch"].clone();let mut choice=second["snapshot"]["sparse"]["selection_epoch"].clone();
+  for change in [doc!{"selection":"sticky"},doc!{"tor_circuit_groups":8_i64},doc!{"allow_direct_fallback":true},doc!{"routing_selectors":[{"kind":"machine","id":ids[2].to_hex()},{"kind":"machine","id":ids[1].to_hex()}]}]{
+   case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":change}).await?;
+   let refreshed=case.status("POST","/api/access/private/sync","",request(0,json!([])),StatusCode::OK).await?;
+   ensure!(refreshed["snapshot"]["sparse"]["exit_epoch"]==permission&&refreshed["snapshot"]["sparse"]["selection_epoch"]!=choice,"scheduling failed to separate permission from cold choices");choice=refreshed["snapshot"]["sparse"]["selection_epoch"].clone();
+   engine.apply(serde_json::from_value(refreshed["snapshot"].clone())?)?;
+   ensure!(engine.check_exit(&tcp(16,false),"exit-growth-1",false)&&engine.check_exit(&packet([8,8,8,8]),"exit-growth-1",false),"unchanged established TCP/UDP retired on scheduling-only edit");
+  }
+  body["exit_pick"].as_object_mut().unwrap().remove("cursor");
+  let stale=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  ensure!(stale["exit_pick"]["status"]=="unavailable"&&stale["exit_pick"]["lease"].is_null()&&stale["snapshot"]["sparse"]["selection_epoch"]==choice,"stale cold choice blocked convergence or granted authority");
+
   case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":{"enabled":false}}).await?;
   let revoked=case.status("POST","/api/access/private/sync","",request(0,json!([])),StatusCode::OK).await?;
   engine.apply(serde_json::from_value(revoked["snapshot"].clone())?)?;
   ensure!(!engine.check_exit(&packet([8,8,8,8]),"exit-growth-1",false),"current membership/route removal retained exit authority");
+  ensure!(!engine.check_exit(&tcp(16,false),"exit-growth-1",false),"permission withdrawal retained established TCP");
+  let denied_router=case.status("POST","/api/access/private/sync","",request(1,json!([{"kind":"peer","value":"exit-growth-0"}])),StatusCode::OK).await?;
+  ensure!(denied_router["pair_responses"][0]["status"]!="allowed","withdrawn route retained reciprocal exit authority");
+
   Ok::<_,anyhow::Error>(())
  }.await;case.db.drop().await?;result
 }

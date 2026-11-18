@@ -344,8 +344,12 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     crate::private_exit_picker::capture_networks(app,owner,&mut exit_intents).await?;
     let relevant_exit_definitions:Vec<_>=exit_definitions.iter().filter(|r|exit_intents.iter().any(|i|i.id==store::id(r.get("_id")))).map(store::document).collect();
     let exit_epoch=exit_negotiated.then(||crate::domain::private_pairs::local_exit_epoch(&store::document(own_exit_machine),&store::document(&updated),&relevant_exit_definitions));
+    let selection_epoch=exit_negotiated.then(||crate::domain::private_pairs::local_exit_selection_epoch(&store::document(own_exit_machine),&store::document(&updated),&relevant_exit_definitions));
     let picked=if let (Some(request),Some(exit_epoch))=(&input.exit_pick,&exit_epoch){
+        if selection_epoch.as_deref()!=Some(request.selection_epoch.as_str()){Some(crate::private_exit_picker::Pick::Unavailable)}else{
+
         if let Some(route)=exit_definitions.iter().find(|r|store::id(r.get("_id"))==request.route_id){Some(crate::private_exit_picker::pick(app,owner,&updated,own_exit_machine,route,exit_epoch,request).await?)}else{Some(crate::private_exit_picker::Pick::Unavailable)}
+        }
     }else{None};
     if let Some(crate::private_exit_picker::Pick::Peer(target))=&picked{
         if !peers.iter().any(|p|p.get("_id")==target.get("_id")){
@@ -607,6 +611,9 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         if crate::domain::private_pairs::local_exit_epoch(&store::document(&latest_machine),&store::document(&current),&latest_relevant)!=*source_exit_epoch{
             return Err(ApiError::new(StatusCode::CONFLICT,"Private exit source assignment changed; retry selection"));
         }
+        if selection_epoch.as_deref()!=Some(crate::domain::private_pairs::local_exit_selection_epoch(&store::document(&latest_machine),&store::document(&current),&latest_relevant).as_str()){
+            return Err(ApiError::new(StatusCode::CONFLICT,"Private exit selection changed during lookup; retry sync"));
+        }
         let ids:Vec<_>=exit_pairs.keys().cloned().collect();
         let (fresh,inventory)=active_matching(app,owner,Some(&ids)).await?;
         for (id,issued) in &exit_pairs {
@@ -710,6 +717,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         "sparse_sequence":sparse_request.map(|r|r.sequence),"pair_responses":pair_responses,"control_fallback_urls":fallback,"poll_seconds":1});
     if exit_negotiated{
         response["snapshot"]["sparse"]["exit_epoch"]=json!(exit_epoch);
+        response["snapshot"]["sparse"]["selection_epoch"]=json!(selection_epoch);
         response["snapshot"]["sparse"]["exit_intents"]=json!(exit_intents);
     }
     if let (Some(request),Some(picked),Some(exit_epoch))=(&input.exit_pick,picked,exit_epoch){
@@ -726,7 +734,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             Pick::Unavailable=>(ExitPickStatus::Unavailable,None,None,None),
             Pick::UpgradeRequired=>(ExitPickStatus::UpgradeRequired,None,None,None),
         };
-        let reply=ExitPickResponse{route_id:request.route_id.clone(),flow_id:request.flow_id.clone(),ordinal:request.ordinal,warmup:request.warmup,discover:request.discover,epoch:exit_epoch.clone(),status,choice,lease,cursor};
+        let reply=ExitPickResponse{route_id:request.route_id.clone(),flow_id:request.flow_id.clone(),ordinal:request.ordinal,warmup:request.warmup,discover:request.discover,selection_epoch:request.selection_epoch.clone(),epoch:exit_epoch.clone(),status,choice,lease,cursor};
         reply.validate_for(request,&exit_epoch).map_err(|_|ApiError::bad_request("Invalid exit picker publication"))?;
         response["exit_pick"]=serde_json::to_value(reply).expect("typed picker response");
     }

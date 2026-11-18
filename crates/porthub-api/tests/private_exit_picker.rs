@@ -40,6 +40,7 @@ async fn all_4097_router_selection_preserves_tail_sticky_random_and_lan_priority
   // authenticated control/Hub lease. No4097 live agents/sockets are claimed.
   case.app.collection("private_exit_routers").insert_many(peers.iter().enumerate().map(|(i,id)|doc!{"_id":format!("{owner}:{route}:{id}"),"workspace_id":owner,"route_id":route.to_hex(),"peer":id,"protocol":true,"ready":true,"lan_networks":if i==4096{vec!["192.168.99.0/24"]}else{vec!["192.168.0.0/16"]},"expires_at":DateTime::from_millis(now.timestamp_millis()+15_000)})).await?;
   let tail=&peers[4096];
+  let mut selected=std::collections::HashSet::new();
   for mode in ["round_robin","sticky","random","lan_only"] {
    let expected=if mode=="sticky"{
     let mut table=porthub_network::exit_selection::FlowTable::new("full-exit-source".into());table.configure(peers.clone(),porthub_mesh::exit_policy::Selection::Sticky);
@@ -55,14 +56,22 @@ async fn all_4097_router_selection_preserves_tail_sticky_random_and_lan_priority
    let ordinal=if mode=="random"{
     (0..1_000_000u64).find(|n|{let bytes=Sha256::digest(format!("{flow}:{n}:{owner}"));u64::from_be_bytes(bytes[..8].try_into().unwrap())%4097==4096}).ok_or_else(||anyhow::anyhow!("could not derive bounded deterministic tail fixture"))?
    }else{4096};
-   let mut body=request("full-exit-source");body["exit_pick"]=json!({"route_id":route.to_hex(),"flow_id":flow,"ordinal":ordinal,"destination":if mode=="lan_only"{"192.168.99.42"}else{"8.8.8.8"}});
+   let mut body=request("full-exit-source");
+   let initial=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+   body["exit_pick"]=json!({"selection_epoch":initial["snapshot"]["sparse"]["selection_epoch"],"route_id":route.to_hex(),"flow_id":flow,"ordinal":ordinal,"destination":if mode=="lan_only"{"192.168.99.42"}else{"8.8.8.8"}});
    let reply=ready(&case,&mut body).await?;
    ensure!(reply["exit_pick"]["status"]=="ready"&&reply["exit_pick"]["choice"]["id"]==expected,"{mode} did not select full-roster expected peer: {}",reply["exit_pick"]);
-   ensure!(reply["snapshot"]["peers"].as_array().unwrap().len()==1&&reply["pair_responses"].as_array().unwrap().len()==1,"full roster leaked into bounded reply");
+   selected.insert(expected.clone());
+   let pairs=reply["pair_responses"].as_array().unwrap();
+   ensure!(reply["snapshot"]["peers"].as_array().unwrap().len()==1&&pairs.len()<=selected.len()
+    &&pairs.iter().all(|response|response["query"]["value"].as_str().is_some_and(|id|selected.contains(id))
+      &&(response["status"]!="allowed"||response["lease"]["peer"]["id"].as_str().is_some_and(|id|selected.contains(id)))),"unselected full-roster peer leaked into bounded reply");
   }
   // A stale directory hint cannot authorize a disabled/revoked machine.
   case.app.collection("machines").update_one(doc!{"_id":ids[4096]},doc!{"$set":{"private_owner_revoked":true}}).await?;
-  let mut body=request("full-exit-source");body["exit_pick"]=json!({"route_id":route.to_hex(),"flow_id":"d".repeat(64),"ordinal":0,"destination":"192.168.99.42","available_peers":[tail]});
+  let mut body=request("full-exit-source");
+  let initial=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  body["exit_pick"]=json!({"selection_epoch":initial["snapshot"]["sparse"]["selection_epoch"],"route_id":route.to_hex(),"flow_id":"d".repeat(64),"ordinal":0,"destination":"192.168.99.42","available_peers":[tail]});
   let denied=ready(&case,&mut body).await?;
   ensure!(denied["exit_pick"]["status"]=="unavailable"&&denied["exit_pick"]["lease"].is_null(),"revoked target inherited directory authority");
   Ok::<_,anyhow::Error>(())
