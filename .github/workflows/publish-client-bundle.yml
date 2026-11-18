@@ -65,3 +65,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PORTHUB_RETAIN_TAGS: ${{ vars.PORTHUB_RETAIN_TAGS }}
         run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$PORTHUB_SOURCE_REVISION" --remove-previews --execute
+      - name: Remove verified superseded temporary source pins
+        if: steps.publication.outputs.status == 'published' || steps.publication.outputs.status == 'already-published'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-source-pin.py cleanup --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --execute

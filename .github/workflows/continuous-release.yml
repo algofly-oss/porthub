@@ -63,6 +63,7 @@ jobs:
       - name: Verify automatic version preparation and retention
         run: |
           python3 scripts/test_continuous_release_workflow.py
+          python3 scripts/test_release_source_pin.py
           python3 scripts/test_prepare_release.py
           python3 scripts/test_fetch_component_release.py
           python3 scripts/test_recover_component_builds.py

@@ -28,6 +28,16 @@ class Versions(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.release_reservations('owner/repo')
 
+    def test_main_reserves_only_executed_non_skipped_non_published_preparation(self):
+        import sys
+        for execute, skip, published in ((False, False, False), (True, True, False), (True, False, True), (True, False, False)):
+            helper=Mock();helper.reservations.return_value=[]
+            result=dict(version='1.9.0',revision='a'*40,skip=skip,already_published=published)
+            argv=['prepare-release.py','--repository','owner/repo','--ref','refs/heads/main','--trigger-sha','a'*40]+(['--execute'] if execute else [])
+            with patch.object(sys,'argv',argv),patch.object(release,'latest_release',return_value=None),patch.object(release,'release_reservations',return_value=[]),patch.object(release,'source_pins',return_value=helper),patch.object(release,'prepare',return_value=result),patch.dict(release.os.environ,{},clear=True):
+                release.main()
+            self.assertEqual(helper.reserve.called,execute and not skip and not published)
+
     def test_atomic_replace_closes_writer_before_rename(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'version.txt'; path.write_text('old')
@@ -82,6 +92,24 @@ class Repository(unittest.TestCase):
         (self.root/'README').write_text('new source\n')
         self.run_git('add','README');self.run_git('commit','-m','source change');self.run_git('push','origin','main')
         return self.run_git('rev-parse','HEAD')
+    def test_failed_prebuild_pin_retries_same_source_but_new_source_advances_version(self):
+        head=self.change()
+        first=release.prepare(self.root,'refs/heads/main',head,self.latest,execute=True)
+        temporary='porthub-prepared/v'+first['version']
+        self.run_git('tag',temporary,first['revision']);self.run_git('push','origin','refs/tags/'+temporary)
+        helper=release.source_pins();github=Mock()
+        github.pins.return_value=[dict(ref='refs/tags/'+temporary,object=dict(type='commit',sha=first['revision']))]
+        reservations=helper.reservations(github,[])
+        retry=release.prepare(self.root,'refs/heads/main',first['revision'],self.latest,reservations=reservations)
+        self.assertEqual(retry['version'],first['version']);self.assertFalse(retry['would_commit'])
+        (self.root/'README').write_text('later source after failed build')
+        self.run_git('add','README');self.run_git('commit','-m','later source');self.run_git('push','origin','main')
+        second=self.run_git('rev-parse','HEAD')
+        next_release=release.prepare(self.root,'refs/heads/main',second,self.latest,reservations=reservations)
+        self.assertEqual(next_release['version'],'1.8.11')
+        self.assertEqual(self.run_git('rev-parse','refs/tags/'+temporary),first['revision'])
+        self.assertNotEqual(first['revision'],second)
+
     def test_dry_run_does_not_change_version_source_or_remote(self):
         head=self.change()
         result=release.prepare(self.root,'refs/heads/main',head,self.latest)

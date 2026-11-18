@@ -367,6 +367,13 @@ def release_reservations(repository):
         remaining = remaining[end:].lstrip()
     return reservations
 
+def source_pins():
+    spec = importlib.util.spec_from_file_location('release_source_pin', Path(__file__).with_name('release-source-pin.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
@@ -381,8 +388,12 @@ def main():
     if not args.ref or not args.trigger_sha or not args.repository:
         parser.error('repository, ref and trigger SHA are required')
     latest = latest_release(args.repository)
-    reservations = release_reservations(args.repository)
+    pinning = source_pins()
+    pinned_github = pinning.GitHub(args.repository)
+    reservations = pinning.reservations(pinned_github, release_reservations(args.repository))
     result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations, args.previous_core_build,args.media_target)
+    if args.execute and not result['skip'] and not result['already_published']:
+        pinning.reserve(pinned_github, result['version'], result['revision'], args.default_branch, True)
     print(json.dumps(result, sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:

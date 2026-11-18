@@ -15,6 +15,7 @@ class GitHub:
         self.expected=expected
         self.current={'tag_name':'v1.8.9','draft':False,'prerelease':False}
         self.value=None;self.target=None;self.writes=[];self.bad_upload=False;self.newer_on_upload=False
+    def check_reference(self,version,revision):return 'fixture-main-head'
     def latest(self):return copy.deepcopy(self.current)
     def release(self,tag):return copy.deepcopy(self.value)
     def tag_commit(self,tag):return self.target
@@ -50,6 +51,12 @@ class Publication(unittest.TestCase):
     def test_complete_draft_is_verified_before_promotion(self):
         self.assertEqual(self.publish()['status'],'published')
         self.assertEqual(self.github.writes,[('create',30),('promote','v1.9.0')])
+    def test_unreferenced_source_is_rejected_before_release_writes(self):
+        with patch.object(self.github,'check_reference',side_effect=ValueError('Unreferenced release source')):
+            with self.assertRaisesRegex(ValueError,'Unreferenced release source'):
+                self.publish()
+        self.assertEqual(self.github.writes,[])
+
     def test_dry_run_never_creates_or_changes_a_release(self):
         self.assertEqual(self.publish(False)['status'],'ready');self.assertEqual(self.github.writes,[])
     def test_partial_upload_never_changes_latest(self):
@@ -82,6 +89,13 @@ class Publication(unittest.TestCase):
         self.github.current['tag_name']='v1.8.9';self.github.newer_on_upload=True
         self.assertEqual(self.publish()['status'],'superseded')
         self.assertEqual(self.github.writes,[('create',30)])
+    def test_superseded_run_does_not_need_retired_prepared_source_pin(self):
+        self.github.current['tag_name']='v2.0.0'
+        with patch.object(self.github,'check_reference',side_effect=AssertionError('older pin already cleaned')) as check:
+            self.assertEqual(self.publish()['status'],'superseded')
+            check.assert_not_called()
+        self.assertEqual(self.github.writes,[])
+
     def test_missing_or_unexpected_local_assets_fail_without_writes(self):
         extra=self.directory/'unexpected';extra.touch()
         with self.assertRaises(ValueError):self.publish()

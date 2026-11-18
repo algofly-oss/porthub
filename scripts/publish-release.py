@@ -154,6 +154,12 @@ class GitHub(retention.GitHub):
     def upload(self,tag,paths):self.command('upload',tag,*map(str,paths),'--clobber')
     def promote(self,tag):self.command('edit',tag,'--draft=false','--latest')
 
+    def check_reference(self, version, revision):
+        spec = importlib.util.spec_from_file_location('release_source_pin', Path(__file__).with_name('release-source-pin.py'))
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        return module.check_reference(module.GitHub(self.prefix.removeprefix('repos/')), version, revision,
+                                      os.environ.get('DEFAULT_BRANCH', 'main'))
+
 
 def superseded(latest, version):
     if latest is None:return False
@@ -184,6 +190,7 @@ def publish(github,directory,version,revision,execute=False,artifact_verifier=No
             return {'tag':tag,'status':'already-published'}
         if existing.get('target_commitish') != revision:
             raise ValueError('Existing draft is pinned to different source; prepare a new version')
+    github.check_reference(version, revision)
     if not execute:return {'tag':tag,'status':'ready','assets':len(expected)}
     paths=[directory/name for name in sorted(expected)]
     if existing is None:github.create(tag,revision,paths)
