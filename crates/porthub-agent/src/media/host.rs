@@ -283,7 +283,7 @@ async fn connection(
             },
             bytes=read.next()=>{
                 let bytes=bytes?;
-                if bytes.first()==Some(&0)&&bytes.len()>=33 {let id=std::str::from_utf8(&bytes[1..33])?;let frame=host_wire::parse_pcm(&bytes,id).context("Invalid speaker PCM")?;let tx=playback_inputs.get(id).context("Unrequested speaker playback")?;tx.try_send(frame.pcm).map_err(|_|anyhow::anyhow!("Speaker playback queue overflow"))?;continue;}
+                if bytes.first()==Some(&0)&&bytes.len()>=33 {let id=std::str::from_utf8(&bytes[1..33])?;let frame=host_wire::parse_pcm(&bytes,id).context("Invalid speaker PCM")?;if let Some(tx)=playback_inputs.get(id){let _=super::playback::enqueue_pcm(tx,frame.pcm)?;}continue;}
                 let value:Value=serde_json::from_slice(&bytes)?;
                 match value["type"].as_str(){
                     Some("policy")=>{
