@@ -21,6 +21,9 @@ pub struct PeerInfo {
     pub ip: Ipv4Addr,
     pub fingerprint: String,
     pub instance: String,
+    /// Server-authored relay incarnation; absent for legacy/direct identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_origin: Option<String>,
     #[serde(default)]
     pub online: bool,
     #[serde(default)]
