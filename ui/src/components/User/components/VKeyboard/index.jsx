@@ -37,7 +37,7 @@ export default function VKeyboard({active=true}){
   useEffect(()=>{if(!active)return;const hidden=()=>{if(document.hidden){void stop();void transport.current?.send({type:'release_all'}).catch(()=>{});}};document.addEventListener('visibilitychange',hidden);return()=>document.removeEventListener('visibilitychange',hidden);},[active,stop]);
   const send=useCallback(command=>{const promise=transport.current?.send(command)||Promise.reject(Error('Connect to a client first'));return promise.catch(e=>{if(alive.current)setError(e.message);});},[]);
   const target=targets.find(t=>t.id===selected),connected=connection.state==='connected';
-  const connect=()=>{disconnect();setError('');setConnection({state:'connecting'});const next=new KeyboardTransport({target:selected,changed:update=>{if(alive.current)setConnection(c=>({...c,...update}));},failed:message=>{if(alive.current){setError(message);void stop();}}});transport.current=next;next.connect();};
+  const connect=()=>{disconnect();setError('');setConnection({state:'connecting'});const next=new KeyboardTransport({target:selected,bluetoothKeyboard:target?.kind==='esp32',changed:update=>{if(alive.current)setConnection(c=>({...c,...update}));},failed:message=>{if(alive.current){setError(message);void stop();}}});transport.current=next;next.connect();};
   const transcribe=async(bytes,settings)=>{
     const {data}=await axios.post(`/api/keyboard/speech/transcribe?language=${encodeURIComponent(settings.language==='hinglish'?'hi':settings.language)}&romanize=${['en','hinglish'].includes(settings.language)?'true':'false'}&translate=${settings.translate?'true':'false'}`,bytes,{headers:{'Content-Type':'application/octet-stream'},timeout:180000});
     if(!alive.current||!latest.current.active)return;
@@ -55,7 +55,11 @@ export default function VKeyboard({active=true}){
     queue.current=queue.current.then(()=>transcribe(bytes,settings)).catch(e=>{if(alive.current){setFailedAudio({bytes,settings});setError(e.response?.data?.detail||e.message||'Transcription failed. Your last audio segment is available to retry.');}}).finally(()=>{pending.current--;if(alive.current)setProcessing(pending.current>0);});
   };
   const start=async()=>{
-    setError('');clearCaption();if(!navigator.mediaDevices?.getUserMedia){setError('Microphone recording requires HTTPS or localhost.');return;}
+    setError('');clearCaption();
+    // Match the original: dictation also reconnects a temporarily disabled BLE
+    // keyboard. Capture remains usable without any remote input client.
+    if(latest.current.connected)void transport.current?.keyboardNeeded().catch(e=>{if(alive.current)setError(e.message);});
+    if(!navigator.mediaDevices?.getUserMedia){setError('Microphone recording requires HTTPS or localhost.');return;}
     const next=new VoiceRecorder({segment,level:setLevel,failed:message=>{setError(message);setRecording(false);}});recorder.current=next;
     try{await next.start();if(recorder.current===next){setDictationSession(value=>value+1);setRecording(true);}}catch(e){setError(e.name==='NotAllowedError'?'Microphone permission was denied. Allow it in your browser settings.':e.message);recorder.current=null;setRecording(false);}
   };
