@@ -10,7 +10,8 @@ use crate::{
     private_profile::Profile,
     profile::{self, Lease},
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
+use crate::unified::PrivateStage;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -328,11 +329,11 @@ pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Re
 }
 
 async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
-    let profile = Profile::load(&path)?;
-    let _lease = Lease::acquire(&path)?;
+    let profile = Profile::load(&path).context(PrivateStage::Profile)?;
+    let _lease = Lease::acquire(&path).context(PrivateStage::Lease)?;
     // Declared after Lease: revocation drops before another runtime can own it.
     let authority_owner=super::authority_event::Owner::new();
-    let control = Arc::new(crate::control::Control::new_private(&profile)?);
+    let control = Arc::new(crate::control::Control::new_private(&profile).context(PrivateStage::Control)?);
     // Embedded private networking shares the parent registration's maintenance
     // worker. A standalone private enrollment owns its own background updates.
     let owns_component_maintenance = logs.is_some();
@@ -352,14 +353,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(target_os="linux")]
     let _wsl_local_dns=crate::wsl_local_dns::start(&cancel);
     let (strategy_updates, strategy) =
-        tokio::sync::watch::channel(super::strategy::load(&path)?.mode);
+        tokio::sync::watch::channel(super::strategy::load(&path).context(PrivateStage::Strategy)?.mode);
     tasks.spawn(super::strategy::run(
         path.clone(),
         strategy_updates,
         work.clone(),
     ));
     let instance = controller::nonce()?;
-    let identity = porthub_mesh::Identity::new()?;
+    let identity = porthub_mesh::Identity::new().context(PrivateStage::Identity)?;
     let mut next_probe_id = u64::from_str_radix(&instance[..16], 16)?;
     let (interface_updates, mut interfaces) = tokio::sync::watch::channel(Vec::new());
     let (route_changes,mut route_events)=tokio::sync::watch::channel(0u64);
@@ -392,7 +393,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let (sparse_handle,sparse_control)=super::sparse::channel();
     #[allow(unused_variables)]
     let (native_streams,native_stream_updates)=watch::channel(None::<controller::NativeReady>);
-    tasks.spawn(controller::run_watched_sparse_owned(
+    tasks.spawn(PrivateStage::Controller.run(controller::run_watched_sparse_owned(
         profile.clone(),
         interfaces.clone(),
         sessions.clone(),
@@ -408,7 +409,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         Some(authority_owner.domain()),
         Some(native_stream_updates),
         Some(path.clone()),
-    ));
+    )));
     let mut device: Option<Arc<Tun>> = None;
     let mut local_address=super::address_lifecycle::Binding::default();
     #[cfg(feature = "private-stream")]
@@ -460,7 +461,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="local-tor")]
     let mut tor_route_groups=None;
     #[cfg(feature="local-tor")]
-    let (tor_changes,mut tor_settings)=watch::channel(super::tor_preferences::load(&path)?);
+    let (tor_changes,mut tor_settings)=watch::channel(super::tor_preferences::load(&path).context(PrivateStage::TorPreferences)?);
     #[cfg(feature="local-tor")]
     let mut latest_snapshot: Option<super::authority_event::Authority<Snapshot>> = None;
     #[cfg(feature="local-tor")]
@@ -522,7 +523,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
         finished=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{if stream_owner_completed(guarded_generation,work.is_cancelled(),finished)?{break;}},
         finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
-        finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
+        finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(if error.downcast_ref::<PrivateStage>().is_some(){error}else{error.context(PrivateStage::Background)}),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
             Some(Event::Snapshot(authority))=>{
                 authority.check()?;
@@ -605,14 +606,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
                     let tun=if let Some(sparse)=&snapshot.sparse{
-                        super::native_owner::open(&path,&name,own.ip,&sparse.capture_pools,&routes).await?
+                        super::native_owner::open(&path,&name,own.ip,&sparse.capture_pools,&routes).await.context(PrivateStage::NativeOwner)?
                     }else{
-                        super::native_owner::admit_legacy(&path,own.ip)?;
+                        super::native_owner::admit_legacy(&path,own.ip).context(PrivateStage::LegacyAdmission)?;
                         #[cfg(windows)]{Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,super::native_ownership::HostAdmission::Legacy).await?)}
                         #[cfg(not(windows))]{Arc::new(Tun::open(&name,own.ip,&routes).await?)}
                     };
                     local_address.configured(own.ip)?;
-                    let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
+                    let server=dns::Server::bind(own.ip).await.context(PrivateStage::DnsListener)?;let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
                     #[cfg(feature="local-tor")]
                     {

@@ -9,6 +9,38 @@ use std::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+/// Fixed diagnostic labels only: never format profile paths or underlying errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateStage {
+    Profile, Lease, Control, Strategy, Identity, TorPreferences,
+    Controller, NativeOwner, LegacyAdmission, DnsListener, Background,
+}
+impl std::fmt::Display for PrivateStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+impl std::error::Error for PrivateStage {}
+impl PrivateStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Profile=>"profile-load",Self::Lease=>"profile-lease",
+            Self::Control=>"private-control",Self::Strategy=>"path-settings",
+            Self::Identity=>"transport-identity",Self::TorPreferences=>"tor-settings",
+            Self::Controller=>"private-controller",Self::NativeOwner=>"native-owner",
+            Self::LegacyAdmission=>"legacy-native-admission",Self::DnsListener=>"dns-listener",
+            Self::Background=>"background-task",
+        }
+    }
+    pub(crate) async fn run<T>(self, task: impl Future<Output=Result<T>>) -> Result<T> {
+        use anyhow::Context;
+        task.await.context(self)
+    }
+}
+fn private_failure_stage(error: &anyhow::Error) -> &'static str {
+    error.downcast_ref::<PrivateStage>().map_or("runtime",|stage|stage.label())
+}
+
 fn same_configuration_path(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -292,12 +324,13 @@ pub(crate) async fn supervise<F, Fut>(
                     // Panics and unexpected clean exits receive the same
                     // backoff; neither escapes into the public runtime.
                     worker.stop.cancel();
-                    let reason = match result {
-                        Ok(Err(error)) => private_failure_reason(&error),
+                    let reason = match &result {
+                        Ok(Err(error)) => private_failure_reason(error),
                         Ok(Ok(())) => "private worker exited unexpectedly",
                         Err(_) => "private worker terminated unexpectedly",
                     };
-                    tracing::warn!(reason, "private module stopped; retry scheduled");
+                    let stage = match &result { Ok(Err(error))=>private_failure_stage(error), _=>"worker" };
+                    tracing::warn!(reason, stage, "private module stopped; retry scheduled");
                     if began.elapsed() >= Duration::from_secs(60) { retry = Duration::from_secs(5); }
                     tokio::select! {
                         _ = cancel.cancelled() => return,
@@ -531,7 +564,8 @@ mod tests {
 
 pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}").to_ascii_lowercase();
-    if text.contains("private address changed") { "private address changed; rebuilding the private tunnel" }
+    if text.contains("native source quarantined") || text.contains("retained source") { "native source quarantined; safe address repair required" }
+    else if text.contains("private address changed") { "private address changed; rebuilding the private tunnel" }
     else if text.contains("lease expired") { "private policy expired; check clock synchronization and gateway connectivity" }
     else if text.contains("resolve1") || text.contains("systemd-resolved") { "private DNS unavailable; check systemd-resolved installation and service state" }
     else if text.contains("dns setup") || text.contains("nsswitch") || text.contains("authselect") { "private DNS setup failed; check privileged enrollment and administrator DNS configuration restrictions" }
@@ -547,4 +581,14 @@ fn windows_module_notifications_match_long_path_and_case_variants() {
     assert!(same_configuration_path(expected,Path::new(r"\\?\c:\programdata\PORT hub\native\owner.json.private-module.json"))==false);
     assert!(same_configuration_path(expected,Path::new(r"\\?\c:\programdata\PORTHUB\native\owner.json.private-module.json")));
     assert!(!same_configuration_path(expected,Path::new(r"C:\ProgramData\PortHub\native\another.json.private-module.json")));
+}
+
+#[cfg(test)]
+#[test]
+fn private_stage_diagnostic_is_typed_and_never_echoes_error_text() {
+    use anyhow::Context;
+    let error=Err::<(),_>(anyhow::anyhow!("secret-profile/private-controller")).context(PrivateStage::NativeOwner).unwrap_err();
+    assert_eq!(private_failure_stage(&error),"native-owner");
+    assert_eq!(private_failure_stage(&anyhow::anyhow!("native-owner secret")),"runtime");
+    assert_eq!(private_failure_reason(&anyhow::anyhow!("native source quarantined after LAN/VPN/VM conflict")),"native source quarantined; safe address repair required");
 }
