@@ -17,3 +17,6 @@ pub mod worker;
 pub mod native_repair;
 
 pub(crate) mod retirement;
+
+#[cfg(test)]
+mod recover_wait_tests;
