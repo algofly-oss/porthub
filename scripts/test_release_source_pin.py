@@ -162,6 +162,15 @@ class Pins(unittest.TestCase):
         self.assertIn('contents: read',select)
         self.assertIn('needs.reserve-publication-source.result',select)
 
+    def test_client_jobs_run_after_optional_reservation_is_skipped(self):
+        workflow = (HERE.parent / '.github/workflows/agent-platforms.yml').read_text()
+        for job in ('native', 'linux-32', 'local-native-core', 'media-helpers'):
+            with self.subTest(job=job):
+                body = workflow.split(f'\n  {job}:\n', 1)[1]
+                condition = next(line for line in body.splitlines() if line.startswith('    if:'))
+                self.assertIn('!cancelled()', condition)
+                self.assertIn("needs.select-platforms.result == 'success'", condition)
+
     def test_rest_creation_is_only_post_and_cleanup_rejects_foreign_origin(self):
         github=pin.GitHub('owner/repo')
         with patch.object(github,'api',return_value={}) as api:

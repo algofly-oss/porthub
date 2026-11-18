@@ -190,7 +190,7 @@ jobs:
   local-native-core:
     name: ${{ matrix.artifact }} (local native)
     needs: [select-platforms]
-    if: inputs.core_only == true && inputs.verify_only != true && needs.select-platforms.outputs.has_local_native == 'true'
+    if: ${{ !cancelled() && needs.select-platforms.result == 'success' && (inputs.core_only == true && inputs.verify_only != true && needs.select-platforms.outputs.has_local_native == 'true') }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -218,7 +218,7 @@ jobs:
           retention-days: 3
   media-helpers:
     needs: [select-platforms]
-    if: inputs.promote_run_id == '' && inputs.verify_only != true && inputs.core_only != true && (inputs.platform == '' || inputs.platform == 'all')
+    if: ${{ !cancelled() && needs.select-platforms.result == 'success' && (inputs.promote_run_id == '' && inputs.verify_only != true && inputs.core_only != true && (inputs.platform == '' || inputs.platform == 'all')) }}
     uses: ./.github/workflows/media-helpers.yml
     with:
       revision: ${{ inputs.revision || github.sha }}
@@ -299,7 +299,7 @@ jobs:
       revision: ${{ inputs.revision || github.sha }}
   native:
     needs: [select-platforms]
-    if: needs.select-platforms.outputs.has_native == 'true'
+    if: ${{ !cancelled() && needs.select-platforms.result == 'success' && (needs.select-platforms.outputs.has_native == 'true') }}
     name: ${{ matrix.artifact }}
     strategy:
       fail-fast: false
@@ -624,7 +624,7 @@ jobs:
           retention-days: 3
   linux-32:
     needs: [select-platforms]
-    if: needs.select-platforms.outputs.has_linux == 'true'
+    if: ${{ !cancelled() && needs.select-platforms.result == 'success' && (needs.select-platforms.outputs.has_linux == 'true') }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

@@ -161,12 +161,14 @@ jobs:
         run: |
           test "$(cat terminal-browser-assets/source-revision)" = "$PORTHUB_SOURCE_REVISION"
           (cd terminal-browser-assets && sha256sum --check --quiet SHA256SUMS)
-      - name: Install isolated browser and terminal build dependencies
+      - name: Install terminal build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bison ncurses-bin aria2 cmake g++ xvfb
-          npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
-          node "$RUNNER_TEMP/terminal-browser-tools/node_modules/playwright/cli.js" install --with-deps webkit
+      - name: Install isolated Playwright package
+        run: npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
+      - name: Install WebKit and system dependencies
+        run: node "$RUNNER_TEMP/terminal-browser-tools/node_modules/playwright/cli.js" install --with-deps webkit
       - uses: actions/cache@v4
         with:
           path: .cache/terminal-helper
