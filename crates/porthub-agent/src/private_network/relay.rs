@@ -557,6 +557,23 @@ async fn connect_lane(
     }))
 }
 
+#[derive(Clone,Copy)]
+struct HeartbeatTiming { ping:Duration, response:Duration, check:Duration }
+const HEARTBEAT:HeartbeatTiming=HeartbeatTiming{ping:Duration::from_secs(25),response:Duration::from_secs(15),check:Duration::from_secs(1)};
+struct LaneProbe { nonce:[u8;16], state:std::sync::Mutex<(u64,Option<(Bytes,tokio::time::Instant)>)> }
+impl LaneProbe {
+    fn new()->Result<Self>{let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|anyhow::anyhow!("relay heartbeat nonce unavailable"))?;Ok(Self{nonce,state:std::sync::Mutex::new((0,None))})}
+    fn challenge(&self,now:tokio::time::Instant,response:Duration)->Result<Option<Bytes>>{
+        let mut state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        if let Some((_,deadline))=&state.1 {ensure!(now<*deadline,"relay heartbeat response expired");return Ok(None);}
+        state.0=state.0.checked_add(1).ok_or_else(||anyhow::anyhow!("relay heartbeat sequence exhausted"))?;
+        let mut bytes=self.nonce.to_vec();bytes.extend_from_slice(&state.0.to_be_bytes());let bytes=Bytes::from(bytes);
+        state.1=Some((bytes.clone(),now+response));Ok(Some(bytes))
+    }
+    fn pong(&self,bytes:&Bytes,now:tokio::time::Instant){let mut state=self.state.lock().unwrap_or_else(|p|p.into_inner());if state.1.as_ref().is_some_and(|(expected,deadline)|expected==bytes&&now<*deadline){state.1=None;}}
+    fn expired(&self,now:tokio::time::Instant)->bool{self.state.lock().unwrap_or_else(|p|p.into_inner()).1.as_ref().is_some_and(|(_,deadline)|now>=*deadline)}
+}
+
 async fn serve_lanes(
     connections: Vec<ConnectedLane>,
     packets: &mut [mpsc::Receiver<Queued>; RELAY_LANES],
@@ -565,38 +582,47 @@ async fn serve_lanes(
     events: &mpsc::Sender<Event>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
+    serve_lanes_with_heartbeat(connections,packets,sender,config,events,cancel,HEARTBEAT).await
+}
+async fn serve_lanes_with_heartbeat(
+    connections:Vec<ConnectedLane>,packets:&mut[mpsc::Receiver<Queued>;RELAY_LANES],sender:&Sender,
+    config:&mut watch::Receiver<Option<Config>>,events:&mpsc::Sender<Event>,cancel:&CancellationToken,timing:HeartbeatTiming,
+)->Result<bool>{
     let reading = cancel.child_token();
     let mut readers = tokio::task::JoinSet::new();
     let mut writers = futures_util::stream::FuturesUnordered::new();
-    for (connection, input) in connections.into_iter().zip(packets.iter_mut()) {
+    let probes=connections.iter().map(|_|LaneProbe::new().map(Arc::new)).collect::<Result<Vec<_>>>()?;
+    for ((connection, input),probe) in connections.into_iter().zip(packets.iter_mut()).zip(probes) {
         let lane = connection.lane;
         let (writer, mut incoming) = connection.socket.split();
         let (pongs, pong_rx) = mpsc::channel::<Bytes>(4);
+        let reader_probe=probe.clone();
         sender.set_ready(lane, true);
+        let reader_sender=sender.clone();
         let read_events = events.clone();
         let read_cancel = reading.clone();
         let origins=connection.origins;
         readers.spawn(async move {
+            let mut check=tokio::time::interval(timing.check);
+            check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _=read_cancel.cancelled()=>break,
+                    _=check.tick()=>if reader_probe.expired(tokio::time::Instant::now()) {tracing::warn!(lane,"private relay lane missed matched heartbeat response");break;},
                     frame=incoming.next()=>match frame {
                         Some(Ok(Message::Binary(frame)))=>tokio::select! {_=read_cancel.cancelled()=>break,_=dispatch_downstream(frame,origins,&read_events)=>{}},
                         Some(Ok(Message::Ping(bytes)))=>if pongs.try_send(bytes).is_err(){break;},
-                        Some(Ok(Message::Pong(_)))=>{},
+                        Some(Ok(Message::Pong(bytes)))=>reader_probe.pong(&bytes,tokio::time::Instant::now()),
                         _=>break,
                     }
                 }
             }
+            reader_sender.set_ready(lane,false);
         });
         // Each socket has its own writer. A full TCP send buffer on one lane
         // must not prevent the other lanes from making progress.
-        writers.push(write_lane(
-            writer,
-            input,
-            pong_rx,
-            connection.batch,
-            connection.prefixes,
+        writers.push(write_lane_probed(
+            writer,input,pong_rx,connection.batch,connection.prefixes,Some(probe),timing,
         ));
     }
     let mut heartbeat = tokio::time::interval(Duration::from_secs(25));
@@ -626,14 +652,22 @@ async fn serve_lanes(
     Ok(stop)
 }
 
+#[cfg(test)]
 async fn write_lane(
-    mut socket: RelaySink,
+    socket: RelaySink,
     packets: &mut mpsc::Receiver<Queued>,
-    mut pongs: mpsc::Receiver<Bytes>,
+    pongs: mpsc::Receiver<Bytes>,
     batch: bool,
     prefixes: bool,
 ) -> Result<()> {
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(25));
+    write_lane_probed(socket,packets,pongs,batch,prefixes,None,HEARTBEAT).await
+}
+async fn write_lane_probed(
+    mut socket:RelaySink,packets:&mut mpsc::Receiver<Queued>,mut pongs:mpsc::Receiver<Bytes>,batch:bool,prefixes:bool,
+    probe:Option<Arc<LaneProbe>>,timing:HeartbeatTiming,
+)->Result<()>{
+    let mut heartbeat = tokio::time::interval(timing.ping);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     heartbeat.tick().await;
     loop {
         let (message,authority) = tokio::select! {
@@ -649,7 +683,10 @@ async fn write_lane(
                 let Some(pong)=pong else {return Ok(());};
                 (Message::Pong(pong),Bytes::new().into())
             },
-            _=heartbeat.tick()=>(Message::Ping(Bytes::new()),Bytes::new().into()),
+            _=heartbeat.tick()=>{
+                let bytes=match &probe {Some(probe)=>{let Some(bytes)=probe.challenge(tokio::time::Instant::now(),timing.response)? else{continue;};bytes},None=>Bytes::new()};
+                (Message::Ping(bytes),Bytes::new().into())
+            },
         };
         authority.during(async {tokio::time::timeout(Duration::from_secs(5),socket.send(message)).await??;Ok(())}).await?;
     }
@@ -658,6 +695,66 @@ async fn write_lane(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_current_on_time_pong_retires_pending_probe() -> Result<()> {
+        let probe=LaneProbe::new()?;let now=tokio::time::Instant::now();
+        let first=probe.challenge(now,Duration::from_secs(15))?.unwrap();
+        probe.pong(&Bytes::from_static(b"foreign"),now);
+        assert!(probe.challenge(now+Duration::from_secs(5),Duration::from_secs(15))?.is_none());
+        assert!(probe.expired(now+Duration::from_secs(15)));
+        probe.pong(&first,now+Duration::from_secs(15));assert!(probe.expired(now+Duration::from_secs(15)));
+        let live=LaneProbe::new()?;let first=live.challenge(now,Duration::from_secs(15))?.unwrap();
+        live.pong(&first,now+Duration::from_secs(1));let second=live.challenge(now+Duration::from_secs(2),Duration::from_secs(15))?.unwrap();
+        assert_ne!(first,second);live.pong(&first,now+Duration::from_secs(3));assert!(live.expired(now+Duration::from_secs(17)));Ok(())
+    }
+
+    async fn real_lane_heartbeat(responsive:bool)->Result<()> {
+        use tokio::io::AsyncReadExt;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base=format!("http://{}",listener.local_addr()?);
+        let stop=CancellationToken::new();let _guard=stop.clone().drop_guard();
+        let peer_stop=stop.clone();let drained=Arc::new(std::sync::atomic::AtomicUsize::new(0));let count=drained.clone();
+        let peer=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let(stream,_)=listener.accept().await?;
+            let mut wire=tokio_tungstenite::accept_async(stream).await?;
+            if responsive {
+                loop {tokio::select!{_=peer_stop.cancelled()=>break,frame=wire.next()=>match frame {
+                    Some(Ok(Message::Ping(bytes)))=>{count.fetch_add(1,Ordering::Relaxed);wire.send(Message::Pong(bytes)).await?;},
+                    Some(Ok(_))=>{},_=>break,
+                }}}
+            }else{
+                // Preserve a live TCP receiver that ACKs/drains every write,
+                // while the application never produces a WebSocket Pong.
+                let mut raw=wire.into_inner();let mut bytes=[0;4096];
+                loop {tokio::select!{_=peer_stop.cancelled()=>break,n=raw.read(&mut bytes)=>{let n=n?;if n==0{break;}count.fetch_add(n,Ordering::Relaxed);}}}
+            }
+            Ok::<_,anyhow::Error>(())
+        }));
+        let connection=connect_lane(&base,"test-token","peer","instance",0,1,&[],&stop).await?.ok_or_else(||anyhow::anyhow!("test relay unavailable"))?;
+        let(sender,mut inputs)=channel();let(_update,mut config)=watch::channel(None);let(events,_incoming)=mpsc::channel(8);
+        let owner_sender=sender.clone();let owner_stop=stop.clone();
+        let owner=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{
+            serve_lanes_with_heartbeat(vec![connection],&mut inputs,&owner_sender,&mut config,&events,&owner_stop,
+                HeartbeatTiming{ping:Duration::from_millis(30),response:Duration::from_millis(100),check:Duration::from_millis(10)}).await
+        }));
+        tokio::time::timeout(Duration::from_secs(1),async{while !sender.is_ready(){tokio::task::yield_now().await;}}).await?;
+        if responsive {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            ensure!(sender.is_ready()&&!owner.is_finished(),"responsive idle lane retired");
+            ensure!(drained.load(Ordering::Relaxed)>=3,"healthy lane did not answer repeated probes");
+            stop.cancel();let _=tokio::time::timeout(Duration::from_secs(1),owner).await???;
+        }else{
+            ensure!(!tokio::time::timeout(Duration::from_secs(1),owner).await???,"half-open lane did not request reconnect");
+            ensure!(!sender.is_ready(),"blackholed lane remained ready");
+            ensure!(drained.load(Ordering::Relaxed)>0,"test never ACKed/drained a successful client write");stop.cancel();
+        }
+        tokio::time::timeout(Duration::from_secs(1),peer).await???;Ok(())
+    }
+    #[tokio::test]
+    async fn real_tcp_accepting_writes_without_pong_retires_ready_lane()->Result<()>{real_lane_heartbeat(false).await}
+    #[tokio::test]
+    async fn real_idle_lane_matching_pongs_preserve_readiness()->Result<()>{real_lane_heartbeat(true).await}
 
     #[test]
     fn exit_flows_keep_carrier_affinity_and_distribute_parallel_connections() {
