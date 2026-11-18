@@ -13,4 +13,30 @@ const {launchBrowser}=require('./browser.cjs');
  assert.deepEqual(resumed,{before:[{type:'device',command:{type:'bluetooth',on:true}}],waiting:1,types:['text','pointer','key']});console.log('PASS Bluetooth reconnect precedes dependent text/pointer/key; waiting never claims connected');
  const failed=await page.evaluate(async()=>{const f=fixture();const pending=f.transport.send({type:'text',text:'never delivered'}).then(()=>false,()=>true);f.transport.device({type:'bluetooth',on:false});const rejected=await pending;f.transport.event({type:'device_status',bluetooth:'connected'});const result={rejected,inputCount:f.sent.filter(x=>x.type==='input').length,claimedConnected:f.changes.some(x=>x.bluetooth==='connected')};f.transport.close();return result});assert.deepEqual(failed,{rejected:true,inputCount:0,claimedConnected:false});console.log('PASS explicit off cancels pending reconnect; late connected cannot deliver input');
  const revoked=await page.evaluate(async()=>{const f=fixture();const pending=f.transport.keyboardNeeded().then(()=>false,()=>true);f.transport.event({type:'closed',phase:'host',cause:'closed'});return{rejected:await pending,closed:f.transport.closed,inputCount:f.sent.filter(x=>x.type==='input').length}});assert.deepEqual(revoked,{rejected:true,closed:true,inputCount:0});console.log('PASS revoked authenticated session cancels reconnect without input');
+ if(process.env.REVIEW_ORIGIN){
+  const {createKeyboardFixture}=require('./keyboard-local-fixture.cjs');
+  for(const viewport of [{width:402,height:874},{width:1512,height:982}]){
+   const f=await createKeyboardFixture(browser,viewport,{targetKind:'esp32'});
+   try{
+    await f.page.goto(process.env.REVIEW_ORIGIN+'/home?view=keyboard');
+    await f.page.getByRole('button',{name:'Keyboard clients',exact:true}).click();await f.page.getByRole('button',{name:'Connect client',exact:true}).click();
+    await f.page.getByRole('button',{name:'Disconnect client',exact:true}).waitFor();await f.page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await f.page.getByRole('dialog').waitFor({state:'hidden'});
+    await f.page.getByRole('button',{name:'Enable Bluetooth keyboard',exact:true}).waitFor();
+    assert.equal(f.deviceRecords.length,0,'opening Clients/release_all does not resume BLE');
+    const start=f.page.getByRole('button',{name:'Start dictation',exact:true});if(await start.isVisible())await start.click();else await f.page.getByRole('button',{name:'Dictate',exact:true}).click();
+    await f.page.getByRole('button',{name:'Stop recording',exact:true}).waitFor();
+    await f.page.waitForFunction(()=>document.querySelector('[title^="Bluetooth: waiting."]'));
+    assert.deepEqual(f.deviceRecords,[{type:'bluetooth',on:true}],'compiled dictation start reconnects the actual selected ESP32 target');
+    await f.feed(.08);await f.feed(0);f.releaseFirst();await f.page.getByLabel('Recognized text',{exact:true}).getByText('THE NEWEST SPOKEN WORDS ARE VISIBLE',{exact:false}).waitFor();
+    assert(!f.records.some(x=>x.command.type==='text'),'recognized segment waits while BLE advertises');
+    f.reportBluetooth('connected');await f.page.waitForFunction(()=>document.querySelector('[title^="Bluetooth: connected."]'));
+    for(let n=0;n<50&&!f.records.some(x=>x.command.type==='text');n++)await f.page.waitForTimeout(20);
+    assert.equal(f.records.filter(x=>x.command.type==='text').length,1);assert.match(f.records.find(x=>x.command.type==='text').command.text,/THE NEWEST SPOKEN WORDS/);
+    await f.page.getByRole('button',{name:'Temporarily disable Bluetooth keyboard',exact:true}).click();await f.page.getByRole('button',{name:'Enable Bluetooth keyboard',exact:true}).waitFor();assert.equal(f.deviceRecords.at(-1).on,false);
+    await f.page.getByRole('button',{name:'Stop recording',exact:true}).click();assert.deepEqual(f.errors,[]);
+    if(process.env.REVIEW_SCREENSHOT_DIR){fs.mkdirSync(process.env.REVIEW_SCREENSHOT_DIR,{recursive:true});await f.page.screenshot({path:path.join(process.env.REVIEW_SCREENSHOT_DIR,`${process.env.REVIEW_BROWSER||'chromium'}-bluetooth-${viewport.width}x${viewport.height}.png`)});}
+    console.log(`PASS compiled ESP32 dictation resume/wait/recognized input/explicit off ${viewport.width}x${viewport.height}`);
+   }finally{await f.close()}
+  }
+ }
  }finally{await browser.close()}})().catch(e=>{console.error(e);process.exit(1)});

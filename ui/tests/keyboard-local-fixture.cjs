@@ -1,11 +1,11 @@
 // Local browser-only transport/audio fixture. No native input or microphone APIs.
-exports.createKeyboardFixture=async(browser,viewport,{reducedMotion='no-preference'}={})=>{
+exports.createKeyboardFixture=async(browser,viewport,{reducedMotion='no-preference',targetKind='agent'}={})=>{
  const{makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');const state=makeDemoData(),id=state.machines[1]._id;
  const context=await browser.newContext({viewport,isMobile:viewport.width<=874,hasTouch:true,serviceWorkers:'block',reducedMotion});
  // A blocked registration still exposes navigator.serviceWorker; Workbox expects
  // a real registration. Explicitly model unavailable SW for mocked API tests.
  await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});
- const records=[],errors=[];let held=false,transcription=0,releaseFirst,releaseSecond;
+ const records=[],errors=[],deviceRecords=[];let boardSocket;let held=false,transcription=0,releaseFirst,releaseSecond;
  const firstResponse=new Promise(resolve=>releaseFirst=resolve),secondResponse=new Promise(resolve=>releaseSecond=resolve);
  const firstText=`${'Earlier recognized context needs to scroll away. '.repeat(20)}THE NEWEST SPOKEN WORDS ARE VISIBLE`;
  await context.addInitScript(()=>{
@@ -16,15 +16,15 @@ exports.createKeyboardFixture=async(browser,viewport,{reducedMotion='no-preferen
   window.AudioWorkletNode=class extends Node{constructor(){super();this.port={onmessage:null};window.fixtureAudioNode=this;}};
  });
  await context.route('**/api/**',async route=>{const req=route.request(),path=new URL(req.url()).pathname;let data;
-  if(path==='/api/keyboard/targets')data={targets:[{id,name:'Fixture desktop',kind:'agent',platform:'macos',online:true}]};
+  if(path==='/api/keyboard/targets')data={targets:[{id,name:targetKind==='esp32'?'Fixture ESP32':'Fixture desktop',kind:targetKind,platform:targetKind==='esp32'?'esp32':'macos',online:true}]};
   else if(path==='/api/keyboard/speech')data={settings:{enabled:true,model:'fixture'},models:[{id:'fixture',name:'Local fixture model',installed:true,languages:['en'],translate:false,auto_language:false}]};
   else if(path==='/api/keyboard/speech/transcribe'){const n=++transcription;if(n===1)await firstResponse;if(n===2)await secondResponse;data={text:n===1?firstText:n===2?'FINAL WORDS AFTER STOP':'SECOND RECORDING LATEST WORDS'};}
   else{try{data=handleDemoRequest(state,req.method(),req.url(),req.postData()||{});}catch{data={};}}
   await route.fulfill({json:data}).catch(()=>{});
  });
- await context.routeWebSocket('**/api/keyboard/control/**',socket=>{socket.send(JSON.stringify({type:'ready',session:'local-keyboard-review-session',clipboard:true,direct:false}));socket.onMessage(raw=>{const event=JSON.parse(raw);if(event.type!=='input')return;const command=event.input.command;if(command.type==='release_all')held=false;if(command.type==='pointer'&&command.action==='press'&&command.button==='left')held=true;if(command.type==='pointer'&&command.action==='release'&&command.button==='left')held=false;records.push({command,held,id:event.input.id,at:Date.now()});socket.send(JSON.stringify({type:'ack',ack:{id:event.input.id,ok:true}}));});});
+ await context.routeWebSocket('**/api/keyboard/control/**',socket=>{boardSocket=socket;socket.send(JSON.stringify({type:'ready',session:'local-keyboard-review-session',clipboard:true,direct:false}));if(targetKind==='esp32')socket.send(JSON.stringify({type:'device_status',bluetooth:'off'}));socket.onMessage(raw=>{const event=JSON.parse(raw);if(event.type==='device'){deviceRecords.push(event.command);if(event.command.type==='bluetooth')socket.send(JSON.stringify({type:'device_status',bluetooth:event.command.on?'waiting':'off'}));return;}if(event.type!=='input')return;const command=event.input.command;if(command.type==='release_all')held=false;if(command.type==='pointer'&&command.action==='press'&&command.button==='left')held=true;if(command.type==='pointer'&&command.action==='release'&&command.button==='left')held=false;records.push({command,held,id:event.input.id,at:Date.now()});socket.send(JSON.stringify({type:'ack',ack:{id:event.input.id,ok:true}}));});});
  const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
- return {page,context,records,errors,firstText,releaseFirst,releaseSecond,finalText:'FINAL WORDS AFTER STOP',feed:async amplitude=>page.evaluate(amplitude=>{const pcm=new Float32Array(amplitude?8000:16000).fill(amplitude);window.fixtureAudioNode.port.onmessage({data:{pcm,rate:16000}});},amplitude),close:async()=>{releaseFirst();releaseSecond();await context.close();}};
+ return {page,context,records,errors,deviceRecords,reportBluetooth:state=>boardSocket.send(JSON.stringify({type:'device_status',bluetooth:state})),firstText,releaseFirst,releaseSecond,finalText:'FINAL WORDS AFTER STOP',feed:async amplitude=>page.evaluate(amplitude=>{const pcm=new Float32Array(amplitude?8000:16000).fill(amplitude);window.fixtureAudioNode.port.onmessage({data:{pcm,rate:16000}});},amplitude),close:async()=>{releaseFirst();releaseSecond();await context.close();}};
 };
 
 // Chromium's browser input pipeline creates real touch/pointer events. Observe
