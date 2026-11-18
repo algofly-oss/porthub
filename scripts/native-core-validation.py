@@ -120,6 +120,23 @@ def cleanup_launchd(before,program):
 
 
 @contextmanager
+def isolated_fixture_environment(environment):
+    # Darwin's sockaddr_un is only 104 bytes. A fixture temp root nested in a
+    # long checkout/nonce path cannot host the existing registration sockets.
+    # Keep this independent, short, private, and remove it on every exit path.
+    real_home=Path.home()
+    with tempfile.TemporaryDirectory(prefix='ph-',dir='/tmp') as raw:
+        temporary=Path(raw);temporary.chmod(0o700)
+        home=temporary/'home';home.mkdir(mode=0o700)
+        result=dict(environment,HOME=str(home),TMPDIR=str(temporary),
+                    CARGO_HOME=environment.get('CARGO_HOME',str(real_home/'.cargo')),
+                    RUSTUP_HOME=environment.get('RUSTUP_HOME',str(real_home/'.rustup')))
+        for variable,relative in [('XDG_CONFIG_HOME','.config'),('XDG_DATA_HOME','.local/share'),('XDG_CACHE_HOME','.cache'),('XDG_STATE_HOME','.local/state')]:
+            directory=home/relative;directory.mkdir(mode=0o700,parents=True,exist_ok=True);result[variable]=str(directory)
+        yield result
+
+
+@contextmanager
 def validation_stage(parent):
     with tempfile.TemporaryDirectory(prefix='native-core-validation-',dir=parent) as raw:
         stage=Path(raw);stage.chmod(0o700)
@@ -152,9 +169,8 @@ def run(root,source,output,budget):
     # All fixture profiles and optional component stores are private test roots;
     # never use installed enrollment profiles or mutate the machine service.
     started=time.monotonic();output.parent.mkdir(parents=True,exist_ok=True)
-    with validation_stage(output.parent) as stage:
+    with validation_stage(output.parent) as stage, isolated_fixture_environment(env) as env:
         logs=stage/'logs';logs.mkdir()
-        fixtures=stage/'fixture-tmp';fixtures.mkdir(mode=0o700);env['TMPDIR']=str(fixtures)
         cache=stage/'components-cache';debug=Path(env.get('CARGO_TARGET_DIR',root/'target'))/target/'debug'
         env.update(PORTHUB_TEST_SYNC_EXECUTABLE=str(debug/'porthub-sync'),PORTHUB_COMPONENT_CACHE=str(cache),PORTHUB_COMPONENT_SHARED_CACHE='off',PORTHUB_COMPONENT_SOURCE='github',PORTHUB_TERMINAL_HELPER_CACHE_ROOT=str(stage/'terminal-cache'))
         steps=[]

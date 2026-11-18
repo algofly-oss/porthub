@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import os
 import sys
+import socket
 from unittest.mock import patch,Mock
 
 HERE=Path(__file__).parent
@@ -104,6 +105,18 @@ class LocalCoreTests(unittest.TestCase):
             self.assertTrue(any(needle in cmd for cmd in commands),needle)
         launch=next(row for row in rows if row['name']=='native-launchd')
         self.assertEqual(launch['env'],{'PORTHUB_TEST_LAUNCHD':'1'})
+
+    def test_private_short_fixture_environment_preserves_only_compiler_homes(self):
+        with v.isolated_fixture_environment({'PATH':'fixture-path','HOME':'/real/user','CARGO_HOME':'/compiler/cache','RUSTUP_HOME':'/compiler/toolchain'}) as env:
+            self.assertNotEqual(env['HOME'],'/real/user')
+            self.assertEqual(env['CARGO_HOME'],'/compiler/cache');self.assertEqual(env['RUSTUP_HOME'],'/compiler/toolchain')
+            for name in ('HOME','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME'):
+                self.assertTrue(Path(env[name]).is_dir());self.assertTrue(Path(env[name]).resolve().is_relative_to(Path(env['TMPDIR']).resolve()))
+            root=Path(env['TMPDIR']);private=root/'.tmpabcdef/a/status';private.mkdir(parents=True)
+            endpoint=private/('a'*24+'.sock')
+            self.assertLess(len(str(endpoint).encode()),104)
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:listener.bind(str(endpoint))
+        self.assertFalse(root.exists())
 
     def test_failed_native_logs_survive_temporary_stage_cleanup(self):
         with tempfile.TemporaryDirectory() as raw:
