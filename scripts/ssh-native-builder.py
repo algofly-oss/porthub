@@ -163,7 +163,7 @@ with (stage/'source.pack').open('rb') as f: subprocess.run([git,'-C',str(source)
 subprocess.run([git,'-C',str(source),'update-ref','HEAD',job['revision']],check=True)
 subprocess.run([git,'-C',str(source),'reset','--hard',job['revision']],check=True,stdout=subprocess.DEVNULL)
 env=os.environ.copy()
-env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
+env['PATH']=str(pathlib.Path(sys.executable).parent)+os.pathsep+str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
 env.update(CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TARGET_DIR=str(stage/'target'),RUST_MIN_STACK='33554432')
 if job['tools']['vcvars']:
  env={key.upper():value for key,value in env.items()}
@@ -172,7 +172,7 @@ if job['tools']['vcvars']:
  for line in text.splitlines():
   if '=' in line and not line.startswith('='):
    key,value=line.split('=',1); env[key.upper()]=value
- env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
+ env['PATH']=str(pathlib.Path(sys.executable).parent)+os.pathsep+str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathlib.Path(git).parent)+os.pathsep+env.get('PATH','')
 try:
  with (stage/'worker.log').open('wb') as log:
   subprocess.run([sys.executable,str(source/'scripts/hybrid-native-build.py'),'worker','--root',str(source),'--source-revision',job['revision'],'--output',str(stage/'components.zip'),'--tool','core','--timeout-seconds',str(job['timeout'])],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
