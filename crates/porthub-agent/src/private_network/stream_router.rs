@@ -726,14 +726,16 @@ fn spawn_reader(
  #[test]
  fn validated_exit_pairs_project_only_explicit_private_stream_ports() {
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();
-  for with_private in [false,true] {
+  for (with_private,compact) in [(false,false),(true,false),(false,true),(true,true)] {
    let(mut base,pair)=snapshots(&a,&b);
    base.sparse.as_mut().unwrap().exit_epoch=Some("e".repeat(64));
    base.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];
+   let explicit=if with_private{pair.grants.clone()}else{Vec::new()};
+   let acl=compact.then(||porthub_network::policy::pair_acl::PairAcl::from_grants("a","b",&explicit).unwrap());
    let lease=porthub_network::policy::PairLease {
     workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),
     expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),
-    grants:if with_private{pair.grants.clone()}else{Vec::new()},acl:None,
+    grants:if compact{Vec::new()}else{explicit},acl,
     exit:Some(porthub_network::policy::ExitPair{epoch:"e".repeat(64),route_id:"exit-route".into(),client:"a".into(),router:"b".into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly}),
    };
    let mut engine=porthub_network::policy::Engine::default();engine.apply(base.clone()).unwrap();engine.install_pair(lease).unwrap();
