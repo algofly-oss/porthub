@@ -351,3 +351,111 @@ fn observed_response_open_admission_retirement_has_explicit_neutral_reason() -> 
     );
     Ok(())
 }
+
+#[test]
+fn optimization_cooldown_is_peer_scoped_bounded_and_expires_without_wakes() {
+    let now = std::time::Instant::now();
+    let mut backoff = OptimizationBackoff::default();
+    backoff.failed("failed", now);
+    assert!(!backoff.permits("failed", now));
+    assert!(backoff.permits("healthy", now));
+    assert!(backoff.permits("failed", now + OPTIMIZATION_COOLDOWN));
+    for i in 0..BACKOFF_PEERS * 2 {
+        backoff.failed(&format!("peer-{i}"), now);
+    }
+    assert_eq!(backoff.0.len(), BACKOFF_PEERS);
+    backoff.failed("new", now + OPTIMIZATION_COOLDOWN);
+    assert_eq!(backoff.0.len(), 1);
+}
+
+#[test]
+fn only_post_native_failures_trigger_optimization_mitigation() {
+    for stage in [
+        "source-response-accept",
+        "source-response-open",
+        "source-duplex",
+        "target-response-connect",
+        "target-response-open",
+        "target-duplex",
+    ] {
+        let failure = anyhow::anyhow!("private packet admission retired").context(stage);
+        assert!(post_native_failure(&failure));
+    }
+    for stage in [
+        "source-open",
+        "source-native-prepare",
+        "target-open",
+        "source flow owner retired",
+    ] {
+        assert!(!post_native_failure(&anyhow::anyhow!(stage)));
+    }
+}
+
+#[tokio::test]
+async fn cooldown_declines_only_new_optimization_and_reprobes_after_expiry() -> Result<()> {
+    let ai = Identity::new()?;
+    let bi = Identity::new()?;
+    let a = Peer {
+        id: "a".into(),
+        ip: "10.234.250.1".parse()?,
+        fingerprint: ai.fingerprint().into(),
+        instance: "a-instance".into(),
+    };
+    let b = Peer {
+        id: "b".into(),
+        ip: "10.235.1.2".parse()?,
+        fingerprint: bi.fingerprint().into(),
+        instance: "b-instance".into(),
+    };
+    let (handle, _) = flow_open::tests::local(&a, &b, "a")?;
+    let captured = handle.clone();
+    let (tx, _) = mpsc::channel(64);
+    let (runtime, _background) = Runtime::new_requested(
+        ai,
+        Arc::new(move |id| {
+            LocalAuthority::capture(&captured, "w", "a", id)
+                .ok()
+                .map(Arc::new)
+        }),
+        Arc::new(|_| {}),
+        tx,
+        CancellationToken::new(),
+    )?;
+    let now = std::time::Instant::now();
+    runtime
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .optimization_backoff
+        .failed("b", now);
+    let flow = |port| tcp_stream::Flow {
+        source: format!("10.234.250.1:{port}").parse().unwrap(),
+        destination: "10.235.1.2:443".parse().unwrap(),
+    };
+    let old_syn = native_syn(flow(49400)).await?;
+    assert!(!runtime.kernel_packet("b", old_syn.clone(), true));
+    assert_eq!(runtime.counts(), (0, 0));
+    runtime
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .optimization_backoff
+        .failed("b", now - OPTIMIZATION_COOLDOWN);
+    assert!(
+        !runtime.kernel_packet("b", old_syn, true),
+        "existing raw tuple cannot migrate"
+    );
+    assert!(
+        runtime.kernel_packet("b", native_syn(flow(49401)).await?, true),
+        "new connection genuinely reprobes optimization"
+    );
+    assert_eq!(runtime.counts(), (1, 0));
+    handle.revoke_all();
+    assert!(
+        !runtime.kernel_packet("b", native_syn(flow(49402)).await?, true),
+        "cooldown expiry cannot grant authority"
+    );
+    Ok(())
+}

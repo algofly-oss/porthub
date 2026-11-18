@@ -29,6 +29,28 @@ fn setup_ready(permit: &SendPermit, needed: Duration) -> bool {
 // Same bound as the existing raw transport flow-pinning table. Exhaustion
 // declines new optimizations; it never truncates identities or raw packets.
 const DECISIONS: usize = 65536;
+// Separate from carrier RTT scoring and legacy-router dial retry: this only
+// declines NEW finite-stream ownership after a post-native failure.
+const OPTIMIZATION_COOLDOWN: Duration = Duration::from_secs(30);
+const BACKOFF_PEERS: usize = 64;
+#[derive(Default)]
+struct OptimizationBackoff(HashMap<String, std::time::Instant>);
+impl OptimizationBackoff {
+    fn permits(&self, peer: &str, now: std::time::Instant) -> bool {
+        self.0.get(peer).is_none_or(|until| now >= *until)
+    }
+    fn failed(&mut self, peer: &str, now: std::time::Instant) {
+        self.0.retain(|_, until| *until > now);
+        if self.0.contains_key(peer) || self.0.len() < BACKOFF_PEERS {
+            self.0.insert(peer.to_owned(), now + OPTIMIZATION_COOLDOWN);
+        }
+    }
+}
+fn post_native_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| matches!(cause.to_string().as_str(),
+        "source-response-accept" | "source-response-open" | "source-duplex"
+        | "target-response-connect" | "target-response-open" | "target-duplex"))
+}
 #[derive(Clone, Copy)]
 enum Decision {
     Raw,
@@ -68,6 +90,7 @@ struct State {
     kernel: HashMap<tcp_stream::Flow, Id>,
     decisions: HashMap<tcp_stream::Flow, Decision>,
     decisions_full: bool,
+    optimization_backoff: OptimizationBackoff,
 }
 enum Command {
     Source {
@@ -187,6 +210,7 @@ impl Runtime {
                 kernel: HashMap::new(),
                 decisions: HashMap::new(),
                 decisions_full: false,
+                optimization_backoff: OptimizationBackoff::default(),
             }),
             commands,
         }));
@@ -360,7 +384,9 @@ impl Runtime {
                 state.decisions_full = true;
                 return false;
             }
-            if !prefer_stream || self.0.cancel.is_cancelled() {
+            if !prefer_stream || self.0.cancel.is_cancelled()
+                || !state.optimization_backoff.permits(peer, std::time::Instant::now())
+            {
                 state.decisions.insert(flow, Decision::Raw);
                 return false;
             }
@@ -609,6 +635,10 @@ impl Background {
         },
         Command::Target{record,key,receiver}=>{let result=run_target(&runtime,&record,key,receiver).await;(record,result)},
     };
+    if result.as_ref().is_err_and(post_native_failure) {
+        runtime.0.state.lock().unwrap_or_else(|p| p.into_inner())
+            .optimization_backoff.failed(&record.peer, std::time::Instant::now());
+    }
     record.phase.send_replace(if result.is_ok(){Phase::Retired}else{Phase::Failed});runtime.remove(&record);Runtime::reap_output(&record).await;result
 });},
    packet=self.packets.recv()=>{let Some(packet)=packet else{if stop.is_cancelled(){break;}anyhow::bail!("native output stack stopped")};let Some(flow)=tcp_stream::Flow::from_packet(packet.bytes())else{continue};let record={let state=self.runtime.0.state.lock().unwrap_or_else(|p|p.into_inner());state.kernel.get(&flow.reverse()).and_then(|id|state.records.get(id)).cloned()};if let Some(record)=record{let _=record.output.try_send(packet);}},
