@@ -1551,6 +1551,36 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn consumed_native_input_cannot_roll_back_fresh_control_to_old_packet_deadline() -> Result<()> {
+        let mut rig=rig_rx(false,true).await?;
+        rig.release.send(true)?;
+        let result=async {
+            rig.app.write_all(b"old-native-byte").await?;
+            let packet=tokio::time::timeout(Duration::from_secs(1),rig.held_input.recv()).await?.ok_or_else(||anyhow::anyhow!("old native DATA absent"))?;
+            let fresh_deadline=Instant::now()+Duration::from_secs(5);
+            let fresh=SendPermit::bounded(move||Instant::now()<fresh_deadline,move||fresh_deadline.checked_duration_since(Instant::now()));
+            rig.connection.renew_control(fresh.clone()).await?;
+            let old_deadline=Instant::now()+Duration::from_secs(1);
+            let old=SendPermit::bounded(move||Instant::now()<old_deadline,move||old_deadline.checked_duration_since(Instant::now()));
+            rig.handle.incoming(packet,old.clone())?;
+            let read=tokio::time::timeout(Duration::from_secs(1),rig.connection.read_chunk()).await??;
+            read.deliver(|bytes,eof|async move{ensure!(!eof&&bytes.as_ref()==b"old-native-byte","old native DATA changed");Ok(())}).await?;
+            // The old byte has crossed its actual native read/delivery boundary.
+            // Its deadline cannot become the current flow-control deadline.
+            tokio::time::sleep_until(tokio::time::Instant::from_std(old_deadline+Duration::from_millis(100))).await;
+            ensure!(!old.valid()&&fresh.valid(),"fixture did not separate original and current deadlines");
+            ensure!(rig.connection.alive.load(Ordering::SeqCst),"consumed old packet retired freshly authorized native control");
+            rig.app.write_all(b"fresh-native-byte").await?;
+            let packet=tokio::time::timeout(Duration::from_secs(1),rig.held_input.recv()).await?.ok_or_else(||anyhow::anyhow!("fresh native DATA absent"))?;
+            rig.handle.incoming(packet,fresh.clone())?;
+            let read=tokio::time::timeout(Duration::from_secs(1),rig.connection.read_chunk()).await??;
+            read.deliver(|bytes,eof|async move{ensure!(!eof&&bytes.as_ref()==b"fresh-native-byte","fresh native DATA changed");Ok(())}).await?;
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        let cleaned=cleanup(rig).await;
+        result?;cleaned
+    }
     fn portion(packet: &Bytes, start: usize, length: usize) -> Result<Bytes> {
         let ip = Ipv4Packet::new_checked(packet.as_ref())?;
         let tcp = TcpPacket::new_checked(ip.payload())?;
