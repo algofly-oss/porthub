@@ -365,15 +365,15 @@ async fn renumber_consumer(profile:&porthub_agent::private_profile::Profile,path
     let old_socket=tokio::net::UdpSocket::bind((old,0)).await?;old_socket.connect((old_peer,443)).await?;old_socket.send(&payload).await?;
     let mut response=[0;256];let n=tokio::time::timeout(Duration::from_secs(3),old_socket.recv(&mut response)).await??;ensure!(&response[..n]==payload,"initial owned UDP failed");
     println!("native_auto_renumber phase=initial_private_tcp_udp_ready");
-    let foreign_name=format!("rf{:x}",Sha256::digest(nonce.as_bytes()));let foreign_name=&foreign_name[..10];
-    ensure!(connection.get_link_by_name(foreign_name).await?.is_none(),"foreign sentinel name occupied");
+    let foreign_name=format!("ph{:x}",Sha256::digest(nonce.as_bytes()));let foreign_name=&foreign_name[..10];
+    let tun_name=format!("ph{}",&format!("{:x}",Sha256::digest(profile.peer_id.as_bytes()))[..8]);
+    ensure!(foreign_name!=tun_name&&connection.get_link_by_name(foreign_name).await?.is_none(),"foreign sentinel name occupied or aliases production owner");
     let foreign=porthub_agent::private_network::device::Tun::open(foreign_name,Ipv4Addr::new(10,254,252,1),&[]).await?;
     let result=tokio::time::timeout(Duration::from_secs(120),async{
         let destination=Ipv4Addr::new(10,234,240,0);
         connection.add_route(Ipv4Route::new(destination,24).dev_index(foreign.index).scope(RouteScope::Link).metric(7)).await?;
         let read_sentinel=||async{let rows=connection.get_routes().await?;let rows:Vec<_>=rows.iter().filter(|r|r.destination()==Some(&IpAddr::V4(destination))&&r.dst_len()==24&&r.oif()==Some(foreign.index)&&r.priority()==Some(7)).collect();ensure!(rows.len()==1,"owned sentinel route missing/ambiguous");Ok::<_,anyhow::Error>(format!("{:?}",rows[0]))};
         let stamp=read_sentinel().await?;
-        let tun_name=format!("ph{}",&format!("{:x}",Sha256::digest(profile.peer_id.as_bytes()))[..8]);
         let quarantine=porthub_agent::profile::sibling(path,".native-quarantine.json");
         let mut old_absent=false;let mut quarantined=false;let mut report_observed=false;let mut applying=false;
         let next=loop{
