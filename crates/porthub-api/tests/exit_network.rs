@@ -193,7 +193,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         if gated {
             let provider=containers.first().context("owned provider absent")?;
             async fn wait_phase(name:&str,phase:&str)->Result<String> {
-                tokio::time::timeout(Duration::from_secs(8),async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.context("owned relay handshake phase timeout")?
+                tokio::time::timeout(Duration::from_secs(8),async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.with_context(||format!("owned relay handshake phase timeout: {phase}"))?
             }
             wait_phase(provider,"native_relay_origin negotiated=true").await?;
             wait_phase(consumer,"native_relay_origin negotiated=true").await?;
