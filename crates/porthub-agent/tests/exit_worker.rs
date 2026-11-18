@@ -79,7 +79,10 @@ async fn consumer(target: &str) -> Result<()> {
         let count = if mode == "random" { 64 } else { 16 };
         let mut counts = BTreeMap::new();
         for index in 0..count {
+            let connect_started=std::time::Instant::now();
+            println!("native_exit_connect mode={mode} index={index} phase=begin");
             let (_, ip) = open(target).await.with_context(|| format!("new {mode} connection {index}"))?;
+            println!("native_exit_connect mode={mode} index={index} phase=connected elapsed_ms={}",connect_started.elapsed().as_millis());
             ensure!(expected.contains(&ip), "traffic bypassed the exits");
             *counts.entry(ip).or_insert(0usize) += 1;
             ensure!(ping(&mut established).await.with_context(|| format!("persistent connection during {mode} iteration {index}"))? == original, "established connection changed exit");
@@ -148,17 +151,139 @@ async fn consumer(target: &str) -> Result<()> {
     Ok(())
 }
 
+fn authority_callback_samples()->Option<(u64,u64,u64)>{
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    {Some(porthub_agent::private_network::sparse_dispatch::test_current_callback_samples())}
+    #[cfg(not(all(feature="private-sparse",feature="private-stream")))]
+    {None}
+}
+fn process_cpu_nanos()->Option<u128>{
+    let mut value=libc::timespec{tv_sec:0,tv_nsec:0};
+    if unsafe{libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID,&mut value)}!=0||value.tv_sec<0||value.tv_nsec<0||value.tv_nsec>=1_000_000_000{return None;}
+    Some(value.tv_sec as u128*1_000_000_000+value.tv_nsec as u128)
+}
+fn own_cgroup_cpu()->Option<BTreeMap<String,u64>> {
+    use std::io::Read;
+    let file=std::fs::File::open("/sys/fs/cgroup/cpu.stat").ok()?;
+    let mut bytes=Vec::new();file.take(4097).read_to_end(&mut bytes).ok()?;
+    if bytes.len()>4096{return None;}
+    let text=std::str::from_utf8(&bytes).ok()?;let mut fields=BTreeMap::new();
+    for line in text.lines(){let mut split=line.split_whitespace();let key=split.next()?;let value=split.next()?;
+        if ["usage_usec","user_usec","system_usec","nr_periods","nr_throttled","throttled_usec","nr_bursts","burst_usec"].contains(&key){fields.insert(key.into(),value.parse().ok()?);}
+    }
+    fields.contains_key("usage_usec").then_some(fields)
+}
+fn print_cgroup_cpu(before:Option<&BTreeMap<String,u64>>,after:Option<&BTreeMap<String,u64>>,elapsed:Duration){
+    let mut delta=BTreeMap::new();
+    if let(Some(before),Some(after))=(before,after){for(key,value)in after{if let Some(old)=before.get(key){delta.insert(key,value.saturating_sub(*old));}}}
+    println!("native_fixture_cpu available={} elapsed_ms={} delta={}",before.is_some()&&after.is_some(),elapsed.as_millis(),serde_json::to_string(&delta).unwrap());
+}
+
+fn guarded_native_payload_bytes()->Result<u64> {
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    {Ok(porthub_agent::private_network::runtime::test_guarded_native_payload_bytes())}
+    #[cfg(not(all(feature="private-sparse",feature="private-stream")))]
+    {anyhow::bail!("guarded native observation requires sparse stream test build")}
+}
+async fn paired_native_tcp(role:&str)->Result<()> {
+    use tokio::io::AsyncReadExt;
+    use sha2::{Digest,Sha256};
+    ensure!(cfg!(feature="private-sparse"),"native paired fixture requires sparse build");
+    let target=std::env::var("PORTHUB_TEST_PEER_TARGET")?;
+    let nonce=std::env::var("PORTHUB_TEST_FIXTURE_NONCE")?;
+    ensure!(nonce.starts_with("porthub-exit-test-")&&nonce.len()<80,"fixture nonce missing");
+    let seed=Sha256::digest(nonce.as_bytes());
+    let started=std::time::Instant::now();let cpu_before=process_cpu_nanos();let callbacks_before=authority_callback_samples();
+    fn progress(stage:&str,marker:&str,count:usize,started:std::time::Instant){println!("native_pair_progress stage={stage} marker={marker} bytes={count} elapsed_ms={}",started.elapsed().as_millis());}
+    const BYTES:usize=256*1024;
+    let before=guarded_native_payload_bytes()?;
+    async fn control(command:&str)->Result<String> {
+        let target=std::env::var("PORTHUB_TEST_CONTROL_TARGET")?;
+        let(mut stream,_)=open(&target).await?;stream.get_mut().write_all(format!("{command}\n").as_bytes()).await?;
+        let mut reply=String::new();tokio::time::timeout(Duration::from_secs(3),stream.read_line(&mut reply)).await??;Ok(reply.trim().into())
+    }
+    async fn send(stream:&mut TcpStream,seed:&[u8],sent:&mut usize,started:std::time::Instant,stage:&str)->Result<()> {
+        progress(stage,"start",*sent,started);let mut block=[0;4096];
+        while *sent<BYTES {
+            for(i,b)in block.iter_mut().enumerate(){*b=seed[(*sent+i)%seed.len()]^((*sent+i)as u8);}
+            let remaining=(BYTES-*sent).min(block.len());let n=stream.write(&block[..remaining]).await?;
+            ensure!(n>0,"native paired write returned zero");let previous=*sent;*sent+=n;
+            if previous/(64*1024)!=*sent/(64*1024){progress(stage,"boundary",*sent,started);}
+        }
+        progress(stage,"half-close-start",*sent,started);stream.shutdown().await?;progress(stage,"half-close-complete",*sent,started);Ok(())
+    }
+    async fn receive(stream:&mut TcpStream,seed:&[u8],received:&mut usize,started:std::time::Instant,stage:&str)->Result<()> {
+        progress(stage,"start",*received,started);let mut block=[0;4096];
+        while *received<BYTES {
+            let remaining=(BYTES-*received).min(block.len());let n=stream.read(&mut block[..remaining]).await?;
+            ensure!(n>0,"native paired payload ended early");
+            ensure!(block[..n].iter().enumerate().all(|(i,b)|*b==seed[(*received+i)%seed.len()]^((*received+i)as u8)),"native paired payload mismatch");let previous=*received;*received+=n;
+            if previous==0||previous/(64*1024)!=*received/(64*1024){progress(stage,"boundary",*received,started);}
+        }
+        progress(stage,"payload-complete",*received,started);
+        let mut byte=[0;1];ensure!(stream.read(&mut byte).await?==0,"native paired half-close missing");progress(stage,"peer-eof",*received,started);Ok(())
+    }
+    let mut phase="starting";let mut sent=0usize;let mut received=0usize;
+    let transaction=async {
+    if role=="private-provider" {
+        phase="bind";let listener=tokio::time::timeout(Duration::from_secs(60),async {
+            loop {match tokio::net::TcpListener::bind(&target).await {
+                Ok(listener)=>return Ok::<_,anyhow::Error>(listener),
+                Err(error) if error.kind()==std::io::ErrorKind::AddrNotAvailable=>tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error)=>return Err(error.into()),
+            }}
+        }).await.context("native peer address did not appear")??;
+        phase="accept";let(mut stream,_)=tokio::time::timeout(Duration::from_secs(60),listener.accept()).await.context("native provider accept timeout")??;
+        tokio::time::timeout(Duration::from_secs(30),async{phase="provider-receive";receive(&mut stream,&seed,&mut received,started,"provider-receive").await?;phase="provider-send";send(&mut stream,&seed,&mut sent,started,"provider-send").await}).await.context("native provider data transaction timeout")??;
+        tokio::time::timeout(Duration::from_secs(30),async{loop {
+            if control("native:consumer-done?").await?=="ready"{return Ok::<_,anyhow::Error>(());}
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }}).await.context("consumer did not verify native reply before provider shutdown")??;
+    } else {
+        phase="quic3-capability";tokio::time::timeout(Duration::from_secs(60),async {
+            loop {
+                if control("quic3:ready").await?=="ready"{return Ok::<_,anyhow::Error>(());}
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }).await.context("two native agents did not negotiate quic3-credit")??;
+        phase="connect";let mut stream=tokio::time::timeout(Duration::from_secs(30),TcpStream::connect(&target)).await.context("native peer TCP443 connect failed")??;
+        tokio::time::timeout(Duration::from_secs(30),async{phase="consumer-send";send(&mut stream,&seed,&mut sent,started,"consumer-send").await?;phase="consumer-receive";receive(&mut stream,&seed,&mut received,started,"consumer-receive").await}).await.context("native consumer data transaction timeout")??;
+        ensure!(guarded_native_payload_bytes()?.saturating_sub(before)>=BYTES as u64,"native reply used no guarded stream delivery");
+        ensure!(control("native:consumer-complete").await?=="updated","fixture completion not acknowledged");
+    }
+    Ok::<_,anyhow::Error>(())
+    }.await;
+    let observation=guarded_native_payload_bytes();
+    println!("native_pair_phase={phase} elapsed_ms={} sent_bytes={sent} received_bytes={received} guarded_counter_available={} guarded_native_payload_delta={}",started.elapsed().as_millis(),observation.is_ok(),observation.as_ref().map(|value|value.saturating_sub(before)).unwrap_or(0));
+    if let Some((before,after))=callbacks_before.zip(authority_callback_samples()) {
+        println!("native_authority_callback calls={} sample_count={} sampled_ns={} sample_every=128",after.0.saturating_sub(before.0),after.1.saturating_sub(before.1),after.2.saturating_sub(before.2));
+    }
+    let cpu_delta=cpu_before.zip(process_cpu_nanos()).map(|(before,after)|after.saturating_sub(before));
+    println!("native_pair_cpu available={} cpu_us={} elapsed_ms={}",cpu_delta.is_some(),cpu_delta.map(|value|value/1000).unwrap_or(0),started.elapsed().as_millis());
+    transaction?;
+    let delivered=guarded_native_payload_bytes()?.saturating_sub(before);
+    ensure!(delivered>=BYTES as u64,"application succeeded without guarded native stream payload");
+    println!("actual_guarded_native_payload_bytes={delivered} raw_fallback_excluded_by_counter=true");
+    println!("actual_native_pair_memory_duplex=true bytes_each={BYTES} seeded_payload=true half_close=true role={role}");
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "worker for verify-exit-network.py; disposable owned namespace only"]
 async fn isolated_exit_worker() -> Result<()> {
     ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file(), "requires owned test container");
     let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let cpu_start=std::time::Instant::now();let cpu_before=own_cgroup_cpu();
     let profile = std::env::var("PORTHUB_TEST_PROFILE")?;
     let private: porthub_agent::private_profile::Profile = serde_json::from_str(&profile)?;
     use sha2::{Digest, Sha256};
     let id = format!("{:x}", Sha256::digest(format!("private\n{}\n{}", private.server, private.peer_id).as_bytes()));
     let path = std::path::PathBuf::from(format!("/state/{id}.json"));
     porthub_agent::profile::write_private(&path, profile.as_bytes(), false)?;
+    let role = std::env::var("PORTHUB_TEST_ROLE")?;
+    if role.starts_with("private-") {
+        porthub_agent::private_network::strategy::save(&path,porthub_agent::private_network::strategy::Mode::PreferGateway)?;
+    }
     let cancel = CancellationToken::new();
     let public_path = std::path::PathBuf::from("/state/profile.json");
     let unified = std::env::var("PORTHUB_TEST_PUBLIC_PROFILE").ok();
@@ -172,7 +297,6 @@ async fn isolated_exit_worker() -> Result<()> {
         Box::pin(porthub_agent::private_network::runtime::run(path.clone(), cancel.clone()))
     };
     tokio::pin!(runtime);
-    let role = std::env::var("PORTHUB_TEST_ROLE")?;
     // Real foreign firewall commits race the provider's initial exit setup.
     // The private runtime must stay alive and retry after the writer settles.
     // This worker only runs inside the explicitly owned disposable namespace.
@@ -201,7 +325,12 @@ async fn isolated_exit_worker() -> Result<()> {
         ensure!(source == "198.18.10.2".parse::<IpAddr>()?, "fixture underlay source differs");
         println!("normal underlay verified before activating exit policy");
     }
-    let result = if role == "http-consumer" {
+    let result = if role=="private-provider"||role=="private-consumer" {
+        tokio::select! {
+            result=paired_native_tcp(&role)=>result,
+            result=&mut runtime=>anyhow::bail!("agent stopped during native paired test: {result:?}"),
+        }
+    } else if role == "http-consumer" {
         tokio::select! {
             result = http_consumer() => result,
             result = &mut runtime => anyhow::bail!("agent stopped: {result:?}"),
@@ -231,6 +360,7 @@ async fn isolated_exit_worker() -> Result<()> {
         }
         Ok(())
     });
+    print_cgroup_cpu(cpu_before.as_ref(),own_cgroup_cpu().as_ref(),cpu_start.elapsed());
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(5), runtime).await??;
     if let Some(churn) = churn { churn.await??; }

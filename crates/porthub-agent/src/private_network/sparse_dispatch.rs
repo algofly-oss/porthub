@@ -38,6 +38,19 @@ pub enum Installed {
     Pair(PeerInfo),
     Unavailable,
 }
+#[cfg(all(target_os="linux",feature="netns-tests"))]
+static CALLBACK_CALLS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(target_os="linux",feature="netns-tests"))]
+static CALLBACK_SAMPLES:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(target_os="linux",feature="netns-tests"))]
+static CALLBACK_SAMPLED_NS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+/// Fixture-only aggregate: exactly one in128 synchronous current callbacks is
+/// timed. Reports measured samples, never claims every call was profiled.
+#[cfg(all(target_os="linux",feature="netns-tests"))]
+pub fn test_current_callback_samples()->(u64,u64,u64){
+    use std::sync::atomic::Ordering::Relaxed;
+    (CALLBACK_CALLS.load(Relaxed),CALLBACK_SAMPLES.load(Relaxed),CALLBACK_SAMPLED_NS.load(Relaxed))
+}
 impl Node {
     pub fn new(
         workspace: String,
@@ -50,11 +63,18 @@ impl Node {
         let fingerprint = identity.fingerprint().to_owned();
         let (lookup, space, local) = (handle.clone(), workspace.clone(), own.clone());
         let current = Arc::new(move |peer: &str| {
+            #[cfg(all(target_os="linux",feature="netns-tests"))]
+            let sample=(CALLBACK_CALLS.fetch_add(1,std::sync::atomic::Ordering::Relaxed)%128==0).then(std::time::Instant::now);
             // Eligibility only: never extends an original authority witness.
             lookup.touch_peer(peer);
-            LocalAuthority::capture(&lookup, &space, &local, peer)
-                .ok()
-                .map(Arc::new)
+            let result=LocalAuthority::capture(&lookup, &space, &local, peer)
+                .ok().map(Arc::new);
+            #[cfg(all(target_os="linux",feature="netns-tests"))]
+            if let Some(start)=sample {
+                CALLBACK_SAMPLED_NS.fetch_add(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),std::sync::atomic::Ordering::Relaxed);
+                CALLBACK_SAMPLES.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            }
+            result
         });
         let lookup = handle.clone();
         let request = Arc::new(move |peer: &str| {
