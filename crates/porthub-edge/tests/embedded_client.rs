@@ -1,10 +1,11 @@
 use anyhow::{ensure, Context, Result};
 use porthub_tunnel::{gateway_config, Config, EmbeddedClient, EmbeddedServer};
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -37,8 +38,61 @@ async fn echo(listener: TcpListener, active: Arc<AtomicUsize>) {
         });
     }
 }
+// The gateway binds its public listener only after control authentication.
+// Dropping bind(0) and immediately reusing its address lets parallel fixtures
+// select the same port during that gap, connecting visitors to another test.
+// Keep the candidate socket alive through a process-wide, atomic claim, and
+// never issue a public address twice within this test executable.
+static PUBLIC_ADDRESSES: Mutex<Option<HashSet<SocketAddr>>> = Mutex::new(None);
+async fn listener_from<F, Fut>(addresses: &Mutex<Option<HashSet<SocketAddr>>>, mut bind: F) -> Result<TcpListener>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<TcpListener>>,
+{
+    loop {
+        let listener = bind().await?;
+        let address = listener.local_addr()?;
+        let claimed = addresses.lock().unwrap().get_or_insert_with(HashSet::new).insert(address);
+        if claimed { return Ok(listener); }
+    }
+}
 async fn unused() -> Result<SocketAddr> {
-    Ok(TcpListener::bind("127.0.0.1:0").await?.local_addr()?)
+    Ok(fixture_listener().await?.local_addr()?)
+}
+
+async fn fixture_listener() -> Result<TcpListener> {
+    listener_from(&PUBLIC_ADDRESSES, || TcpListener::bind("127.0.0.1:0")).await
+}
+
+#[tokio::test]
+async fn public_address_allocator_rejects_reissued_port_for_public_and_live_listeners() -> Result<()> {
+    let addresses = Mutex::new(None);
+    let first_listener = fixture_listener().await?;
+    addresses.lock().unwrap().get_or_insert_with(HashSet::new).insert(first_listener.local_addr()?);
+    let first = first_listener.local_addr()?;
+    drop(first_listener);
+    let mut attempts = 0;
+    let next = listener_from(&addresses, || {
+        attempts += 1;
+        // Reproduce the kernel reissuing a dropped reservation, deterministically.
+        let duplicate = attempts == 1;
+        async move { if duplicate { TcpListener::bind(first).await } else { fixture_listener().await.map_err(std::io::Error::other) } }
+    }).await?;
+    ensure!(attempts >= 2, "reissued public port was accepted");
+    ensure!(first != next.local_addr()?);
+    // The same allocator is used for retained backend/HTTP listeners and for
+    // reservations immediately dropped by unused(). Exercise both lifetimes.
+    let second = next.local_addr()?;
+    drop(next);
+    let mut attempts = 0;
+    let public = listener_from(&addresses, || {
+        attempts += 1;
+        let duplicate = attempts == 1;
+        async move { if duplicate { TcpListener::bind(second).await } else { fixture_listener().await.map_err(std::io::Error::other) } }
+    }).await?.local_addr()?;
+    ensure!(attempts >= 2);
+    ensure!(public != first && public != second);
+    Ok(())
 }
 async fn exchange(stream: &mut TcpStream, value: u8) -> Result<()> {
     let payload = vec![value; 128 * 1024];
@@ -76,23 +130,23 @@ async fn memory_reload_preserves_unchanged_streams_and_removes_only_revoked_serv
         let active=Arc::new(AtomicUsize::new(0));let mut workers=JoinSet::new();
         let mut targets=Vec::new();let mut public=Vec::new();let mut server_config=String::from("[server.services]\n");
         for name in ["first","second"] {
-            let listener=TcpListener::bind("127.0.0.1:0").await?;targets.push((name.into(),listener.local_addr()?));
+            let listener=fixture_listener().await?;targets.push((name.into(),listener.local_addr()?));
             workers.spawn(echo(listener,active.clone()));let address=unused().await?;public.push(address);
             server_config+=&format!("[server.services.{name}]\ntoken=\"fixture-secret\"\nbind_addr=\"{address}\"\n");
         }
         let server=Arc::new(RwLock::new(EmbeddedServer::new(gateway_config(&server_config)?).await?));
-        let http=TcpListener::bind("127.0.0.1:0").await?;let address=http.local_addr()?;
+        let http=fixture_listener().await?;let address=http.local_addr()?;
         let router=porthub_edge::router(server.clone());workers.spawn(async move {let _=axum::serve(http,router).await;});
         let initial=client(address,&targets[..1])?;let mut agent=EmbeddedClient::new(initial.clone()).await?;
         let mut first=loop {match TcpStream::connect(public[0]).await {Ok(stream)=>break stream,Err(_)=>tokio::time::sleep(Duration::from_millis(10)).await}};
-        exchange(&mut first,17).await?;ensure!(active.load(Ordering::SeqCst)==1);
-        agent.reload(initial).await?;exchange(&mut first,18).await?;
-        agent.reload(client(address,&targets)?).await?;exchange(&mut first,19).await?;
+        exchange(&mut first,17).await.context("exchange-17")?;ensure!(active.load(Ordering::SeqCst)==1);
+        agent.reload(initial).await?;exchange(&mut first,18).await.context("exchange-18")?;
+        agent.reload(client(address,&targets)?).await?;exchange(&mut first,19).await.context("exchange-19")?;
         let mut second=loop {match TcpStream::connect(public[1]).await {Ok(stream)=>break stream,Err(_)=>tokio::time::sleep(Duration::from_millis(10)).await}};
-        exchange(&mut second,43).await?;ensure!(active.load(Ordering::SeqCst)==2);
+        exchange(&mut second,43).await.context("exchange-43")?;ensure!(active.load(Ordering::SeqCst)==2);
         let invalid=Config::from_str(&format!("[client]\nremote_addr=\"{address}\"\n[client.services]\n[client.transport]\ntype=\"tls\"\n[client.transport.tls]\ntrusted_root=\"/nonexistent/porthub-test-invalid-root.pem\"\n"))?;
-        ensure!(agent.reload(invalid).await.is_err());exchange(&mut first,20).await?;exchange(&mut second,44).await?;
-        agent.reload(client(address,&targets[1..])?).await?;closed(&mut first).await?;exchange(&mut second,45).await?;
+        ensure!(agent.reload(invalid).await.is_err());exchange(&mut first,20).await.context("exchange-20")?;exchange(&mut second,44).await.context("exchange-44")?;
+        agent.reload(client(address,&targets[1..])?).await?;closed(&mut first).await?;exchange(&mut second,45).await.context("exchange-45")?;
         agent.shutdown().await;closed(&mut second).await?;
         for _ in 0..100 {if active.load(Ordering::SeqCst)==0 {break;}tokio::time::sleep(Duration::from_millis(5)).await;}
         ensure!(active.load(Ordering::SeqCst)==0,"agent shutdown left target connections open");
@@ -131,7 +185,7 @@ async fn udp_forwarders_stop_with_their_owning_client() -> Result<()> {
             observed.fetch_add(1,Ordering::SeqCst);let _=backend.send_to(&bytes[..n],source).await;
         }});
         let server=Arc::new(RwLock::new(EmbeddedServer::new(gateway_config(&format!("[server.services.fixture]\ntoken=\"fixture\"\ntype=\"udp\"\nbind_addr=\"{public}\"\n"))?).await?));
-        let http=TcpListener::bind("127.0.0.1:0").await?;let address=http.local_addr()?;
+        let http=fixture_listener().await?;let address=http.local_addr()?;
         let router=porthub_edge::router(server.clone());workers.spawn(async move {let _=axum::serve(http,router).await;});
         let config=Config::from_str(&format!("[client]\nremote_addr=\"{address}\"\n[client.transport]\ntype=\"websocket\"\n[client.transport.websocket]\ntls=false\npath=\"/api/tunnel\"\nporthub_framing=true\nhttp_upgrade=true\n[client.services.fixture]\ntoken=\"fixture\"\ntype=\"udp\"\nlocal_addr=\"{target}\"\n"))?;
         let agent=EmbeddedClient::new(config.clone()).await?;
@@ -175,7 +229,7 @@ async fn file_runner_handles_atomic_replacement_and_retains_services_on_invalid_
         use std::io::Write;
         let mut workers = JoinSet::new();
         let active = Arc::new(AtomicUsize::new(0));
-        let backend = TcpListener::bind("127.0.0.1:0").await?;
+        let backend = fixture_listener().await?;
         let target = backend.local_addr()?;
         workers.spawn(echo(backend, active));
         let public = unused().await?;
@@ -185,7 +239,7 @@ async fn file_runner_handles_atomic_replacement_and_retains_services_on_invalid_
             ))?)
             .await?,
         ));
-        let http = TcpListener::bind("127.0.0.1:0").await?;
+        let http = fixture_listener().await?;
         let address = http.local_addr()?;
         let router = porthub_edge::router(server.clone());
         workers.spawn(async move {
@@ -250,7 +304,7 @@ async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()>
         use porthub_runtime::web_routes::{Config as WebConfig, Route, WebRoutes};
         let hits = Arc::new(AtomicUsize::new(0));
         let counter = hits.clone();
-        let target = TcpListener::bind("127.0.0.1:0").await?;
+        let target = fixture_listener().await?;
         let target_address = target.local_addr()?;
         let app = Router::new().fallback(any(move |request: Request<Body>| {
             let counter = counter.clone();
@@ -270,7 +324,7 @@ async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()>
         // Machine proxies target the protected public listener, so there is
         // one authoritative gate and no second credential-stripping gate.
         web.reload(WebConfig { routes: vec![Route { id: "protected".into(), hosts: vec!["protected.example".into()], target_url: format!("http://{public}"), pass_host: true, http: true, https: true, bindings: vec![], routing: None, access: None }] })?;
-        let ingress = TcpListener::bind("127.0.0.1:0").await?;
+        let ingress = fixture_listener().await?;
         let address = ingress.local_addr()?;
         let router = porthub_edge::router_with_web(gateway.clone(), None, web);
         workers.spawn(async move { let _ = axum::serve(ingress, router).await; });
@@ -306,7 +360,7 @@ async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()>
 async fn closed_idle_carriers_are_replaced_without_refreshing_the_service() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(12), async {
         let mut workers = JoinSet::new();
-        let backend = TcpListener::bind("127.0.0.1:0").await?;
+        let backend = fixture_listener().await?;
         let target = backend.local_addr()?;
         workers.spawn(echo(backend, Arc::new(AtomicUsize::new(0))));
         let public = unused().await?;
@@ -316,7 +370,7 @@ async fn closed_idle_carriers_are_replaced_without_refreshing_the_service() -> R
             ))?)
             .await?,
         ));
-        let http = TcpListener::bind("127.0.0.1:0").await?;
+        let http = fixture_listener().await?;
         let address = http.local_addr()?;
         let router = porthub_edge::router(server.clone());
         workers.spawn(async move {
@@ -325,7 +379,7 @@ async fn closed_idle_carriers_are_replaced_without_refreshing_the_service() -> R
 
         // The control carrier is opened first. Hold eight subsequent idle data
         // carriers behind a proxy so they can all be severed without touching it.
-        let proxy = TcpListener::bind("127.0.0.1:0").await?;
+        let proxy = fixture_listener().await?;
         let proxy_address = proxy.local_addr()?;
         let accepted = Arc::new(AtomicUsize::new(0));
         let observed = accepted.clone();
@@ -385,7 +439,7 @@ async fn closed_idle_carriers_are_replaced_without_refreshing_the_service() -> R
 async fn server_first_protocol_receives_greeting_without_visitor_writing_first() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut workers = JoinSet::new();
-        let backend = TcpListener::bind("127.0.0.1:0").await?;
+        let backend = fixture_listener().await?;
         let target = backend.local_addr()?;
         workers.spawn(async move {
             let mut connections = JoinSet::new();
@@ -403,7 +457,7 @@ async fn server_first_protocol_receives_greeting_without_visitor_writing_first()
             ))?)
             .await?,
         ));
-        let http = TcpListener::bind("127.0.0.1:0").await?;
+        let http = fixture_listener().await?;
         let address = http.local_addr()?;
         let router = porthub_edge::router(server.clone());
         workers.spawn(async move {
