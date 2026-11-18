@@ -437,6 +437,9 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
     {
         return Err(ApiError::bad_request("Invalid USB report"));
     }
+    // Serialize the authenticated upsert with machine deletion so an in-flight
+    // report cannot recreate an inventory row after deletion clears it.
+    let _guard = app.connection_lock.lock().await;
     let m = machine_client::authenticate(&app, &body.machine_id, &body.token).await?;
     if m.get_bool("enabled") == Ok(false) || m.get_bool("deletion_pending") == Ok(true) {
         return Err(unavailable());
