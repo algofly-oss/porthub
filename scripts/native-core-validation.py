@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Source-pinned native core-only validation. Never establishes full-release proof."""
 import argparse
+from contextlib import contextmanager
+import shutil
 import hashlib
 import importlib.util
 import json
@@ -117,6 +119,30 @@ def cleanup_launchd(before,program):
         if label in launchd_labels(): raise ValueError('Owned fixture launchd cleanup incomplete')
 
 
+@contextmanager
+def validation_stage(parent):
+    with tempfile.TemporaryDirectory(prefix='native-core-validation-',dir=parent) as raw:
+        stage=Path(raw);stage.chmod(0o700)
+        try:
+            yield stage
+        except BaseException as error:
+            # Retain only bounded fixture logs, never profiles/component stores.
+            # This directory belongs to the enclosing nonce stage and survives
+            # removal of the working source/target after a failed validation.
+            destination=parent/('native-validation-failure-'+stage.name)
+            destination.mkdir(mode=0o700)
+            retained=[];total=0
+            logs=stage/'logs'
+            for path in sorted(logs.glob('*.log'),key=lambda p:p.stat().st_mtime,reverse=True) if logs.exists() else []:
+                if path.is_symlink() or not path.is_file(): continue
+                size=path.stat().st_size
+                if size>8*1024**2 or total+size>64*1024**2: continue
+                shutil.copy2(path,destination/path.name);total+=size
+                retained.append({'name':path.name,'size':size,'sha256':sha(path)})
+            (destination/'failure.json').write_text(json.dumps({'status':'failed','error_type':type(error).__name__,'error':str(error)[:16384],'logs':retained},sort_keys=True))
+            raise
+
+
 def run(root,source,output,budget):
     root=root.resolve();hybrid=load('hybrid-native-build');hybrid.load('component-build-plan').require_clean_source(root,source)
     target=load('build-local-native').native_target(platform.system(),platform.machine())
@@ -126,8 +152,8 @@ def run(root,source,output,budget):
     # All fixture profiles and optional component stores are private test roots;
     # never use installed enrollment profiles or mutate the machine service.
     started=time.monotonic();output.parent.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='native-core-validation-',dir=output.parent) as raw:
-        stage=Path(raw);stage.chmod(0o700);logs=stage/'logs';logs.mkdir()
+    with validation_stage(output.parent) as stage:
+        logs=stage/'logs';logs.mkdir()
         fixtures=stage/'fixture-tmp';fixtures.mkdir(mode=0o700);env['TMPDIR']=str(fixtures)
         cache=stage/'components-cache';debug=Path(env.get('CARGO_TARGET_DIR',root/'target'))/target/'debug'
         env.update(PORTHUB_TEST_SYNC_EXECUTABLE=str(debug/'porthub-sync'),PORTHUB_COMPONENT_CACHE=str(cache),PORTHUB_COMPONENT_SHARED_CACHE='off',PORTHUB_COMPONENT_SOURCE='github',PORTHUB_TERMINAL_HELPER_CACHE_ROOT=str(stage/'terminal-cache'))

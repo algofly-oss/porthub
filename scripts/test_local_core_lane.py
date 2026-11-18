@@ -105,6 +105,20 @@ class LocalCoreTests(unittest.TestCase):
         launch=next(row for row in rows if row['name']=='native-launchd')
         self.assertEqual(launch['env'],{'PORTHUB_TEST_LAUNCHD':'1'})
 
+    def test_failed_native_logs_survive_temporary_stage_cleanup(self):
+        with tempfile.TemporaryDirectory() as raw:
+            parent=Path(raw)
+            with self.assertRaisesRegex(ValueError,'actual fixture failure'):
+                with v.validation_stage(parent) as stage:
+                    original=stage;(stage/'logs').mkdir();(stage/'logs/test-complete-platform.log').write_text('test failing_native_case ... FAILED')
+                    (stage/'fixture-private.json').write_text('private profile must not be retained')
+                    raise ValueError('actual fixture failure')
+            self.assertFalse(original.exists())
+            retained=list(parent.glob('native-validation-failure-*'));self.assertEqual(len(retained),1)
+            self.assertIn('failing_native_case',(retained[0]/'test-complete-platform.log').read_text())
+            self.assertFalse((retained[0]/'fixture-private.json').exists())
+            self.assertEqual(json.loads((retained[0]/'failure.json').read_text())['status'],'failed')
+
     def test_owned_validation_timeout_reaps_its_process(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw);log=root/'bounded.log'
