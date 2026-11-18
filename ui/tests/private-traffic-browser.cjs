@@ -79,14 +79,18 @@ const {launchBrowser, waitForWorkspaceLayout} = require('./browser.cjs');
       await page.getByRole('option',{name:'Last 30 days',exact:true}).click();
       await panel.getByLabel('Private traffic history range',{exact:true}).waitFor();
       await panel.getByText(/86400s interval/).waitFor();}
-      await panel.locator('summary').click();await waitForWorkspaceLayout(page);
+      const measurement = panel.getByRole('button',{name:'How traffic is measured',exact:true});
+      await measurement.click();
+      assert.equal(await measurement.getAttribute('aria-expanded'),'true');
+      await panel.getByText(/^Agents count private transport bytes locally/).waitFor();
+      await waitForWorkspaceLayout(page);
       const geometry=await panel.evaluate(element=>{
         const rect=element.getBoundingClientRect();
         const controls=[...element.querySelectorAll('button,input,summary')].filter(node=>{const r=node.getBoundingClientRect();return r.width>0&&r.height>0;}).map(node=>{const r=node.getBoundingClientRect();return {label:node.getAttribute('aria-label')||node.textContent.trim().slice(0,60),width:r.width,height:r.height,font:parseFloat(getComputedStyle(node).fontSize),left:r.left,right:r.right,tag:node.tagName};});
         return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,left:rect.left,right:rect.right,controls};
       });
       fs.writeFileSync(`${directory}/${label}.json`,JSON.stringify({geometry,errors},null,2));
-      await scrollSection(panel.locator('summary'));await waitForWorkspaceLayout(page);
+      await scrollSection(measurement);await waitForWorkspaceLayout(page);
       await page.screenshot({path:`${directory}/${label}.png`,scale:'css'});
       assert.ok(geometry.scrollWidth<=geometry.width+1,JSON.stringify(geometry));
       assert.ok(geometry.left>=-1&&geometry.right<=geometry.width+1,JSON.stringify(geometry));
