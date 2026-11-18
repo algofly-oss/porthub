@@ -1061,6 +1061,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let Some(use_direct)=paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer) else{cold_datagrams.pending(item);continue;};
                 if !item.valid(Instant::now())||work.is_cancelled(){continue;}
                 let assigned=exit_selection.select_for_peer(item.flow,Instant::now(),parsed.flow_ttl(),None,Some(&peer));
+                // Pair/choice publication precedes the next health tick's
+                // availability view. Retain the ORIGINAL datagram, not a new TTL.
+                if assigned.is_none(){cold_datagrams.pending(item);continue;}
                 if assigned!=Some(peer.as_str())||!policy.check_exit(&item.bytes,&peer,false){continue;}
                 let (Some(source),Some(destination))=(peer_ips.get(&profile.peer_id),peer_ips.get(&peer)) else{cold_datagrams.pending(item);continue;};
                 let Ok(Some(current))=super::authority_event::send_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer) else{continue;};

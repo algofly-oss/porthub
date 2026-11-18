@@ -385,6 +385,31 @@ mod tests {
         assert!(!permit.valid());
     }
     #[test]
+    fn cold_datagram_survives_pair_before_availability_without_renewing_enqueue_age() {
+        let (a, _) = authority();
+        let now = Instant::now();
+        let mut q = Queue::default();
+        q.observe(Some(scope()));
+        let bytes = packet(17, 100, 32);
+        assert!(q.push(&bytes, &a, now));
+        let item = q.pop(now).unwrap();
+        let deadline = item.deadline;
+        let mut table = porthub_network::exit_selection::FlowTable::new("a".into());
+        assert!(table
+            .select_for_peer(item.flow, now, Duration::from_secs(30), None, Some("b"))
+            .is_none());
+        q.pending(item);
+        table.configure(["b".into()], Default::default());
+        let item = q.pop(now + Duration::from_secs(1)).unwrap();
+        assert_eq!(item.deadline, deadline);
+        assert_eq!(&item.bytes[..], &bytes);
+        assert_eq!(
+            table.select_for_peer(item.flow, now, Duration::from_secs(30), None, Some("b")),
+            Some("b")
+        );
+        assert!(q.pop(now).is_none(), "one original datagram delivered once");
+    }
+    #[test]
     fn suspend_age_expires_final_permit_even_while_original_base_is_live() {
         let (a, original_clock) = authority();
         let age_clock = Arc::new(Clock(AtomicU64::new(0)));
