@@ -94,6 +94,30 @@ class HybridTests(unittest.TestCase):
             self.assertTrue(published.is_set())
             self.assertTrue(all(row['status']=='local_verified' for row in result['targets'].values()))
 
+    def test_minimum_source_rejects_history_and_accepts_equal_or_newer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            subprocess.run(['git','init','--quiet',str(root)],check=True)
+            def git(*args):
+                return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+            git('config','user.name','Owned Fixture');git('config','user.email','fixture@example.invalid')
+            commits=[]
+            for value in ['old','minimum','new']:
+                (root/'source').write_text(value);git('add','source');git('commit','--quiet','-m',value);commits.append(git('rev-parse','HEAD'))
+            self.assertFalse(h.source_supported(root,commits[1],commits[0]))
+            self.assertTrue(h.source_supported(root,commits[1],commits[1]))
+            self.assertTrue(h.source_supported(root,commits[1],commits[2]))
+            self.assertFalse(h.source_supported(root,'f'*40,commits[2]))
+            self.assertTrue(h.source_supported(root,None,commits[0]))
+
+    def test_incompatible_builder_never_probes_builds_fetches_or_reuses(self):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        root=Path(temporary.name);config=self.config();config['builders'][0]['minimum_source_revision']='b'*40
+        with patch.object(h,'load'),patch.object(h,'source_supported',return_value=False),patch.object(h,'command') as command:
+            result=h.control(root,SOURCE,config,root/'outputs')
+        self.assertEqual(result['targets'][TARGET],{'status':'github_fallback','failed_phase':'source_compatibility'})
+        self.assertFalse(any(call.args[0][0] in ('probe','build','fetch') for call in command.call_args_list))
+
     def test_restoration_hash_permissions_and_partial_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); archive=self.fixture(root)

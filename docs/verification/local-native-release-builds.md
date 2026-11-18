@@ -223,3 +223,14 @@ These prove real native build artifacts and partial reuse, not an activated
 unattended host fleet, live HTTP depot, successful SSH adapter on every host, or
 an end-to-end published hybrid release. Those activation/integration observations
 must be recorded separately when performed.
+
+
+A builder may declare `minimum_source_revision` as a full commit SHA. The trusted
+controller proves that commit is an ancestor of (or equal to) the requested
+prepared source before probing, building, fetching, or resuming that target.
+Historical sources, shallow/missing history, invalid SHA, and unknown ancestry
+fail closed to hosted fallback for that builder only. Other builders keep their
+existing behavior. This supports a known native input-format boundary (such as
+the Windows UTF-8 receipt fix) without silently accepting incompatible older
+receipts or changing the global release source. Remove/advance the boundary only
+after reviewing that host's supported source/receipt contract.

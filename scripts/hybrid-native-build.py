@@ -129,6 +129,16 @@ def command(argv, values, timeout):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+
+def source_supported(root, minimum, source):
+    if minimum is None:
+        return True
+    revision(minimum)
+    revision(source)
+    return subprocess.run(['git','-C',str(root),'merge-base','--is-ancestor',minimum,source],
+        stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8).returncode == 0
+
+
 def control(root, source, config, output):
     revision(source)
     load('component-build-plan').require_clean_source(root, source)
@@ -165,8 +175,11 @@ def control(root, source, config, output):
         archive = folder/'components.zip'
         values = {'revision': source, 'target': target, 'output': str(folder/'components'),
                   'archive': str(archive), 'root': str(root)}
-        stage = 'probe'
+        stage = 'source_compatibility'
         try:
+            if not source_supported(root,builder.get('minimum_source_revision'),source):
+                raise ValueError('Builder does not support this historical or unproven source')
+            stage='probe'
             retained = (prior or {}).get('targets', {}).get(target)
             if retained and archive.is_file() and sha(archive) == retained['sha256']:
                 verify(root, folder/'verified', target, source, controller=True)
