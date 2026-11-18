@@ -371,9 +371,15 @@ pub(crate) fn flow_tag(flow: &str, syn: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Keep pure queue/correlation bounds covered without sparse; suspend-aware
+    // authority tests require the same feature as their production clock.
+    #[cfg(feature = "private-sparse")]
     use crate::private_network::authority_clock::{RequestWindow, SuspendClock};
+    #[cfg(feature = "private-sparse")]
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(feature = "private-sparse")]
     struct Clock(AtomicU64);
+    #[cfg(feature = "private-sparse")]
     impl SuspendClock for Clock {
         fn elapsed_since_boot(&self) -> Result<Duration> {
             Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))
@@ -384,6 +390,7 @@ mod tests {
             "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"selection_epoch":"c".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":"client","selection":"sticky","traffic_mode":"internet_only","allow_direct_fallback":false,"tor_enabled":true,"tor_circuit_groups":4}]},
             "peers":[{"id":"a","ip":"10.234.0.1","fingerprint":"fp-a","instance":"a-instance","hostname":"a.phub"}],"grants":[]})).unwrap()
     }
+    #[cfg(feature = "private-sparse")]
     fn authority(clock: Arc<Clock>) -> Authority<()> {
         Authority::new(
             (),
@@ -391,6 +398,7 @@ mod tests {
             chrono::Utc::now() + chrono::Duration::seconds(30),
         )
     }
+    #[cfg(feature = "private-sparse")]
     fn reply(request: &ExitPickRequest, status: ExitPickStatus) -> ExitPickResponse {
         ExitPickResponse {
             route_id: request.route_id.clone(),
@@ -406,6 +414,7 @@ mod tests {
             cursor: (status == ExitPickStatus::Pending).then(|| "cursor-1".into()),
         }
     }
+    #[cfg(feature = "private-sparse")]
     #[tokio::test]
     async fn cached_tor_view_never_creates_work_or_refreshes_original_choice(){
         let handle=Handle::default();handle.observe(&base());let dst="1.1.1.1".parse().unwrap();let flow="c".repeat(64);
@@ -418,6 +427,7 @@ mod tests {
         clock.0.store(15000,Ordering::SeqCst);assert!(handle.cached_choice("route",&flow,dst,false).is_none());
         assert!(tokio::time::timeout(Duration::from_millis(10),handle.demand()).await.is_err(),"read-only peek must not start a new control grant");
     }
+    #[cfg(feature = "private-sparse")]
     #[tokio::test]
     async fn demand_covers_before_and_after_wait_registration_without_packet_poll_wakes() {
         let handle = Handle::default();
@@ -452,6 +462,7 @@ mod tests {
             Some((Instant::now() - Duration::from_secs(4), true, true));
         assert_eq!(handle.carriers(), (false, false));
     }
+    #[cfg(feature = "private-sparse")]
     #[test]
     fn one_server_cursor_is_not_overwritten_by_another_flow_and_commits_free_capacity() {
         let handle = Handle::default();
@@ -532,6 +543,7 @@ mod tests {
         }
         assert!(failures.peers().is_empty());
     }
+    #[cfg(feature = "private-sparse")]
     #[test]
     fn scheduling_generation_retires_pending_choices_independently_of_permission_epoch() {
         let handle = Handle::default();
@@ -578,6 +590,7 @@ mod tests {
             0
         );
     }
+    #[cfg(feature = "private-sparse")]
     #[test]
     fn cursor_continuation_freezes_input_and_rejects_outdated_response() {
         let handle = Handle::default();
@@ -624,6 +637,7 @@ mod tests {
         assert!(retried.cursor.is_none());
         assert!(!retried.local_tor_ready);
     }
+    #[cfg(feature = "private-sparse")]
     #[test]
     fn scope_change_revoke_and_missing_native_observation_clear_choices() {
         let handle = Handle::default();
