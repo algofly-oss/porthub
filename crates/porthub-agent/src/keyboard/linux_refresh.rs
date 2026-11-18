@@ -633,7 +633,10 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = tempfile::tempdir().unwrap();
+            Self::under(&std::env::temp_dir())
+        }
+        fn under(parent: &Path) -> Self {
+            let root = tempfile::tempdir_in(parent).unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let config = root.path().join("config");
             let releases = root.path().join("releases");
@@ -888,7 +891,12 @@ mod tests {
             "disabled",
             "other-user",
         ] {
-            let mut f = Fixture::new();
+            // The public-path case needs a shared ancestor even when the runner has a private TMPDIR.
+            let mut f = if kind == "public-path" {
+                Fixture::under(Path::new("/tmp"))
+            } else {
+                Fixture::new()
+            };
             let cli = f.config.join("porthub");
             std::os::unix::fs::symlink(&f.new, &cli).unwrap();
             std::fs::write(&f.path, legacy_unit(&cli).unwrap()).unwrap();
