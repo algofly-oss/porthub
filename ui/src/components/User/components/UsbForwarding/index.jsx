@@ -17,6 +17,7 @@ export default function UsbForwarding({machineId,active}){
  const outgoing=d=>forwards.filter(f=>f.source===machineId&&f.device.busid===d.busid).map(f=>`In use on ${machineName(f.destination)}`).join(' · ');
  const act=async operation=>{setBusy(true);setError('');try{await operation();setDevice('');await load();}catch(e){setError(e.response?.data?.detail||'Could not update USB forwarding');}finally{setBusy(false);}};
  const status=(rule,id)=>machines.find(m=>m.id===id)?.report?.states?.find(s=>s.id===rule.id);
+ const hostForwards=forwards.filter(f=>f.source===machineId||f.destination===machineId);
  return <section aria-label="USB forwarding" className="space-y-5 p-4 sm:p-5">
   <div><h3 className="text-sm font-semibold">Share USB from {source?.name || 'this machine'}</h3><p className="mt-2 text-xs text-muted-foreground">Use a USB device on another registered machine. Linux and Windows support sending and receiving; macOS supports sending devices only. Unsupported machines remain visible in the destination list. Add one rule per device. You can forward multiple devices to the same machine or different machines. Saved rules reconnect after restarts and use an authenticated direct path when available.</p></div>
   {error&&<p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>}
@@ -33,7 +34,30 @@ export default function UsbForwarding({machineId,active}){
    <p className="text-xs text-muted-foreground">While forwarded, the device is controlled by the destination. Mounted disks and active network adapters cannot be shared.</p>
    <Button type="button" onClick={()=>act(()=>axios.post('/api/usb/forwards',{source:machineId,destination,busid:device}))} className="min-h-[44px] px-5" disabled={busy||!device||!destination||!source.online||source.report?.enabled!==true||source.report?.supported!==true||source.report?.can_export===false}>Forward device</Button>
   </div>}
-  <ul className="divide-y divide-border">{forwards.filter(f=>f.source===machineId||f.destination===machineId).map(f=>{const a=status(f,f.source),b=status(f,f.destination);const state=a?.state?.startsWith('active')&&b?.state?.startsWith('active')?(a.state==='active-direct'?'Direct connection':'Gateway relay'):(a?.error||b?.error||'Waiting for both machines');return <li key={f.id} className="space-y-2 py-4"><div className="flex items-center justify-between gap-3"><p className="min-w-0 break-words text-sm font-medium">{f.device.name||f.device.busid}</p><button type="button" className={button} disabled={busy||!f.persistent} onClick={()=>act(()=>axios.delete(`/api/usb/forwards/${f.id}`))}>Remove</button></div><p className="text-xs text-muted-foreground">{(()=>{const l=usbLineage(machines,forwards,f.source,f.device);return [...(l.imported&&!l.known?['Original source unknown']:[]),...l.path.map(machineName),machineName(f.destination)].join(' → ');})()}</p><p role="status" className="break-words text-xs text-muted-foreground">{state}</p><p className="text-xs text-muted-foreground">{f.persistent?'Persistent rule':`Temporary CLI session · stop with porthub usb stop ${f.id.slice(0,12)}`}</p></li>;})}</ul>
+  {hostForwards.length>0&&<div>
+   <h4 className="mb-1 text-xs font-semibold">Forwarded USB devices</h4>
+   <ul className="divide-y divide-border border-y border-border">
+    {hostForwards.map(f=>{
+     const sourceState=status(f,f.source),destinationState=status(f,f.destination);
+     const active=sourceState?.state?.startsWith('active')&&destinationState?.state?.startsWith('active');
+     const state=active?(sourceState.state==='active-direct'?'Direct connection':'Gateway relay'):(sourceState?.error||destinationState?.error||'Waiting for both machines');
+     const lineage=usbLineage(machines,forwards,f.source,f.device);
+     const route=[...(lineage.imported&&!lineage.known?['Original source unknown']:[]),...lineage.path.map(machineName),machineName(f.destination)].join(' → ');
+     const name=f.device.name||f.device.busid;
+     return <li key={f.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2.5">
+      <div className="min-w-0">
+       <p className="break-words text-sm font-medium">{name}</p>
+       <p className="mt-0.5 break-words text-xs text-muted-foreground">{route}</p>
+       <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+        <span role="status" className={`break-words ${active?'font-medium text-foreground':''}`}>{state}</span>
+        <span>{f.persistent?'Persistent rule':`Temporary CLI session · stop with porthub usb stop ${f.id.slice(0,12)}`}</span>
+       </div>
+      </div>
+      {f.persistent&&<button type="button" className={button} disabled={busy} title={`Remove ${name} forward`} onClick={()=>act(()=>axios.delete(`/api/usb/forwards/${f.id}`))}>Remove</button>}
+     </li>;
+    })}
+   </ul>
+  </div>}
   <details className="text-xs text-muted-foreground"><summary className="min-h-[44px] cursor-pointer py-3">CLI and client permissions</summary><div className="space-y-3"><p>List hardware: <code>porthub usb devices</code></p><p>Temporary share: <code>porthub usb expose BUSID --to MACHINE_ID</code>. Add <code>--detach</code> for background operation with restart recovery.</p><p>Attach from this machine: <code>porthub usb attach --from MACHINE_ID --device BUSID</code></p><p>List or stop sessions: <code>porthub usb list</code>, <code>porthub usb stop ID</code>.</p><p>Block USB sharing and attaching locally: <code>porthub features disable usb</code>. The server cannot override this switch.</p></div></details>
  </section>;
 }

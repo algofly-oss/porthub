@@ -1,5 +1,6 @@
 import {useCallback,useEffect,useState} from 'react';
 import axios from 'axios';
+import {IconRefresh} from '@tabler/icons-react';
 import SearchSelect from '@/components/ui/search-select';
 import {Button} from '@/components/ui/button';
 const canRequest=device=>['permission-unknown','ready'].includes(device?.capture_state);
@@ -10,6 +11,7 @@ export default function NativeMediaForwarding({machineId,active}){
  const camera=kind==='camera',noun=camera?'camera':'microphone',plural=camera?'cameras':'microphones';
  const load=useCallback(async()=>{try{const [inventory,forwards]=await Promise.all([axios.get('/api/media/inventory'),axios.get('/api/media/forwards')]);setMachines(inventory.data.machines||[]);setModes(inventory.data.modes||['phm1-microphone-v1']);setPlans(forwards.data.plans||[]);setAvailable(true);setError('');}catch(e){if(e.response?.status===404)setAvailable(false);else setError(e.response?.data?.detail||'Device sharing is unavailable.');}},[]);
  useEffect(()=>{if(!active)return;load();const timer=setInterval(load,15000);return()=>clearInterval(timer);},[active,load]);
+ const hostPlans=plans.filter(plan=>plan.source===machineId||plan.destination===machineId);
  const host=machines.find(m=>m.id===machineId),sources=(host?.report?.sources||[]).filter(s=>s.device.kind===kind);
  const chosen=sources.find(s=>`${s.uid}:${s.device.id}`===source),receiver=machines.find(m=>m.id===destination),enabled=!!host?.report?.[camera?'camera_enabled':'microphone_enabled'];
  const supported=!camera||modes.includes('phv1-camera-mjpeg-v1')&&host?.report?.protocol===2;
@@ -19,17 +21,39 @@ export default function NativeMediaForwarding({machineId,active}){
  const update=async action=>{setBusy(true);try{await action();await load();}catch(e){setError(e.response?.data?.detail||'Could not update device sharing.');}finally{setBusy(false);}};
  return <section aria-label="Built-in microphone and camera forwarding" className="space-y-4 border-t border-border p-4 sm:p-5 [&_input]:!min-h-[44px]">
   <div><h3 className="text-sm font-semibold">Microphone and camera sharing</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Use a selected input device in applications on another machine. Capture starts when an application opens it.</p></div>
-  <div role="radiogroup" aria-label="Input device type" className="inline-flex max-w-full rounded-lg border border-border bg-control p-1">{['microphone','camera'].map(value=><button key={value} type="button" role="radio" aria-checked={kind===value} disabled={busy} onClick={()=>{setKind(value);setSource('');setDestination('');setNotice('');}} className={`min-h-[44px] rounded-md px-4 text-sm font-medium transition-colors ${kind===value?'bg-background text-foreground shadow-sm':'text-muted-foreground hover:text-foreground'}`}>{value==='camera'?'Camera':'Microphone'}</button>)}</div>
+  <div className="flex items-center justify-between gap-3">
+   <div role="radiogroup" aria-label="Input device type" className="inline-flex max-w-full rounded-lg border border-border bg-control p-1">{['microphone','camera'].map(value=><button key={value} type="button" role="radio" aria-checked={kind===value} disabled={busy} onClick={()=>{setKind(value);setSource('');setDestination('');setNotice('');}} className={`min-h-[44px] rounded-md px-4 text-sm font-medium transition-colors ${kind===value?'bg-background text-foreground shadow-sm':'text-muted-foreground hover:text-foreground'}`}>{value==='camera'?'Camera':'Microphone'}</button>)}</div>
+   {available&&<Button variant="outline" type="button" aria-label={`Refresh ${plural}`} title={`Refresh ${plural}`} className="min-h-[44px] min-w-[44px] shrink-0 gap-2 px-2 sm:px-3" disabled={busy||!host?.live||!enabled||!supported} onClick={()=>update(async()=>{await axios.post(`/api/media/machines/${machineId}/discover`,{});setNotice('Discovery requested. Keep the desktop session signed in; the source list refreshes automatically.');})}><IconRefresh size={18} aria-hidden="true" /><span className="hidden sm:inline">Refresh {plural}</span></Button>}
+  </div>
   {error&&<p role="alert" className="text-xs text-red-500">{error}</p>}{notice&&<p role="status" className="text-xs text-muted-foreground">{notice}</p>}
   {host?.report&&!enabled&&<p className="text-xs text-muted-foreground">Sharing is disabled on this client. Enable it locally with <code>porthub features enable {camera?'camera-share':'microphone-share'}</code>.</p>}
-  {available&&<Button variant="outline" type="button" className="min-h-[44px]" disabled={busy||!host?.live||!enabled||!supported} onClick={()=>update(async()=>{await axios.post(`/api/media/machines/${machineId}/discover`,{});setNotice('Discovery requested. Keep the desktop session signed in; the source list refreshes automatically.');})}>Refresh {plural}</Button>}
+
   {!available?<p className="text-xs text-muted-foreground">Update the gateway and client to enable native device sharing.</p>:!supported?<p className="text-xs text-muted-foreground">Update this client to use camera sharing.</p>:<>
    {!host?.report?<p className="text-xs text-muted-foreground">Update this client to use device sharing.</p>:!host.live?<p className="text-xs text-muted-foreground">The media connection is unavailable. Wait for the client to reconnect.</p>:!sources.length?<p className="text-xs leading-5 text-muted-foreground">{sourceReason||`No desktop ${plural} have been discovered.`} Refresh {plural} to check the optional native adapter in the signed-in desktop session. Discovery does not start capture.</p>:<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
     <label className="min-w-0 text-xs font-medium">{camera?'Camera':'Microphone'}<SearchSelect label={camera?'Camera':'Microphone'} className="mt-1" value={source} onChange={setSource} placeholder={`Choose a ${noun}`} options={sources.map(s=>({value:`${s.uid}:${s.device.id}`,label:`${s.device.name||`${camera?'Camera':'Microphone'} input`}${canRequest(s.device)?'':` · ${s.device.unavailable_reason||'Unavailable'}`}`, disabled:!canRequest(s.device)}))}/></label>
     <label className="min-w-0 text-xs font-medium">Use on<SearchSelect label="Receiving machine" className="mt-1" value={destination} onChange={setDestination} placeholder="Choose a receiving machine" options={machines.filter(m=>m.id!==machineId).map(m=>({value:m.id,label:`${m.name}${eligible(m)?'':` · ${receiverReason(m)}`}`, disabled:!eligible(m)}))}/></label>
     <Button type="button" className="min-h-[44px] px-5 sm:col-span-2 sm:justify-self-start" disabled={busy||!host?.live||!enabled||!chosen||!canRequest(chosen.device)||!eligible(receiver||{})} onClick={()=>update(()=>axios.post('/api/media/forwards',{source:machineId,destination,desktop_uid:chosen.uid,desktop_session:chosen.desktop_session||null,source_id:chosen.device.id,mode:camera?'phv1-camera-mjpeg-v1':'phm1-microphone-v1',name:Array.from(`${host?.name||'Source'} · ${chosen.device.name||noun}`).slice(0,60).join(''),persistent:true}))}>Share {noun}</Button>
    </div>}
-   <ul className="divide-y divide-border">{plans.filter(p=>p.source===machineId||p.destination===machineId).map(plan=><li key={plan.id} className="flex items-start justify-between gap-3 py-3"><div className="min-w-0"><p className="break-words text-sm font-medium">{plan.name}</p><p className="mt-1 text-xs text-muted-foreground">{machines.find(m=>m.id===plan.source)?.name||'Source'} → {machines.find(m=>m.id===plan.destination)?.name||'Receiver'}</p><p className="mt-1 text-xs text-muted-foreground">{plan.persistent?'Persistent configuration':'Temporary CLI session'} · Capture follows application use</p><p role="status" className="mt-1 text-xs text-muted-foreground">{Array.from(new Set([plan.source,plan.destination].map(id=>statusLabel(machines.find(m=>m.id===id)?.report?.states?.find(s=>s.id===plan.id)?.state,plan.mode==='phv1-camera-mjpeg-v1')))).join(' · ')}</p></div><Button variant="outline" className="min-h-[44px] shrink-0" disabled={busy} onClick={()=>update(()=>axios.delete(`/api/media/forwards/${plan.id}`))}>Remove</Button></li>)}</ul>
+   {hostPlans.length>0&&<div>
+    <h4 className="mb-1 text-xs font-semibold">Shared microphones and cameras</h4>
+    <ul className="divide-y divide-border border-y border-border">
+     {hostPlans.map(plan=>{
+      const endpoints=[plan.source,plan.destination].map(id=>machines.find(m=>m.id===id));
+      const states=endpoints.map(endpoint=>statusLabel(endpoint?.report?.states?.find(s=>s.id===plan.id)?.state,plan.mode==='phv1-camera-mjpeg-v1'));
+      return <li key={plan.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2.5">
+       <div className="min-w-0">
+        <p className="break-words text-sm font-medium">{plan.name}</p>
+        <p className="mt-0.5 break-words text-xs text-muted-foreground">{endpoints[0]?.name||'Source'} → {endpoints[1]?.name||'Receiver'}</p>
+        <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+         <span role="status" className="break-words font-medium text-foreground">{Array.from(new Set(states)).join(' · ')}</span>
+         <span>{plan.persistent?'Persistent configuration':'Temporary CLI session'} · Capture follows application use</span>
+        </div>
+       </div>
+       <Button variant="outline" title={`Remove ${plan.name} share`} className="min-h-[44px] shrink-0" disabled={busy} onClick={()=>update(()=>axios.delete(`/api/media/forwards/${plan.id}`))}>Remove</Button>
+      </li>;
+     })}
+    </ul>
+   </div>}
    <details className="text-xs leading-5 text-muted-foreground"><summary className="min-h-[44px] cursor-pointer py-3">Receiver setup and local permissions</summary><p>Receiver setup: run <code>porthub media receiver-identity --vendor VID --product PID</code> locally. <a href="https://github.com/algofly-oss/porthub/blob/main/docs/native-media-forwarding.md" className="underline underline-offset-2" target="_blank" rel="noreferrer">Setup instructions</a>.</p><p className="mt-2">Microphone, camera and receiving permissions are independent of keyboard and raw USB sharing. Disable them locally with <code>porthub features disable microphone-share</code>, <code>porthub features disable camera-share</code> or <code>porthub features disable media-receive</code>. The gateway cannot override them.</p></details>
   </>}
  </section>;
