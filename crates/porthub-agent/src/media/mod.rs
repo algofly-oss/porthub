@@ -20,6 +20,7 @@ pub mod broker;
 #[cfg(any(target_os="linux",windows))]
 pub(crate) mod host;
 pub mod usb_audio;
+mod playback;
 pub mod usbip;
 pub(crate) mod usb_video;
 pub(crate) mod usbip_video;
@@ -53,6 +54,7 @@ pub fn inventory(profile: &Path) -> Inventory {
         let feature = match device.kind {
             Kind::Microphone => Feature::MicrophoneShare,
             Kind::Camera => Feature::CameraShare,
+            Kind::Speaker => Feature::MediaReceive,
         };
         if !policy.enabled(feature) {
             device.capture_available = false;
@@ -107,7 +109,7 @@ pub enum Action {
     ReceiverIdentity {#[arg(long)]vendor:Option<u16>,#[arg(long)]product:Option<u16>,#[arg(long)]clear:bool},
     /// Publish an explicit desktop microphone or camera at another enrolled machine.
     Forward {
-        #[arg(long,default_value="microphone",value_parser=["microphone","camera"])] kind:String,
+        #[arg(long,default_value="microphone",value_parser=["microphone","camera","speaker"])] kind:String,
         #[arg(long)] source_id:String,
         #[arg(long)] desktop_uid:u32,
         #[arg(long)] desktop_session:Option<String>,
@@ -153,7 +155,7 @@ pub async fn run(args: Args) -> Result<()> {
         },
         Action::Forward{kind,source_id,desktop_uid,desktop_session,to,name,usb_vendor,usb_product,persistent}=>{
             anyhow::ensure!(usb_vendor.is_some()==usb_product.is_some(),"Provide both USB identity overrides, or use the receiver configured identity");
-            return action(&layout,&registration,serde_json::json!({"operation":"media_action","action":"create","plan":{"mode":if kind=="camera"{"phv1-camera-mjpeg-v1"}else{"phm1-microphone-v1"},"source":"","destination":to,"desktop_uid":desktop_uid,"desktop_session":desktop_session,"source_id":source_id,"name":name,"identity":usb_vendor.zip(usb_product).map(|(vendor,product)|porthub_components::media_forward::UsbIdentity{vendor,product}),"persistent":persistent}}),!persistent).await;
+            return action(&layout,&registration,serde_json::json!({"operation":"media_action","action":"create","plan":{"mode":if kind=="camera"{"phv1-camera-mjpeg-v1"}else if kind=="speaker"{"phs1-speaker-v1"}else{"phm1-microphone-v1"},"source":"","destination":to,"desktop_uid":desktop_uid,"desktop_session":desktop_session,"source_id":source_id,"name":name,"identity":usb_vendor.zip(usb_product).map(|(vendor,product)|porthub_components::media_forward::UsbIdentity{vendor,product}),"persistent":persistent}}),!persistent).await;
         },
         Action::Stop{id}=>return action(&layout,&registration,serde_json::json!({"operation":"media_action","action":"stop","id":id}),false).await,
         #[cfg(any(target_os="linux",windows))]

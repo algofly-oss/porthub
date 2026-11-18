@@ -41,6 +41,7 @@ pub struct Plan {
 impl Plan {
     pub fn kind(&self) -> Option<crate::media::Kind> {
         match self.mode.as_str() {
+            "phs1-speaker-v1" => Some(crate::media::Kind::Speaker),
             "phm1-microphone-v1" => Some(crate::media::Kind::Microphone),
             "phv1-camera-mjpeg-v1" => Some(crate::media::Kind::Camera),
             _ => None,

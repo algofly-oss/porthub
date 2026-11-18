@@ -7,6 +7,7 @@ mod capture_output;
 mod linux;
 #[cfg(target_os = "linux")]
 mod linux_video;
+mod pcm;
 #[cfg(any(target_os = "linux", windows))]
 mod video_output;
 #[cfg(target_os = "linux")]
@@ -26,7 +27,9 @@ fn main() -> anyhow::Result<()> {
         (Some("inventory"), None) => println!("{}", serde_json::to_string(&linux::inventory()?)?),
         #[cfg(windows)]
         (Some("inventory"), None) => {
-            println!("{}", serde_json::to_string(&windows_audio::inventory()?)?)
+            let mut rows = windows_audio::inventory()?;
+            rows.extend(windows_audio::playback_inventory()?);
+            println!("{}", serde_json::to_string(&rows)?)
         }
         #[cfg(any(target_os = "linux", windows))]
         (Some("inventory-local"), None) => {
@@ -37,15 +40,22 @@ fn main() -> anyhow::Result<()> {
             #[cfg(windows)]
             let microphones = windows_audio::inventory();
             match microphones {
-                Ok(rows) => inventory
-                    .sources
-                    .extend(rows.into_iter().map(|device| LocalSource {
-                        device,
-                        camera_identity: None,
-                    })),
+                Ok(rows) => inventory.sources.extend(
+                    rows.into_iter()
+                        .filter(|device| device.kind != porthub_components::media::Kind::Camera)
+                        .map(|device| LocalSource {
+                            device,
+                            camera_identity: None,
+                        }),
+                ),
                 Err(_) => {
                     inventory.microphone_unavailable_reason =
-                        Some("Microphone inventory is unavailable in this user session".into())
+                        Some("Microphone inventory is unavailable in this user session".into());
+                    #[cfg(target_os = "linux")]
+                    {
+                        inventory.speaker_unavailable_reason =
+                            Some("Speaker inventory is unavailable in this user session".into());
+                    }
                 }
             }
             #[cfg(target_os = "linux")]
@@ -75,8 +85,22 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(_) => {
-                    inventory.camera_unavailable_reason =
-                        Some("Complete camera inventory is unavailable in this user session".into());
+                    inventory.camera_unavailable_reason = Some(
+                        "Complete camera inventory is unavailable in this user session".into(),
+                    );
+                }
+            }
+            #[cfg(windows)]
+            match windows_audio::playback_inventory() {
+                Ok(rows) => inventory
+                    .sources
+                    .extend(rows.into_iter().map(|device| LocalSource {
+                        device,
+                        camera_identity: None,
+                    })),
+                Err(_) => {
+                    inventory.speaker_unavailable_reason =
+                        Some("Speaker inventory is unavailable in this user session".into())
                 }
             }
             // Keep independent optional kinds usable when the other inventory
@@ -84,6 +108,7 @@ fn main() -> anyhow::Result<()> {
             for kind in [
                 porthub_components::media::Kind::Microphone,
                 porthub_components::media::Kind::Camera,
+                porthub_components::media::Kind::Speaker,
             ] {
                 let rows = inventory
                     .sources
@@ -99,6 +124,8 @@ fn main() -> anyhow::Result<()> {
                         Some("Native source inventory exceeds safe identity bounds".into());
                     if kind == porthub_components::media::Kind::Camera {
                         inventory.camera_unavailable_reason = reason;
+                    } else if kind == porthub_components::media::Kind::Speaker {
+                        inventory.speaker_unavailable_reason = reason;
                     } else {
                         inventory.microphone_unavailable_reason = reason;
                     }
@@ -110,6 +137,13 @@ fn main() -> anyhow::Result<()> {
                     .retain(|s| s.device.kind != porthub_components::media::Kind::Camera);
                 inventory.camera_unavailable_reason =
                     Some("Combined source inventory exceeds safe identity bounds".into());
+            }
+            if !inventory.valid() || serde_json::to_vec(&inventory)?.len() > 128 * 1024 {
+                inventory
+                    .sources
+                    .retain(|s| s.device.kind != porthub_components::media::Kind::Speaker);
+                inventory.speaker_unavailable_reason =
+                    Some("Combined audio inventory exceeds safe identity bounds".into());
             }
             let bytes = serde_json::to_vec(&inventory)?;
             println!("{}", String::from_utf8(bytes)?);

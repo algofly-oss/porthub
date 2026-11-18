@@ -33,15 +33,30 @@ pub fn serve() -> Result<()> {
     ensure!(request.valid(), "Invalid media session request");
     if request.operation == Operation::CaptureCamera {
         let expected = serde_json::from_value(
-            request.camera_identity.clone().context("Retained camera identity required")?,
-        ).context("Invalid retained camera identity")?;
+            request
+                .camera_identity
+                .clone()
+                .context("Retained camera identity required")?,
+        )
+        .context("Invalid retained camera identity")?;
         return crate::windows_video_session::serve(
             &request.session,
-            request.source_id.as_deref().context("Explicit camera identity required")?,
+            request
+                .source_id
+                .as_deref()
+                .context("Explicit camera identity required")?,
             expected,
-            request.video_format.context("Explicit camera format required")?,
+            request
+                .video_format
+                .context("Explicit camera format required")?,
             reader,
         );
+    }
+    if matches!(
+        request.operation,
+        Operation::CapturePlayback | Operation::RenderPlayback
+    ) {
+        return playback(request, reader);
     }
     microphone_operation(request.operation)?;
     let sources = match crate::windows_audio::inventory() {
@@ -108,6 +123,81 @@ pub fn serve() -> Result<()> {
         }
         return Err(error);
     }
+    Ok(())
+}
+/// Explicit selected-output loopback and default-output render share the same
+/// finite48k monoF32 framing as microphone routes; no ambient command opens one.
+fn playback<R: Read + Send + 'static>(request: SessionRequest, mut reader: R) -> Result<()> {
+    let capture = request.operation == Operation::CapturePlayback;
+    let selected = if capture {
+        let sources = crate::windows_audio::playback_inventory()?;
+        let id = request
+            .source_id
+            .as_deref()
+            .context("Selected playback output required")?;
+        Some(
+            sources
+                .into_iter()
+                .find(|d| d.id == id || d.native_id == id)
+                .context("Selected playback output unavailable")?
+                .native_id,
+        )
+    } else {
+        None
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let input_cancel = cancel.clone();
+    let queue = Arc::new(std::sync::Mutex::new(crate::pcm::Queue::default()));
+    let input_queue = queue.clone();
+    let malformed = Arc::new(AtomicBool::new(false));
+    let bad = malformed.clone();
+    std::thread::spawn(move || {
+        if capture {
+            let mut byte = [0];
+            let _ = reader.read(&mut byte);
+        } else {
+            loop {
+                match crate::pcm::read_frame(&mut reader) {
+                    Ok(Some(frame)) => input_queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(&frame),
+                    Ok(None) => break,
+                    Err(_) => {
+                        bad.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        }
+        input_cancel.store(true, Ordering::Release);
+        input_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    });
+    let output = crate::capture_output::Output::audio(cancel.clone());
+    let ready = |native: &str| {
+        output.ready(&serde_json::json!({"session":request.session,"state":if capture{"capturing"}else{"rendering"},"backend":"wasapi","endpoint_id":native,"source_id":request.source_id,"rate":PCM_RATE,"channels":PCM_CHANNELS,"format":"f32le"}))
+    };
+    let result = if let Some(selected) = selected {
+        crate::windows_audio::capture_playback(&selected, &cancel, ready, |pcm| output.frame(pcm))
+    } else {
+        crate::windows_audio::render_playback(&cancel, ready, |bytes| {
+            let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+            for byte in bytes {
+                *byte = queue.0.pop_front().unwrap_or(0);
+            }
+            Ok(())
+        })
+    };
+    cancel.store(true, Ordering::Release);
+    queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    result?;
+    ensure!(
+        !malformed.load(Ordering::Acquire),
+        "Malformed playback PCM; route stopped"
+    );
     Ok(())
 }
 // Exact opcode allowlist: future camera operations cannot fall back to audio.
@@ -208,9 +298,16 @@ mod tests {
     #[test]
     fn unsupported_operations_never_fall_back_to_microphone() {
         microphone_operation(Operation::CaptureMicrophone).unwrap();
-        assert!(microphone_operation(Operation::PublishMicrophone)
-            .unwrap_err()
-            .to_string()
-            .contains("microphone capture only"));
+        for op in [
+            Operation::PublishMicrophone,
+            Operation::CaptureCamera,
+            Operation::CapturePlayback,
+            Operation::RenderPlayback,
+        ] {
+            assert!(microphone_operation(op)
+                .unwrap_err()
+                .to_string()
+                .contains("microphone capture only"));
+        }
     }
 }

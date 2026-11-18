@@ -148,3 +148,41 @@ async fn camera_plans_require_negotiated_kind_and_independent_client_permissions
   Ok(())
  }.await;case.db.drop().await?;result
 }
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn speaker_plans_capture_selected_source_and_render_destination_without_usb_identity()->Result<()> {
+ let case=Case::new(Default::default()).await?;
+ let result:Result<()>=async {
+ let(owner,cookie)=case.user("speaker-owner@example.invalid","user").await?;
+ let(other,other_cookie)=case.user("speaker-other@example.invalid","user").await?;
+ let a=ObjectId::new();let b=ObjectId::new();let c=ObjectId::new();
+ for(id,user,token)in[(a,owner,"speaker-a"),(b,owner,"speaker-b"),(c,other,"speaker-c")] {case.app.collection("machines").insert_one(doc!{"_id":id,"user_id":user,"enabled":true,"token":token,"name":"Speaker fixture"}).await?;}
+ let source_id=format!("media:{}","e".repeat(64));
+ let source=json!({"uid":1000,"device":{"id":source_id,"name":"Selected source output","kind":"speaker","backend":"test-explicit","native_id":"local-only-output","capture_available":true,"capture_state":"ready","unavailable_reason":null}});
+ for(id,token,sources)in[(a,"speaker-a",json!([source])),(b,"speaker-b",json!([])),(c,"speaker-c",json!([]))] {
+ case.status("POST","/api/media/client/report","",json!({"machine_id":id.to_hex(),"token":token,"protocol":2,"usb_enabled":false,"microphone_enabled":false,"camera_enabled":false,"speaker_enabled":true,"speaker_receiver_available":true,"speaker_unavailable_reason":null,"receive_enabled":true,"receiver_available":false,"receiver_identity":null,"receiver_unavailable_reason":"No USB receiver configured","sources":sources,"states":[]}),StatusCode::OK).await?;
+ }
+ let create=json!({"source":a.to_hex(),"destination":b.to_hex(),"desktop_uid":1000,"source_id":source_id,"name":"Source playback to destination speaker","persistent":true,"mode":"phs1-speaker-v1"});
+ case.status("POST","/api/media/forwards",&other_cookie,create.clone(),StatusCode::CONFLICT).await?;
+ let mut foreign=create.clone();foreign["destination"]=c.to_hex().into();case.status("POST","/api/media/forwards",&cookie,foreign,StatusCode::CONFLICT).await?;
+ let mut wrong=create.clone();wrong["desktop_uid"]=1001.into();case.status("POST","/api/media/forwards",&cookie,wrong,StatusCode::CONFLICT).await?;
+ let made=case.status("POST","/api/media/forwards",&cookie,create,StatusCode::OK).await?;
+ ensure!(made["plan"]["source"]==a.to_hex()&&made["plan"]["destination"]==b.to_hex()&&made["plan"]["mode"]=="phs1-speaker-v1");
+ let id=made["plan"]["id"].as_str().context("Missing speaker plan")?;
+ let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let addr=listener.local_addr()?;let router=case.router.clone();let _server=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{axum::serve(listener,router).await}));
+ let request=|machine:ObjectId,token:&str,side:&str|->Result<_>{let mut r=format!("ws://{addr}/api/media/stream/{id}/{side}").into_client_request()?;r.headers_mut().insert("x-porthub-machine-id",machine.to_hex().parse()?);r.headers_mut().insert("authorization",format!("Bearer {token}").parse()?);Ok(r)};
+ ensure!(tokio_tungstenite::connect_async(request(b,"speaker-b","source")?).await.is_err());
+ let(mut producer,_)=tokio_tungstenite::connect_async(request(a,"speaker-a","source")?).await?;
+ let(mut renderer,_)=tokio_tungstenite::connect_async(request(b,"speaker-b","destination")?).await?;
+ ensure!(producer.next().await.context("No source ready")??.into_text()?=="ready");ensure!(renderer.next().await.context("No destination ready")??.into_text()?=="ready");
+ let samples=0.25f32.to_le_bytes().repeat(48);producer.send(Message::Binary(samples.clone().into())).await?;
+ tokio::time::timeout(std::time::Duration::from_secs(2),async {loop{match renderer.next().await.context("Speaker stream closed")??{Message::Binary(bytes)=>{ensure!(bytes.as_ref()==samples);break;},Message::Ping(bytes)=>renderer.send(Message::Pong(bytes)).await?,_=>{}}}Ok::<_,anyhow::Error>(())}).await??;
+ case.app.collection("native_media_inventory").update_one(doc!{"_id":b},doc!{"$set":{"speaker_enabled":false}}).await?;
+ tokio::time::timeout(std::time::Duration::from_secs(7),async {loop{match renderer.next().await{None|Some(Err(_))|Some(Ok(Message::Close(_)))=>break,Some(Ok(Message::Ping(bytes)))=>renderer.send(Message::Pong(bytes)).await?,_=>{}}}Ok::<_,anyhow::Error>(())}).await??;
+
+ let report=case.status("POST","/api/media/client/report","",json!({"machine_id":b.to_hex(),"token":"speaker-b","protocol":2,"usb_enabled":false,"microphone_enabled":false,"speaker_enabled":false,"speaker_receiver_available":false,"receive_enabled":true,"receiver_available":false,"receiver_identity":null,"receiver_unavailable_reason":null,"sources":[],"states":[]}),StatusCode::OK).await?;
+ ensure!(report["plans"].as_array().is_some_and(|rows|rows.iter().all(|r|r["id"]!=id)),"Revoked destination must not receive authorized plan");
+ Ok(())}.await;
+ case.db.drop().await?;result
+}

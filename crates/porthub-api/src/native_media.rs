@@ -292,29 +292,41 @@ async fn authorized_plan(app: &App, owner: ObjectId, plan: &Plan) -> ApiResult<(
     }
     let source = capabilities(app, owner, &plan.source).await?;
     let destination = capabilities(app, owner, &plan.destination).await?;
+    let speaker = plan.kind() == Some(porthub_components::media::Kind::Speaker);
     let camera = plan.kind() == Some(porthub_components::media::Kind::Camera);
-    if source.get_bool(if camera {
-        "camera_enabled"
+    if speaker {
+        if source.get_i32("protocol")!=Ok(2)||destination.get_i32("protocol")!=Ok(2)||source.get_bool("speaker_enabled") != Ok(true)
+            || destination.get_bool("speaker_enabled") != Ok(true)
+            || destination.get_bool("speaker_receiver_available") != Ok(true)
+            || source.get_bool("receive_enabled") != Ok(true)
+            || destination.get_bool("receive_enabled") != Ok(true)
+        {
+            return Err(unavailable());
+        }
     } else {
-        "microphone_enabled"
-    }) != Ok(true)
-        || camera
-            && (source.get_i32("protocol") != Ok(2)
-                || destination.get_i32("protocol") != Ok(2)
-                || destination.get_bool("camera_receiver_available") != Ok(true))
-        || destination.get_bool("receive_enabled") != Ok(true)
-        || !camera && destination.get_bool("receiver_available") != Ok(true)
-    {
-        return Err(unavailable());
-    }
-    if destination
-        .get_document("receiver_identity")
-        .ok()
-        .and_then(|v| bson::from_document::<UsbIdentity>(v.clone()).ok())
-        .as_ref()
-        != Some(&plan.identity)
-    {
-        return Err(unavailable());
+        if source.get_bool(if camera {
+            "camera_enabled"
+        } else {
+            "microphone_enabled"
+        }) != Ok(true)
+            || camera
+                && (source.get_i32("protocol") != Ok(2)
+                    || destination.get_i32("protocol") != Ok(2)
+                    || destination.get_bool("camera_receiver_available") != Ok(true))
+            || destination.get_bool("receive_enabled") != Ok(true)
+            || !camera && destination.get_bool("receiver_available") != Ok(true)
+        {
+            return Err(unavailable());
+        }
+        if destination
+            .get_document("receiver_identity")
+            .ok()
+            .and_then(|v| bson::from_document::<UsbIdentity>(v.clone()).ok())
+            .as_ref()
+            != Some(&plan.identity)
+        {
+            return Err(unavailable());
+        }
     }
     let sources: Vec<Source> = source
         .get_array("sources")
@@ -355,6 +367,12 @@ struct Report {
     usb_enabled: bool,
     microphone_enabled: bool,
     #[serde(default)]
+    speaker_enabled: bool,
+    #[serde(default)]
+    speaker_receiver_available: bool,
+    #[serde(default)]
+    speaker_unavailable_reason: Option<String>,
+    #[serde(default)]
     microphone_unavailable_reason: Option<String>,
     #[serde(default)]
     camera_unavailable_reason: Option<String>,
@@ -374,14 +392,28 @@ struct Report {
 }
 async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiResult<Json<Value>> {
     if body.receiver_identity.as_ref().is_some_and(|i| !i.valid())
-        || (body.receiver_available||body.camera_receiver_available) && body.receiver_identity.is_none()
+        || (body.receiver_available || body.camera_receiver_available)
+            && body.receiver_identity.is_none()
         || body
             .receiver_unavailable_reason
             .as_ref()
             .is_some_and(|r| r.len() > 512 || r.chars().any(char::is_control))
-        || [&body.microphone_unavailable_reason,&body.camera_unavailable_reason].iter().any(|v|v.as_ref().is_some_and(|s|s.len()>512||s.chars().any(char::is_control)))
+        || [
+            &body.speaker_unavailable_reason,
+            &body.microphone_unavailable_reason,
+            &body.camera_unavailable_reason,
+        ]
+        .iter()
+        .any(|v| {
+            v.as_ref()
+                .is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
+        })
         || !matches!(body.protocol, 1 | 2)
-        || body.protocol == 1 && (body.camera_enabled || body.camera_receiver_available)
+        || body.protocol == 1
+            && (body.camera_enabled
+                || body.camera_receiver_available
+                || body.speaker_enabled
+                || body.speaker_receiver_available)
         || body
             .camera_receiver_unavailable_reason
             .as_ref()
@@ -408,7 +440,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .get_object_id("user_id")
         .map_err(|_| unavailable())?;
     self::machine(&app, owner, &body.machine_id).await?;
-    app.collection("native_media_inventory").replace_one(doc!{"_id":oid(&body.machine_id)?},doc!{"_id":oid(&body.machine_id)?,"owner":owner,"at":DateTime::now(),"protocol":body.protocol as i32,"microphone_unavailable_reason":body.microphone_unavailable_reason,"camera_unavailable_reason":body.camera_unavailable_reason,"camera_enabled":body.camera_enabled,"camera_receiver_available":body.camera_receiver_available,"camera_receiver_unavailable_reason":body.camera_receiver_unavailable_reason,"usb_enabled":body.usb_enabled,"microphone_enabled":body.microphone_enabled,"receive_enabled":body.receive_enabled,"receiver_available":body.receiver_available,"receiver_identity":bson::to_bson(&body.receiver_identity).map_err(|_|unavailable())?,"receiver_unavailable_reason":body.receiver_unavailable_reason,"sources":bson::to_bson(&body.sources).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?}).upsert(true).await?;
+    app.collection("native_media_inventory").replace_one(doc!{"_id":oid(&body.machine_id)?},doc!{"_id":oid(&body.machine_id)?,"owner":owner,"at":DateTime::now(),"protocol":body.protocol as i32,"microphone_unavailable_reason":body.microphone_unavailable_reason,"camera_unavailable_reason":body.camera_unavailable_reason,"speaker_enabled":body.speaker_enabled,"speaker_receiver_available":body.speaker_receiver_available,"speaker_unavailable_reason":body.speaker_unavailable_reason,"camera_enabled":body.camera_enabled,"camera_receiver_available":body.camera_receiver_available,"camera_receiver_unavailable_reason":body.camera_receiver_unavailable_reason,"usb_enabled":body.usb_enabled,"microphone_enabled":body.microphone_enabled,"receive_enabled":body.receive_enabled,"receiver_available":body.receiver_available,"receiver_identity":bson::to_bson(&body.receiver_identity).map_err(|_|unavailable())?,"receiver_unavailable_reason":body.receiver_unavailable_reason,"sources":bson::to_bson(&body.sources).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?}).upsert(true).await?;
     let plans = plans(&app, owner, Some(&body.machine_id)).await?;
     let mut authorized = Vec::new();
     for plan in plans {
@@ -416,7 +448,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
             authorized.push(plan);
         }
     }
-    let discover=app.collection("native_media_discovery").find_one_and_delete(doc!{"_id":oid(&body.machine_id)?,"owner":owner,"requested_at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-60000)}}).await?.is_some()&&(body.microphone_enabled||body.camera_enabled&&body.protocol==2);
+    let discover=app.collection("native_media_discovery").find_one_and_delete(doc!{"_id":oid(&body.machine_id)?,"owner":owner,"requested_at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-60000)}}).await?.is_some()&&(body.microphone_enabled||(body.camera_enabled||body.speaker_enabled)&&body.protocol==2);
     Ok(Json(
         json!({"protocol":body.protocol,"plans":authorized,"discover":discover}),
     ))
@@ -441,11 +473,18 @@ fn microphone_mode() -> String {
 }
 async fn create_plan(app: &App, owner: ObjectId, body: Create) -> ApiResult<Plan> {
     let destination = capabilities(app, owner, &body.destination).await?;
-    let configured: UsbIdentity = destination
-        .get_document("receiver_identity")
-        .ok()
-        .and_then(|d| bson::from_document(d.clone()).ok())
-        .ok_or_else(unavailable)?;
+    let configured: UsbIdentity = if body.mode == "phs1-speaker-v1" {
+        UsbIdentity {
+            vendor: 0x1d6b,
+            product: 0x0101,
+        }
+    } else {
+        destination
+            .get_document("receiver_identity")
+            .ok()
+            .and_then(|d| bson::from_document(d.clone()).ok())
+            .ok_or_else(unavailable)?
+    };
     let identity = body.identity.unwrap_or(configured);
     let plan = Plan {
         id: uuid::Uuid::new_v4().simple().to_string(),
@@ -528,7 +567,7 @@ async fn inventory(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult
   Some(json!({"id":id.to_hex(),"name":machine.get_str("name").unwrap_or("Machine"),"enabled":enabled,"live":enabled&&at.is_some_and(|at|DateTime::now().timestamp_millis()-at<45000),"at":at,"report":report.and_then(|r|{let mut r=r.clone();r.remove("_id");r.remove("owner");r.remove("at");bson::from_document::<Value>(r).ok()})}))
  }).collect();
     Ok(Json(
-        json!({"protocol":2,"modes":["phm1-microphone-v1","phv1-camera-mjpeg-v1"],"machines":rows}),
+        json!({"protocol":2,"modes":["phm1-microphone-v1","phv1-camera-mjpeg-v1","phs1-speaker-v1"],"machines":rows}),
     ))
 }
 #[derive(Deserialize)]
@@ -640,7 +679,9 @@ async fn discover(
     let owner = owner(&app, &headers).await?;
     let report = capabilities(&app, owner, &id).await?;
     if report.get_bool("microphone_enabled") != Ok(true)
-        && !(report.get_i32("protocol") == Ok(2) && report.get_bool("camera_enabled") == Ok(true))
+        && !(report.get_i32("protocol") == Ok(2)
+            && (report.get_bool("camera_enabled") == Ok(true)
+                || report.get_bool("speaker_enabled") == Ok(true)))
     {
         return Err(unavailable());
     }

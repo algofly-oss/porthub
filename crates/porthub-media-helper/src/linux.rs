@@ -23,7 +23,10 @@ fn supported_version(version: &str) -> bool {
 }
 fn endpoint_name(hardware: Option<&str>, node: &str) -> String {
     if let Some(card) = hardware.and_then(|s| s.strip_prefix("alsa_card.")) {
-        if let Some(profile) = node.strip_prefix(&format!("alsa_input.{card}.")) {
+        if let Some(profile) = node
+            .strip_prefix(&format!("alsa_input.{card}."))
+            .or_else(|| node.strip_prefix(&format!("alsa_output.{card}.")))
+        {
             if let Some((base, suffix)) = profile.rsplit_once('.') {
                 if [
                     "analog-stereo",
@@ -86,7 +89,7 @@ fn snapshot(nodes: BTreeMap<u32, Node>, hardware: BTreeMap<u32, String>) -> Snap
                 "Ambiguous native source identity; refresh after duplicate OS nodes are resolved"
                     .into(),
             );
-        } else if device.kind == Kind::Microphone && node.serial.is_none() {
+        } else if matches!(device.kind, Kind::Microphone | Kind::Speaker) && node.serial.is_none() {
             device.capture_state = porthub_components::media::CaptureState::Unsupported;
             device.unavailable_reason =
                 Some("Native source instance identity is unavailable".into());
@@ -145,13 +148,13 @@ fn collect(loop_: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc) -> Result
         }
         if global.type_!=pw::types::ObjectType::Node{return;}
         let Some(class)=props.get("media.class")else{return};
-        let kind=match class{"Audio/Source"=>Kind::Microphone,"Video/Source"=>Kind::Camera,_=>return};
+        let kind=match class{"Audio/Source"=>Kind::Microphone,"Audio/Sink"=>Kind::Speaker,"Video/Source"=>Kind::Camera,_=>return};
         let Some(name)=props.get("node.name").filter(|s|!s.is_empty()&&s.len()<=512)else{return};
         let label=props.get("node.description").unwrap_or(name).chars().filter(|c|!c.is_control()).take(256).collect();
         let parent=props.get("device.id").and_then(|s|s.parse::<u32>().ok());
         let endpoint=props.get("device.profile.name").map(str::to_owned);
         let serial=props.get("object.serial").and_then(|s|s.parse::<u64>().ok()).filter(|s|*s>0).map(|s|s.to_string());
-        let device=Device{id:String::new(),name:label,kind,backend:"pipewire".into(),native_id:name.into(),capture_available:false,capture_state:if kind==Kind::Microphone{porthub_components::media::CaptureState::PermissionUnknown}else{porthub_components::media::CaptureState::Unsupported},unavailable_reason:Some("Source enumerated; explicit capture session and permissions have not been verified".into())};
+        let device=Device{id:String::new(),name:label,kind,backend:"pipewire".into(),native_id:name.into(),capture_available:false,capture_state:if matches!(kind,Kind::Microphone|Kind::Speaker){porthub_components::media::CaptureState::PermissionUnknown}else{porthub_components::media::CaptureState::Unsupported},unavailable_reason:Some("Source enumerated; explicit capture session and permissions have not been verified".into())};
         // Global IDs preserve simultaneous duplicate names for ambiguity checks.
         if !insert_bounded(&mut result.borrow_mut(),global.id,Node{device,parent,endpoint,serial}) {overflow_event.set(true);}
     }).global_remove(move |id|{removed.borrow_mut().remove(&id);removed_devices.borrow_mut().remove(&id);}).register();
@@ -210,9 +213,16 @@ pub(crate) fn capture_target(
     core: &pw::core::CoreRc,
     selected: &str,
 ) -> Result<String> {
-    selected_target(&collect(loop_, core)?, selected)
+    selected_target(&collect(loop_, core)?, selected, Kind::Microphone)
 }
-fn selected_target(snapshot: &Snapshot, selected: &str) -> Result<String> {
+pub(crate) fn playback_target(
+    loop_: &pw::main_loop::MainLoopRc,
+    core: &pw::core::CoreRc,
+    selected: &str,
+) -> Result<String> {
+    selected_target(&collect(loop_, core)?, selected, Kind::Speaker)
+}
+fn selected_target(snapshot: &Snapshot, selected: &str, kind: Kind) -> Result<String> {
     let device = snapshot
         .devices
         .iter()
@@ -221,7 +231,7 @@ fn selected_target(snapshot: &Snapshot, selected: &str) -> Result<String> {
                 d.id == selected
             } else {
                 d.native_id == selected
-            }) && d.kind == Kind::Microphone
+            }) && d.kind == kind
         })
         .ok_or_else(|| {
             anyhow::anyhow!("Requested microphone is not present in the source session")
@@ -300,7 +310,11 @@ mod tests {
             hardware(),
         );
         let id = first.devices[0].id.clone();
-        assert_eq!(super::selected_target(&first, &id).unwrap(), "401");
+        assert_eq!(
+            super::selected_target(&first, &id, porthub_components::media::Kind::Microphone)
+                .unwrap(),
+            "401"
+        );
         let replacement = super::snapshot(
             [(11, node("input.A", Some("402"), 1))]
                 .into_iter()
@@ -308,15 +322,27 @@ mod tests {
             hardware(),
         );
         assert_eq!(replacement.devices[0].id, id);
-        assert_eq!(super::selected_target(&replacement, &id).unwrap(), "402");
         assert_eq!(
-            super::selected_target(&first, &id).unwrap(),
+            super::selected_target(
+                &replacement,
+                &id,
+                porthub_components::media::Kind::Microphone
+            )
+            .unwrap(),
+            "402"
+        );
+        assert_eq!(
+            super::selected_target(&first, &id, porthub_components::media::Kind::Microphone)
+                .unwrap(),
             "401",
             "Old session target stays pinned to its graph instance"
         );
-        assert!(
-            super::selected_target(&super::snapshot(Default::default(), hardware()), &id).is_err()
-        );
+        assert!(super::selected_target(
+            &super::snapshot(Default::default(), hardware()),
+            &id,
+            porthub_components::media::Kind::Microphone
+        )
+        .is_err());
     }
     #[test]
     fn duplicate_names_serials_and_stable_endpoints_fail_closed() {
@@ -338,7 +364,12 @@ mod tests {
             assert!(s.targets.is_empty());
             assert!(s.devices.iter().all(|d| !d.can_request_capture()));
             for d in &s.devices {
-                assert!(super::selected_target(&s, &d.id).is_err());
+                assert!(super::selected_target(
+                    &s,
+                    &d.id,
+                    porthub_components::media::Kind::Microphone
+                )
+                .is_err());
             }
         }
     }
@@ -349,7 +380,12 @@ mod tests {
             hardware(),
         );
         assert!(s.targets.is_empty());
-        assert!(super::selected_target(&s, &s.devices[0].id).is_err());
+        assert!(super::selected_target(
+            &s,
+            &s.devices[0].id,
+            porthub_components::media::Kind::Microphone
+        )
+        .is_err());
         let id = porthub_components::media::stable_source_id(
             porthub_components::media::Kind::Microphone,
             "alsa_card.cardA",
@@ -360,8 +396,26 @@ mod tests {
             hardware(),
         );
         assert!(
-            super::selected_target(&s, &id).is_err(),
+            super::selected_target(&s, &id, porthub_components::media::Kind::Microphone).is_err(),
             "A node named like another source ID cannot substitute for that stable ID"
+        );
+    }
+    #[test]
+    fn playback_selection_pins_speaker_instance_and_never_substitutes_microphone() {
+        use porthub_components::media::Kind;
+        let mut speaker = node("alsa_output.cardA.analog-stereo", Some("601"), 1);
+        speaker.device.kind = Kind::Speaker;
+        let snapshot = super::snapshot([(20, speaker)].into_iter().collect(), hardware());
+        let id = &snapshot.devices[0].id;
+        assert_eq!(
+            super::selected_target(&snapshot, id, Kind::Speaker).unwrap(),
+            "601"
+        );
+        assert!(super::selected_target(&snapshot, id, Kind::Microphone).is_err());
+        assert!(super::selected_target(&snapshot, "default", Kind::Speaker).is_err());
+        assert_eq!(
+            super::endpoint_name(Some("alsa_card.cardA"), "alsa_output.cardA.analog-stereo.2"),
+            "analog-stereo"
         );
     }
     #[test]

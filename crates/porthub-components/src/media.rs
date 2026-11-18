@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Microphone,
     Camera,
+    Speaker,
 }
 /// Readonly enumeration never grants microphone permission. A supported source
 /// can be requested explicitly while permission is unknown; the OS decides on use.
@@ -65,7 +66,7 @@ impl LocalSource {
     pub fn valid(&self) -> bool {
         self.device.valid()
             && match self.device.kind {
-                Kind::Microphone => self.camera_identity.is_none(),
+                Kind::Microphone | Kind::Speaker => self.camera_identity.is_none(),
                 Kind::Camera => self.camera_identity.as_ref().is_some_and(|v| {
                     v.is_object() && serde_json::to_vec(v).is_ok_and(|b| b.len() <= 6144)
                 }),
@@ -79,6 +80,8 @@ pub struct LocalInventory {
     pub sources: Vec<LocalSource>,
     pub microphone_unavailable_reason: Option<String>,
     pub camera_unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub speaker_unavailable_reason: Option<String>,
 }
 impl LocalInventory {
     pub fn valid(&self) -> bool {
@@ -87,6 +90,7 @@ impl LocalInventory {
             && [
                 &self.microphone_unavailable_reason,
                 &self.camera_unavailable_reason,
+                &self.speaker_unavailable_reason,
             ]
             .iter()
             .all(|v| {
@@ -116,6 +120,8 @@ pub enum Operation {
     CaptureMicrophone,
     PublishMicrophone,
     CaptureCamera,
+    CapturePlayback,
+    RenderPlayback,
 }
 pub const PCM_RATE: u32 = 48_000;
 pub const PCM_CHANNELS: u32 = 1;
@@ -128,14 +134,14 @@ impl SessionRequest {
             && self.name.len() <= 256
             && !self.name.chars().any(char::is_control)
             && match self.operation {
-                Operation::CaptureMicrophone => {
+                Operation::CaptureMicrophone | Operation::CapturePlayback => {
                     self.video_format.is_none()
                         && self.camera_identity.is_none()
                         && self.source_id.as_ref().is_some_and(|s| {
                             !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
                         })
                 }
-                Operation::PublishMicrophone => {
+                Operation::PublishMicrophone | Operation::RenderPlayback => {
                     self.source_id.is_none()
                         && self.video_format.is_none()
                         && self.camera_identity.is_none()
@@ -158,6 +164,15 @@ impl SessionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speaker_capture_selects_source_while_render_uses_default() {
+        let mut request=SessionRequest{operation:Operation::CapturePlayback,session:"c".repeat(32),name:"Playback".into(),source_id:Some(stable_source_id(Kind::Speaker,"hardware","output")),video_format:None,camera_identity:None};
+        assert!(request.valid());
+        request.operation=Operation::RenderPlayback;assert!(!request.valid());
+        request.source_id=None;assert!(request.valid());
+        request.operation=Operation::CapturePlayback;assert!(!request.valid());
+        assert_ne!(stable_source_id(Kind::Speaker,"hardware","output"),stable_source_id(Kind::Microphone,"hardware","output"));
+    }
     #[test]
     fn camera_requests_cannot_be_misread_as_legacy_microphone_sessions() {
         let mut request = SessionRequest {
@@ -316,6 +331,7 @@ pub fn stable_source_id(kind: Kind, hardware: &str, endpoint: &str) -> String {
     hash.update(match kind {
         Kind::Microphone => b"microphone" as &[u8],
         Kind::Camera => b"camera",
+        Kind::Speaker => b"speaker",
     });
     for value in [hardware, endpoint] {
         hash.update((value.len() as u64).to_be_bytes());

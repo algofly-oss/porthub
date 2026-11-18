@@ -13,10 +13,12 @@ use windows::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Media::Audio::{
-            eCapture, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-            MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+            eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient,
+            IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+            AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            DEVICE_STATE_ACTIVE, WAVEFORMATEX,
         },
         System::{
             Com::{
@@ -80,7 +82,13 @@ fn label(device: &IMMDevice) -> Result<String> {
     }
 }
 fn devices(enumerator: &IMMDeviceEnumerator) -> Result<Vec<(IMMDevice, String)>> {
-    let endpoints = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }?;
+    devices_flow(enumerator, eCapture)
+}
+fn devices_flow(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+) -> Result<Vec<(IMMDevice, String)>> {
+    let endpoints = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }?;
     let count = unsafe { endpoints.GetCount() }?;
     ensure!(count <= 256, "Audio endpoint inventory exceeds limit");
     let mut result = Vec::with_capacity(count as usize);
@@ -101,6 +109,28 @@ pub fn inventory() -> Result<Vec<Device>> {
         capture_available:false,capture_state:porthub_components::media::CaptureState::PermissionUnknown,
         unavailable_reason:Some("Source enumerated; explicit capture session and permissions have not been verified".into()),
     })).collect()
+}
+/// Enumerating playback endpoints never activates loopback or rendering.
+pub fn playback_inventory() -> Result<Vec<Device>> {
+    let _apartment = Apartment::user()?;
+    let enumerator = enumerator()?;
+    devices_flow(&enumerator, eRender)?
+        .into_iter()
+        .map(|(endpoint, id)| {
+            Ok(Device {
+                id: stable_source_id(Kind::Speaker, "windows-wasapi", &id),
+                name: label(&endpoint).unwrap_or_else(|_| "Speaker".into()),
+                kind: Kind::Speaker,
+                backend: "windows-wasapi".into(),
+                native_id: id,
+                capture_available: false,
+                capture_state: porthub_components::media::CaptureState::PermissionUnknown,
+                unavailable_reason: Some(
+                    "Speaker enumerated; explicit playback route has not been verified".into(),
+                ),
+            })
+        })
+        .collect()
 }
 struct Event(HANDLE);
 impl Drop for Event {
@@ -249,6 +279,170 @@ pub fn capture(
             drop(packet);
             last_packet = Instant::now();
         }
+    }
+    Ok(())
+}
+/// Shared-mode loopback is pinned to the explicitly selected render endpoint.
+/// Silence is valid. Never substitute the default or another render endpoint.
+pub fn capture_playback(
+    selected: &str,
+    cancel: &AtomicBool,
+    ready: impl FnOnce(&str) -> Result<()>,
+    mut emit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let _apartment = Apartment::user()?;
+    let enumerator = enumerator()?;
+    let (endpoint, _) = devices_flow(&enumerator, eRender)?
+        .into_iter()
+        .find(|(_, id)| id == selected)
+        .context("Selected playback output is absent or inactive")?;
+    let client: IAudioClient = unsafe { endpoint.Activate(CLSCTX_ALL, None) }?;
+    let event = Event(unsafe { CreateEventW(None, false, false, PCWSTR::null()) }?);
+    let requested = format();
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            1_000_000,
+            0,
+            &requested,
+            None,
+        )
+    }
+    .context("System playback loopback initialization failed")?;
+    let capacity = unsafe { client.GetBufferSize() }?;
+    ensure!(
+        capacity > 0 && capacity <= PCM_RATE / 2,
+        "System playback buffer exceeds500ms bound"
+    );
+    unsafe { client.SetEventHandle(event.0) }?;
+    let capture: IAudioCaptureClient = unsafe { client.GetService() }?;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    unsafe { client.Start() }?;
+    let _running = Running(&client);
+    ready(selected)?;
+    while !cancel.load(Ordering::Acquire) {
+        let wait = unsafe { WaitForSingleObject(event.0, 50) };
+        ensure!(
+            wait == WAIT_OBJECT_0 || wait == WAIT_TIMEOUT,
+            "System playback wait failed"
+        );
+        while !cancel.load(Ordering::Acquire) && unsafe { capture.GetNextPacketSize() }? > 0 {
+            let mut pointer = std::ptr::null_mut();
+            let mut frames = 0;
+            let mut flags = 0;
+            unsafe { capture.GetBuffer(&mut pointer, &mut frames, &mut flags, None, None) }?;
+            let packet = Packet {
+                client: &capture,
+                frames,
+            };
+            ensure!(
+                frames > 0 && frames <= capacity,
+                "Invalid system playback packet"
+            );
+            let size = frames as usize * 4;
+            if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                let zeros = [0u8; MAX_PCM_FRAME];
+                let mut left = size;
+                while left > 0 {
+                    let n = left.min(MAX_PCM_FRAME);
+                    emit(&zeros[..n])?;
+                    left -= n;
+                }
+            } else {
+                ensure!(!pointer.is_null(), "System playback packet missing data");
+                emit_samples(
+                    unsafe { std::slice::from_raw_parts(pointer, size) },
+                    &mut emit,
+                )?;
+            }
+            drop(packet);
+        }
+    }
+    Ok(())
+}
+/// Render to the user-session default output selected when this route starts.
+pub fn render_playback(
+    cancel: &AtomicBool,
+    ready: impl FnOnce(&str) -> Result<()>,
+    mut fill: impl FnMut(&mut [u8]) -> Result<()>,
+) -> Result<()> {
+    let _apartment = Apartment::user()?;
+    let enumerator = enumerator()?;
+    let endpoint = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+        .context("Default speaker unavailable")?;
+    let selected = native_id(&endpoint)?;
+    let client: IAudioClient = unsafe { endpoint.Activate(CLSCTX_ALL, None) }?;
+    let requested = format();
+    let event = Event(unsafe { CreateEventW(None, false, false, PCWSTR::null()) }?);
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            1_000_000,
+            0,
+            &requested,
+            None,
+        )
+    }
+    .context("Selected speaker cannot render48kHz monoF32")?;
+    let capacity = unsafe { client.GetBufferSize() }?;
+    ensure!(
+        capacity > 0 && capacity <= PCM_RATE / 2,
+        "Speaker buffer exceeds500ms bound"
+    );
+    unsafe { client.SetEventHandle(event.0) }?;
+    let output: IAudioRenderClient = unsafe { client.GetService() }?;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    unsafe { client.Start() }?;
+    let _running = Running(&client);
+    ready(&selected)?;
+    let mut checked = Instant::now();
+    while !cancel.load(Ordering::Acquire) {
+        if checked.elapsed() >= Duration::from_secs(1) {
+            let current = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
+            ensure!(
+                native_id(&current)? == selected,
+                "Default speaker changed; restart route"
+            );
+            checked = Instant::now();
+        }
+        let wait = unsafe { WaitForSingleObject(event.0, 50) };
+        ensure!(
+            wait == WAIT_OBJECT_0 || wait == WAIT_TIMEOUT,
+            "Speaker playback wait failed"
+        );
+        let padding = unsafe { client.GetCurrentPadding() }?;
+        ensure!(padding <= capacity, "Invalid speaker padding");
+        let frames = capacity - padding;
+        if frames == 0 {
+            continue;
+        }
+        let pointer = unsafe { output.GetBuffer(frames) }?;
+        ensure!(!pointer.is_null(), "Speaker render buffer missing");
+        let samples = unsafe { std::slice::from_raw_parts_mut(pointer, frames as usize * 4) };
+        let result = fill(samples);
+        let release = unsafe {
+            output.ReleaseBuffer(
+                frames,
+                if result.is_err() {
+                    AUDCLNT_BUFFERFLAGS_SILENT.0 as u32
+                } else {
+                    0
+                },
+            )
+        };
+        result?;
+        release?;
     }
     Ok(())
 }

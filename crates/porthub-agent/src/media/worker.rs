@@ -50,10 +50,10 @@ pub fn start(profile: PathBuf, control: Arc<Control>, parent: CancellationToken)
     Worker { cancel }
 }
 fn fixture_stage(profile: &std::path::Path, stage: &'static str, count: usize) {
-    #[cfg(all(test,windows))]
-    super::windows_e2e_fixture::diagnostic(profile,stage,count);
-    #[cfg(not(all(test,windows)))]
-    let _=(profile,stage,count);
+    #[cfg(all(test, windows))]
+    super::windows_e2e_fixture::diagnostic(profile, stage, count);
+    #[cfg(not(all(test, windows)))]
+    let _ = (profile, stage, count);
 }
 async fn run(profile: PathBuf, control: Arc<Control>, cancel: CancellationToken) -> Result<()> {
     let mut active = HashMap::<String, Running>::new();
@@ -67,31 +67,31 @@ async fn run(profile: PathBuf, control: Arc<Control>, cancel: CancellationToken)
         tokio::select! {biased;_=cancel.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let updated=transport(&policy.borrow());active.retain(|_,job|keep_session(job.required,transport_policy,&policy.borrow()));transport_policy=updated;},done=discoveries.join_next(),if !discoveries.is_empty()=>{if let Some(Ok(Err(error)))=done{tracing::debug!(reason=%error,"Explicit desktop media discovery unavailable");}},_=interval.tick()=>{
          active.retain(|_,job|!job.task.is_finished());
          let enabled=policy.borrow().clone();
-         let sources=reported_sources(broker::inventory(&profile));
+         let sources=reported_sources(broker::inventory(&profile));let speaker_ready=sources.iter().any(|s|s.device.kind==Kind::Speaker&&s.device.can_request_capture());
          let reported:Vec<State>=states.lock().unwrap_or_else(|e|e.into_inner()).values().take(32).cloned().collect();
          let identity=super::config::refresh(&profile).borrow().clone();
-         fixture_stage(&profile,"capability-start",0);let availability=broker::availability(&profile);let p=control.profile();let body=json!({"machine_id":p.machine_id,"token":p.token,"protocol":2,"microphone_unavailable_reason":availability.microphone_unavailable_reason,"camera_unavailable_reason":availability.camera_unavailable_reason,"camera_enabled":enabled.enabled(Feature::CameraShare),"camera_receiver_available":identity.is_some()&&super::video_receiver::available(),"camera_receiver_unavailable_reason":super::video_receiver::unavailable_reason().or_else(||identity.is_none().then_some("Receiver setup required")),"usb_enabled":enabled.enabled(Feature::Usb),"microphone_enabled":enabled.enabled(Feature::MicrophoneShare),"receive_enabled":enabled.enabled(Feature::MediaReceive),"receiver_available":identity.is_some()&&crate::usb::media_transport::receiver_available(),"receiver_identity":identity,"receiver_unavailable_reason":if !crate::usb::media_transport::receiver_available(){Some("Native USB media receiving is unavailable on this platform")}else if identity.is_none(){Some("Receiver setup required")}else{None},"sources":sources,"states":reported});
+         fixture_stage(&profile,"capability-start",0);let availability=broker::availability(&profile);let p=control.profile();let body=json!({"machine_id":p.machine_id,"token":p.token,"protocol":2,"microphone_unavailable_reason":availability.microphone_unavailable_reason,"camera_unavailable_reason":availability.camera_unavailable_reason,"speaker_enabled":enabled.enabled(Feature::MediaReceive),"speaker_receiver_available":enabled.enabled(Feature::MediaReceive)&&speaker_ready,"speaker_unavailable_reason":availability.speaker_unavailable_reason.or_else(||(!speaker_ready).then_some("No compatible desktop speaker endpoint is available".to_owned())),"camera_enabled":enabled.enabled(Feature::CameraShare),"camera_receiver_available":identity.is_some()&&super::video_receiver::available(),"camera_receiver_unavailable_reason":super::video_receiver::unavailable_reason().or_else(||identity.is_none().then_some("Receiver setup required")),"usb_enabled":enabled.enabled(Feature::Usb),"microphone_enabled":enabled.enabled(Feature::MicrophoneShare),"receive_enabled":enabled.enabled(Feature::MediaReceive),"receiver_available":identity.is_some()&&crate::usb::media_transport::receiver_available(),"receiver_identity":identity,"receiver_unavailable_reason":if !crate::usb::media_transport::receiver_available(){Some("Native USB media receiving is unavailable on this platform")}else if identity.is_none(){Some("Receiver setup required")}else{None},"sources":sources,"states":reported});
          fixture_stage(&profile,"report-start",0);
          let mut reply=tokio::select!{biased;_=cancel.cancelled()=>break,reply=control.request(reqwest::Method::POST,"media/client/report",Some(body.clone()),&[])=>reply};
          if matches!(reply,Err(crate::control::Failure::Rejected(400|422))){let legacy=legacy_report(body);reply=tokio::select!{biased;_=cancel.cancelled()=>break,reply=control.request(reqwest::Method::POST,"media/client/report",Some(legacy),&[])=>reply};}
          let value=match reply.and_then(|r|r.json()){Ok(value)=>{fixture_stage(&profile,"report-ok",0);value},Err(_)=>{fixture_stage(&profile,"report-error",0);active.clear();continue;}};
-         if value["discover"]==true&&discoveries.is_empty()&&(enabled.enabled(Feature::MicrophoneShare)||enabled.enabled(Feature::CameraShare)&&value["protocol"]==2){let profile=profile.clone();discoveries.spawn(async move{broker::discover(&profile).await.map(|_|())});}
+         if value["discover"]==true&&discoveries.is_empty()&&(enabled.enabled(Feature::MicrophoneShare)||(enabled.enabled(Feature::MediaReceive)||enabled.enabled(Feature::CameraShare))&&value["protocol"]==2){let profile=profile.clone();discoveries.spawn(async move{broker::discover(&profile).await.map(|_|())});}
          let mut plans=serde_json::from_value::<Vec<Plan>>(value["plans"].clone()).unwrap_or_default();
          fixture_stage(&profile,"plans-decoded",plans.len());
          if plans.len()>32{active.clear();continue;}
-         plans.retain(|plan|plan.valid()&&(plan.kind()!=Some(Kind::Camera)||value["protocol"]==2));
+         plans.retain(|plan|plan.valid()&&(plan.kind()==Some(Kind::Microphone)||value["protocol"]==2));
          fixture_stage(&profile,"plans-eligible",plans.len());
          let ids:HashSet<_>=plans.iter().map(|p|p.id.clone()).collect();active.retain(|id,_|ids.contains(id));states.lock().unwrap_or_else(|e|e.into_inner()).retain(|id,_|ids.contains(id));
          for plan in plans {
-          if !plan.valid()||plan.kind()==Some(Kind::Camera)&&value["protocol"]!=2{continue;}
+          if !plan.valid()||plan.kind()!=Some(Kind::Microphone)&&value["protocol"]!=2{continue;}
           let source=plan.source==control.profile().machine_id;let destination=plan.destination==control.profile().machine_id;
-          if !source&&!destination||!enabled.enabled(if source{if plan.kind()==Some(Kind::Camera){Feature::CameraShare}else{Feature::MicrophoneShare}}else{Feature::MediaReceive}){fixture_stage(&profile,"plan-skipped",1);continue;}
+          if !source&&!destination||!enabled.enabled(if source{if plan.kind()==Some(Kind::Camera){Feature::CameraShare}else if plan.kind()==Some(Kind::Speaker){Feature::MediaReceive}else{Feature::MicrophoneShare}}else{Feature::MediaReceive}){fixture_stage(&profile,"plan-skipped",1);continue;}
           let configuration=serde_json::to_string(&plan)?;
           if active.get(&plan.id).is_some_and(|old|old.configuration==configuration){continue;}
           fixture_stage(&profile,"plan-accepted",1);
           active.remove(&plan.id);let stop=cancel.child_token();let task_stop=stop.clone();let profile=profile.clone();let control=control.clone();let statuses=states.clone();let id=plan.id.clone();
           statuses.lock().unwrap_or_else(|e|e.into_inner()).insert(id.clone(),State{id:id.clone(),state:"connecting".into(),error:None});
-          let plan_id=plan.id.clone();let required=if source{if plan.kind()==Some(Kind::Camera){Feature::CameraShare}else{Feature::MicrophoneShare}}else{Feature::MediaReceive};
+          let plan_id=plan.id.clone();let required=if source{if plan.kind()==Some(Kind::Camera){Feature::CameraShare}else if plan.kind()==Some(Kind::Speaker){Feature::MediaReceive}else{Feature::MicrophoneShare}}else{Feature::MediaReceive};
           let task=tokio::spawn(async move {
            let status_id=id.clone();let status_store=statuses.clone();let status=Arc::new(move |state:&str|{status_store.lock().unwrap_or_else(|e|e.into_inner()).insert(status_id.clone(),State{id:status_id.clone(),state:state.to_owned(),error:None});});
            fixture_stage(&profile,"session-start",1);
@@ -117,6 +117,9 @@ fn legacy_report(mut value: serde_json::Value) -> serde_json::Value {
     value["protocol"] = json!(1);
     if let Some(object) = value.as_object_mut() {
         object.remove("camera_enabled");
+        object.remove("speaker_enabled");
+        object.remove("speaker_receiver_available");
+        object.remove("speaker_unavailable_reason");
         object.remove("microphone_unavailable_reason");
         object.remove("camera_unavailable_reason");
         object.remove("camera_receiver_available");
