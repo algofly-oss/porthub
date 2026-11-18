@@ -14,7 +14,7 @@ INPUTS=['docs/verification/private-sparse-native-approval.md','Cargo.lock','rust
  'crates/porthub-agent/assets/wintun/amd64/wintun.dll']
 TESTS={
  'linux':['private_network::native_resolver_lifecycle_fixture::linux_real_resolver_suffix_replace_and_native_owner_teardown'],
- 'windows':['private_network::dns_windows::tests::native_same_account_reuse_cannot_bind_dns_endpoint','private_network::dns_windows::tests::native_foreign_udp_or_tcp_listener_prevents_dns_bind_without_takeover','private_network::native_desktop_lifecycle_fixture::native_interface_resolver_collision_connected_owner_and_drop'],
+ 'windows':['private_network::device::tests::windows_tun_uses_the_kernel_address_route_and_cleans_only_its_peer_routes','private_network::dns_windows::tests::native_same_account_reuse_cannot_bind_dns_endpoint','private_network::dns_windows::tests::native_foreign_udp_or_tcp_listener_prevents_dns_bind_without_takeover','private_network::native_desktop_lifecycle_fixture::native_interface_resolver_collision_connected_owner_and_drop'],
  'macos':['private_network::native_desktop_lifecycle_fixture::native_interface_resolver_collision_connected_owner_and_drop'],
 }
 REGRESSIONS={
@@ -172,7 +172,7 @@ def source_guard(contract):
  native_approval(root)
  for name in TESTS[contract]:
   leaf=name.split('::')[-1]
-  source=fixture if 'dns_windows' not in name else fixture.with_name('dns_windows.rs')
+  source=fixture.with_name('device_windows.rs') if name.startswith('private_network::device::tests::') and contract=='windows' else fixture if 'dns_windows' not in name else fixture.with_name('dns_windows.rs')
   if 'async fn '+leaf not in source.read_text():raise RuntimeError('exact native test absent: '+name)
  for name in REGRESSIONS[contract]:
   leaf=name.split('::')[-1]

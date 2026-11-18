@@ -680,4 +680,52 @@ mod tests {
         let ipv6 = Route::new("fd00::".parse().unwrap(), 64);
         assert!(!conflicts_with_route("10.203.0.9".parse().unwrap(), &ipv6));
     }
+    #[cfg(target_arch="x86_64")]
+    #[tokio::test]
+    #[ignore = "requires an Administrator token and Wintun on native Windows"]
+    async fn windows_tun_uses_the_kernel_address_route_and_cleans_only_its_peer_routes() -> anyhow::Result<()> {
+        use super::{Tun, HostAdmission};
+        use anyhow::ensure;
+        use route_manager::AsyncRouteManager;
+        use std::net::{IpAddr,Ipv4Addr};
+        crate::service::require_administrator()?;
+        let root = tempfile::tempdir()?;
+        struct ProgramData(Option<std::ffi::OsString>);
+        impl Drop for ProgramData {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 { std::env::set_var("ProgramData", value); }
+                else { std::env::remove_var("ProgramData"); }
+            }
+        }
+        let _restore = ProgramData(std::env::var_os("ProgramData"));
+        std::env::set_var("ProgramData", root.path());
+        let own:Ipv4Addr="10.254.250.254".parse()?;
+        let peer:Ipv4Addr="10.254.250.253".parse()?;
+        let name=format!("ph{}",&uuid::Uuid::new_v4().simple().to_string()[..8]);
+        // Exercise the production protected-profile constructor; no public/test-only
+        // adapter creation escape hatch is introduced for this native regression.
+        let managed=crate::service::windows_acl::managed_root()?;
+        std::fs::create_dir_all(&managed)?;
+        crate::service::windows_acl::secure(&managed,true)?;
+        let profile=managed.join("profile.json");
+        crate::profile::write_private(&profile,&serde_json::to_vec(&serde_json::json!({
+            "server":"https://fixture.invalid","workspace":"fixture-workspace","peer_id":"fixture-peer"
+        }))?,false)?;
+        let tun=Tun::open_owned(&profile,&name,own,&[own,peer,peer],HostAdmission::Legacy).await?;
+        let index=tun.index;
+        let mut routes=AsyncRouteManager::new()?;
+        let matching=|r:&route_manager::Route,ip:Ipv4Addr|r.destination()==IpAddr::V4(ip)&&r.prefix()==32&&r.if_index()==Some(index);
+        let current=routes.list().await?;
+        ensure!(current.iter().filter(|r|matching(r,own)).count()==1,"Windows must retain its one automatic interface address route");
+        ensure!(current.iter().any(|r|matching(r,peer)));
+        tun.update_routes(&[own,peer]).await?;
+        tun.update_routes(&[own]).await?;
+        let current=routes.list().await?;
+        ensure!(current.iter().any(|r|matching(r,own)) && !current.iter().any(|r|matching(r,peer)));
+        tun.update_routes(&[peer]).await?;
+        drop(tun);
+        ensure!(!routes.list().await?.iter().any(|r|matching(r,peer)));
+        Ok(())
+    }
+
 }

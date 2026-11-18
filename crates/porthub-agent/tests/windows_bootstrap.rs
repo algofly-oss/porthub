@@ -154,34 +154,3 @@ async fn private_enrollment_protects_credentials_and_rejects_unmanaged_destinati
     task.abort();
     Ok(())
 }
-
-#[cfg(target_arch="x86_64")]
-#[tokio::test]
-#[ignore = "requires an Administrator token and Wintun on native Windows"]
-async fn windows_tun_uses_the_kernel_address_route_and_cleans_only_its_peer_routes() -> Result<()> {
-    use porthub_agent::private_network::device::Tun;
-    use route_manager::AsyncRouteManager;
-    use std::net::{IpAddr,Ipv4Addr};
-    porthub_agent::service::require_administrator()?;
-    let root = tempfile::tempdir()?;
-    let _restore = ProgramData(std::env::var_os("ProgramData"));
-    std::env::set_var("ProgramData", root.path());
-    let own:Ipv4Addr="10.254.250.254".parse()?;
-    let peer:Ipv4Addr="10.254.250.253".parse()?;
-    let name=format!("ph{}",&uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let tun=Tun::open(&name,own,&[own,peer,peer]).await?;
-    let index=tun.index;
-    let mut routes=AsyncRouteManager::new()?;
-    let matching=|r:&route_manager::Route,ip:Ipv4Addr|r.destination()==IpAddr::V4(ip)&&r.prefix()==32&&r.if_index()==Some(index);
-    let current=routes.list().await?;
-    ensure!(current.iter().filter(|r|matching(r,own)).count()==1,"Windows must retain its one automatic interface address route");
-    ensure!(current.iter().any(|r|matching(r,peer)));
-    tun.update_routes(&[own,peer]).await?;
-    tun.update_routes(&[own]).await?;
-    let current=routes.list().await?;
-    ensure!(current.iter().any(|r|matching(r,own)) && !current.iter().any(|r|matching(r,peer)));
-    tun.update_routes(&[peer]).await?;
-    drop(tun);
-    ensure!(!routes.list().await?.iter().any(|r|matching(r,peer)));
-    Ok(())
-}
