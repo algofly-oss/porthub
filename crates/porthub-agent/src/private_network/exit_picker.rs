@@ -119,6 +119,15 @@ impl Handle {
             .map(|(_, gateway, tor)| (gateway, tor))
             .unwrap_or((false, false))
     }
+    /// Observe a completed choice without creating work, refreshing usage, or
+    /// notifying control. Used only to preserve the existing fresh Tor SYN path.
+    pub(crate) fn cached_choice(&self,route:&str,flow:&str,destination:Ipv4Addr,warmup:bool)->Option<ExitChoice>{
+        let state=self.0.lock().unwrap();if state.scope.is_none()||!state.routes.contains(route){return None;}
+        let entry=state.entries.get(&(route.to_owned(),flow.to_owned(),warmup))?;
+        if entry.request.destination!=destination||entry.used.elapsed()>=IDLE{return None;}
+        let(choice,authority)=entry.choice.as_ref()?;
+        (authority.check().is_ok()&&authority.remaining().ok().flatten().is_some()).then(||choice.clone())
+    }
     pub(crate) fn request(
         &self,
         route: &str,
@@ -396,6 +405,18 @@ mod tests {
             lease: None,
             cursor: (status == ExitPickStatus::Pending).then(|| "cursor-1".into()),
         }
+    }
+    #[tokio::test]
+    async fn cached_tor_view_never_creates_work_or_refreshes_original_choice(){
+        let handle=Handle::default();handle.observe(&base());let dst="1.1.1.1".parse().unwrap();let flow="c".repeat(64);
+        assert!(handle.cached_choice("route",&flow,dst,false).is_none());assert!(handle.next(true,None).is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(10),handle.demand()).await.is_err());
+        handle.request("route",&flow,dst,false);handle.demand().await;let sent=handle.next(true,None).unwrap();let clock=Arc::new(Clock(AtomicU64::new(0)));
+        handle.accept(&sent,reply(&sent,ExitPickStatus::Ready),authority(clock.clone())).unwrap();let key=("route".to_owned(),flow.clone(),false);
+        let used=handle.0.lock().unwrap().entries[&key].used;
+        assert!(matches!(handle.cached_choice("route",&flow,dst,false),Some(ExitChoice::LocalTor)));assert_eq!(handle.0.lock().unwrap().entries[&key].used,used);
+        clock.0.store(15000,Ordering::SeqCst);assert!(handle.cached_choice("route",&flow,dst,false).is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(10),handle.demand()).await.is_err(),"read-only peek must not start a new control grant");
     }
     #[tokio::test]
     async fn demand_covers_before_and_after_wait_registration_without_packet_poll_wakes() {

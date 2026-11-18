@@ -8,6 +8,21 @@ use std::{
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
+/// Only the existing fresh native SYN may enter Tor's unguarded queue.
+/// Retained bytes never do; UDP/ICMP still have no Tor replay support.
+pub(super) fn peer_retention_applies(
+    choice: Option<&porthub_network::policy::ExitChoice>,
+    syn: Option<u32>,
+) -> bool {
+    !(syn.is_some() && matches!(choice, Some(porthub_network::policy::ExitChoice::LocalTor)))
+}
+pub(super) fn assigned_choice(id: String) -> porthub_network::policy::ExitChoice {
+    #[cfg(feature = "local-tor")]
+    if id == super::super::tor_exit::LOCAL_TOR {
+        return porthub_network::policy::ExitChoice::LocalTor;
+    }
+    porthub_network::policy::ExitChoice::Peer { id }
+}
 const PACKETS: usize = 64;
 const BYTES: usize = 64 * 1024;
 const FLOWS: usize = 32;
@@ -257,6 +272,13 @@ impl Queue {
         }
         None
     }
+    pub(super) fn discard_flow(&mut self, flow: FlowId) {
+        if let Some(state) = self.flows.remove(&flow) {
+            state.owner.revoke();
+        }
+        self.items.retain(|item| item.flow != flow);
+        self.bytes = self.items.iter().map(|item| item.bytes.len()).sum();
+    }
     pub(super) fn pending(&mut self, item: Datagram) {
         self.bytes += item.bytes.len();
         self.items.push_back(item);
@@ -441,6 +463,66 @@ mod tests {
             .owner
             .revoke();
         assert!(!permit.valid());
+    }
+    #[test]
+    fn local_tor_keeps_fresh_syn_path_and_never_replays_queued_peer_bytes() {
+        use porthub_network::policy::ExitChoice;
+        assert!(!peer_retention_applies(
+            Some(&ExitChoice::LocalTor),
+            Some(1)
+        ));
+        assert!(peer_retention_applies(None, Some(1)));
+        assert!(peer_retention_applies(
+            Some(&ExitChoice::Peer { id: "b".into() }),
+            Some(1)
+        ));
+        assert!(
+            peer_retention_applies(Some(&ExitChoice::LocalTor), None),
+            "UDP has no Tor replay support"
+        );
+        let (a, _) = authority();
+        let now = Instant::now();
+        let mut q = Queue::default();
+        q.observe(Some(scope()));
+        assert!(q.push(&syn(1, 2), &a, now));
+        let item = q.pop(now).unwrap();
+        let flow = item.flow;
+        let old = item.permit(porthub_mesh::udp::SendPermit::bounded(
+            || true,
+            || Some(Duration::from_secs(30)),
+        ));
+        // An asynchronously selected LocalTor supersedes peer-only retention.
+        // Discard the captured SYN/fence; do not renew age or feed Tor.packet.
+        assert!(!peer_retention_applies(
+            Some(&ExitChoice::LocalTor),
+            item.syn
+        ));
+        q.discard_flow(flow);
+        drop(item);
+        assert!(!old.valid());
+        assert!(q.pop(now).is_none());
+        let mut table = porthub_network::exit_selection::FlowTable::new("a".into());
+        table.configure(["@local-tor".into()], Default::default());
+        assert_eq!(
+            table.select_for_peer(
+                flow,
+                now,
+                Duration::from_secs(30),
+                Some(1),
+                Some("@local-tor")
+            ),
+            Some("@local-tor")
+        );
+        assert_eq!(
+            q.len(),
+            0,
+            "only a subsequent fresh native SYN uses the existing Tor path"
+        );
+        #[cfg(feature = "local-tor")]
+        assert!(
+            !peer_retention_applies(Some(&assigned_choice("@local-tor".into())), Some(1)),
+            "an existing Tor pin must discard queued peer-only bytes too"
+        );
     }
     #[test]
     fn cold_datagram_bounds_are_global_and_per_flow() {

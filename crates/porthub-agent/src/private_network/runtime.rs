@@ -975,10 +975,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 && exit_selection.assigned_peer(&parsed.flow_id(),Instant::now(),parsed.opening_sequence()).is_none() {
                 if let (Some(intent),Some(authority))=(&sparse_exit_intent,&installed_authority) {
                     let tag=super::exit_picker::flow_tag(&parsed.flow_id().selection_tag(),parsed.opening_sequence());
+                    let choice=if intent.tor_enabled{sparse_handle.exit_picker().cached_choice(&intent.id,&tag,parsed.destination(),false)}else{None};
+                    if cold_datagrams::peer_retention_applies(choice.as_ref(),parsed.opening_sequence()) {
                     if cold_datagrams.push(&buffer[..size],authority,Instant::now()) {
                         sparse_handle.exit_picker().request(&intent.id,&tag,parsed.destination(),false);
                     }
                     continue;
+                    }else{cold_datagrams.discard_flow(parsed.flow_id());}
                 }
             }
             let exit_peer = if peer_ips.get(&profile.peer_id) == Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {
@@ -1152,8 +1155,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let Some(parsed)=Packet::parse(&item.bytes) else{continue;};
                 if !intent.traffic_mode.permits(parsed.destination()) || sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination()))){continue;}
                 let selected=exit_selection.assigned_peer(&item.flow,Instant::now(),item.syn).map(str::to_owned)
-                    .map(|id|porthub_network::policy::ExitChoice::Peer{id})
+                    .map(cold_datagrams::assigned_choice)
                     .or_else(||sparse_handle.exit_picker().request(&intent.id,&item.tag,parsed.destination(),false));
+                if !cold_datagrams::peer_retention_applies(selected.as_ref(),item.syn){cold_datagrams.discard_flow(item.flow);continue;}
                 let Some(porthub_network::policy::ExitChoice::Peer{id:peer})=selected else{cold_datagrams.pending(item);continue;};
                 if sparse_handle.exit_pair_authority(&peer).is_none(){cold_datagrams.pending(item);continue;}
                 let peers=sessions.read().await;
