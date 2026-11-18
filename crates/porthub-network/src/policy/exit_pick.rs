@@ -7,6 +7,7 @@ use std::{collections::HashSet,net::Ipv4Addr};
 #[serde(deny_unknown_fields)]
 pub struct ExitPickRequest {
     pub route_id:String,
+    #[serde(default)] pub selection_epoch:String,
     pub flow_id:String,
     pub ordinal:u64,
     pub destination:Ipv4Addr,
@@ -21,6 +22,7 @@ pub struct ExitPickRequest {
 }
 impl ExitPickRequest {
     pub fn validate(&self)->Result<()> {
+        ensure!(self.selection_epoch.len()==64&&self.selection_epoch.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()),"invalid exit selection generation");
         ensure!(!self.route_id.is_empty()&&self.route_id.len()<=60&&self.route_id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'),"invalid exit route identity");
         ensure!(self.flow_id.len()==64&&self.flow_id.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()),"invalid exit flow correlation");
         ensure!(self.cursor.as_ref().is_none_or(|cursor|!cursor.is_empty()&&cursor.len()<=2048&&cursor.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'||b==b'.')),"invalid exit picker cursor");
@@ -44,6 +46,7 @@ pub enum ExitChoice {Peer{id:String},LocalTor}
 #[serde(deny_unknown_fields)]
 pub struct ExitPickResponse {
     pub route_id:String,
+    #[serde(default)] pub selection_epoch:String,
     pub flow_id:String,
     pub ordinal:u64,
     pub warmup:bool,
@@ -57,7 +60,7 @@ pub struct ExitPickResponse {
 impl ExitPickResponse {
     pub fn validate_for(&self,request:&ExitPickRequest,epoch:&str)->Result<()> {
         request.validate()?;
-        ensure!(self.route_id==request.route_id&&self.flow_id==request.flow_id&&self.ordinal==request.ordinal&&self.warmup==request.warmup&&self.discover==request.discover
+        ensure!(self.route_id==request.route_id&&self.flow_id==request.flow_id&&self.ordinal==request.ordinal&&self.warmup==request.warmup&&self.discover==request.discover&&self.selection_epoch==request.selection_epoch
             &&self.epoch==epoch&&epoch.len()==64&&epoch.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()),"exit picker response scope changed");
         match self.status {
             ExitPickStatus::Pending=>{
@@ -85,7 +88,7 @@ impl ExitPickResponse {
 #[cfg(test)]mod tests {
  use super::*;
  #[test]fn picker_metadata_is_strict_bounded_and_correlation_preserved(){
-  let value=serde_json::json!({"route_id":"route","flow_id":"a".repeat(64),"ordinal":0,"destination":"1.1.1.1"});
+  let value=serde_json::json!({"route_id":"route","selection_epoch":"c".repeat(64),"flow_id":"a".repeat(64),"ordinal":0,"destination":"1.1.1.1"});
   let request:ExitPickRequest=serde_json::from_value(value.clone()).unwrap();request.validate().unwrap();assert!(!request.warmup&&request.available_peers.is_none());
   for field in ["flow_id","cursor","available_peers"] {
    let mut changed=value.clone();changed[field]=match field{"flow_id"=>serde_json::json!("A".repeat(64)),"cursor"=>serde_json::json!("x".repeat(2049)),_=>serde_json::json!(["same","same"])};
@@ -95,10 +98,10 @@ impl ExitPickResponse {
  }
  #[test]fn selected_peer_requires_client_to_router_roles_even_during_warmup(){
   let epoch="a".repeat(64);
-  let request:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":"b".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
+  let request:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","selection_epoch":"c".repeat(64),"flow_id":"b".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
   let peer=|id:&str,ip:&str|serde_json::json!({"id":id,"ip":ip,"fingerprint":format!("fp-{id}"),"instance":format!("instance-{id}"),"hostname":format!("{id}.phub")});
   let lease:PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":"client","epoch":epoch,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"revision":1,"local":peer("client","10.203.0.2"),"peer":peer("router","10.203.0.3"),"grants":[],"exit":{"route_id":"route","epoch":epoch,"client":"client","router":"router","traffic_mode":"internet_only"}})).unwrap();
-  let mut response=ExitPickResponse{route_id:"route".into(),flow_id:request.flow_id.clone(),ordinal:1,warmup:true,discover:false,epoch:epoch.clone(),status:ExitPickStatus::Ready,choice:Some(ExitChoice::Peer{id:"router".into()}),lease:Some(lease),cursor:None};
+  let mut response=ExitPickResponse{route_id:"route".into(),selection_epoch:request.selection_epoch.clone(),flow_id:request.flow_id.clone(),ordinal:1,warmup:true,discover:false,epoch:epoch.clone(),status:ExitPickStatus::Ready,choice:Some(ExitChoice::Peer{id:"router".into()}),lease:Some(lease),cursor:None};
   response.validate_for(&request,&epoch).unwrap();
   response.lease.as_mut().unwrap().exit.as_mut().unwrap().client="router".into();
   assert!(response.validate_for(&request,&epoch).is_err());
@@ -115,7 +118,7 @@ impl ExitPickResponse {
  }
 
  #[test]fn cold_flow_discovery_is_scoped_and_failed_peers_never_become_choices(){
-  let mut request:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":"a".repeat(64),"ordinal":7,"destination":"1.1.1.1","discover":true,"available_peers":[],"unavailable_peers":["failed"]})).unwrap();
+  let mut request:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","selection_epoch":"c".repeat(64),"flow_id":"a".repeat(64),"ordinal":7,"destination":"1.1.1.1","discover":true,"available_peers":[],"unavailable_peers":["failed"]})).unwrap();
   request.validate().unwrap();
   request.available_peers=Some(vec!["failed".into()]);assert!(request.validate().is_err());
   request.available_peers=Some(vec![]);request.unavailable_peers=vec!["failed".into();2];assert!(request.validate().is_err());

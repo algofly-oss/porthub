@@ -28,6 +28,8 @@ pub struct SparseInfo {
     pub epoch: String,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub exit_epoch: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub selection_epoch:Option<String>,
     #[serde(default,skip_serializing_if="Vec::is_empty")]
     pub exit_intents:Vec<ExitIntent>,
     #[serde(default)]
@@ -106,7 +108,7 @@ impl Engine {
                         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "unsupported sparse private authority"
             );
-            ensure!(sparse.exit_intents.len()<=256&&(sparse.exit_intents.is_empty()||sparse.exit_epoch.is_some()),"exit intent negotiation/bounds invalid");
+            ensure!(sparse.exit_intents.len()<=256&&(sparse.exit_intents.is_empty()||(sparse.exit_epoch.is_some()&&sparse.selection_epoch.is_some())),"exit intent negotiation/bounds invalid");
             let mut intent_ids=std::collections::HashSet::new();let mut clients=0;let mut routers=0;
             for intent in &sparse.exit_intents {
                 ensure!(!intent.id.is_empty()&&intent.id.len()<=60&&intent.name.len()<=256&&intent_ids.insert(&intent.id)
@@ -116,6 +118,7 @@ impl Engine {
                 match intent.role{ExitRole::Client=>clients+=1,ExitRole::Router=>routers+=1}
             }
             ensure!(clients<=1&&(clients==0||routers==0),"ambiguous or recursive exit intent");
+            ensure!(sparse.selection_epoch.as_ref().is_none_or(|epoch|epoch.len()==64&&epoch.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase())),"invalid exit selection generation");
             ensure!(sparse.exit_epoch.as_ref().is_none_or(|epoch|epoch.len()==64
                 && epoch.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase())),"invalid exit pair generation");
             ensure!(
@@ -413,7 +416,7 @@ mod tests {
         let value=serde_json::json!({"id":"route","name":"LAN","role":"client","selection":"sticky","traffic_mode":"lan_only","allow_direct_fallback":false,"tor_enabled":false,"tor_circuit_groups":4,"lan_networks":["10.1.0.0/24","10.2.0.0/24"]});
         let intent:ExitIntent=serde_json::from_value(value).unwrap();assert!(intent.masquerade&&intent.block_lan_access);
         assert!(!intent.lan_networks.iter().any(|n|n.contains("10.3.0.1".parse().unwrap())));
-        snapshot.sparse.as_mut().unwrap().exit_epoch=Some(epoch);snapshot.sparse.as_mut().unwrap().exit_intents.push(intent);
+        snapshot.sparse.as_mut().unwrap().selection_epoch=Some(epoch.clone());snapshot.sparse.as_mut().unwrap().exit_epoch=Some(epoch);snapshot.sparse.as_mut().unwrap().exit_intents.push(intent);
         Engine::default().apply(snapshot.clone()).unwrap();
         snapshot.sparse.as_mut().unwrap().exit_intents[0].lan_networks=(0..33).map(|n|format!("10.{n}.0.0/16").parse().unwrap()).collect();
         assert!(Engine::default().apply(snapshot).is_err());
@@ -578,6 +581,17 @@ mod tests {
         assert!(e.check(&private_reply,"b",true));assert!(!e.check_exit(&exit_reply,"b",true));
         assert!(e.install_pair(exit_pair(&"b".repeat(64),true)).is_err(),"old exit epoch was reauthorized");
         assert!(e.check(&private_reply,"b",true),"stale exit reply destroyed unrelated private authority");
+    }
+    #[test]
+    fn selection_generation_change_preserves_existing_exit_tracking_and_original_lease() {
+        let epoch="a".repeat(64);let mut base=exit_base(&epoch);base.sparse.as_mut().unwrap().selection_epoch=Some("c".repeat(64));
+        let mut engine=Engine::default();engine.apply(base.clone()).unwrap();engine.install_pair(exit_pair(&epoch,true)).unwrap();
+        let request=udp("10.203.0.2","8.8.8.8",15000,53);let reply=udp("8.8.8.8","10.203.0.2",53,15000);
+        assert!(engine.check_exit(&request,"b",false));let deadline=engine.pairs["b"].deadline;
+        base.sparse.as_mut().unwrap().selection_epoch=Some("d".repeat(64));engine.apply(base.clone()).unwrap();
+        assert_eq!(engine.pairs["b"].deadline,deadline);assert!(engine.check_exit(&reply,"b",true),"scheduling change discarded established exit tracking");
+        base.sparse.as_mut().unwrap().exit_epoch=Some("f".repeat(64));engine.apply(base).unwrap();
+        assert!(!engine.check_exit(&reply,"b",true),"actual permission withdrawal retained exit tracking");
     }
     #[test]
     fn source_identity_change_cannot_retain_either_generation() {
