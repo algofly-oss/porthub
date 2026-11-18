@@ -86,8 +86,27 @@ fn inventory_scan(sys: &Path, imported: bool, selected: Option<&str>, mounts: Op
                 }
             }
         }
-        let manufacturer = value(&path, "manufacturer");
-        let product_name = value(&path, "product");
+        let mut manufacturer = value(&path, "manufacturer");
+        let mut product_name = value(&path, "product");
+        if product_name.is_empty() {
+            let dev = value(&path, "dev");
+            if let Some((major, minor)) = dev.split_once(':').and_then(|(a, b)| {
+                Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+            }) {
+                if let Ok(record) = std::fs::read_to_string(format!("/run/udev/data/c{major}:{minor}")) {
+                    for line in record.lines() {
+                        if let Some(model) = line.strip_prefix("E:ID_MODEL_FROM_DATABASE=") {
+                            product_name = model.to_owned();
+                        }
+                        if manufacturer.is_empty() {
+                            if let Some(vendor) = line.strip_prefix("E:ID_VENDOR_FROM_DATABASE=") {
+                                manufacturer = vendor.to_owned();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let device = Device {
             busid,
             vendor: value(&path, "idVendor"),
