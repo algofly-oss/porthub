@@ -26,7 +26,7 @@ def main():
     if not (root / 'home.html').is_file():
         parser.error('Exported home.html is required')
     repository = Path(__file__).resolve().parents[1]
-    scripts = ('keyboard-parity-browser.cjs', 'layout-settling.cjs', 'iphone-layout.cjs', 'iphone-safe-area.cjs',
+    scripts = ('keyboard-parity-browser.cjs', 'keyboard-microphone-browser.cjs', 'layout-settling.cjs', 'iphone-layout.cjs', 'iphone-safe-area.cjs',
                'iphone-native-media.cjs', 'native-media-browser.cjs',
                'private-network-growth.cjs', 'boards-usb-lineage-browser.cjs')
     with ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=str(root))) as server:
