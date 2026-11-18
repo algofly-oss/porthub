@@ -6,6 +6,19 @@ use std::{
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
+fn native_io_reason(error: std::io::Error) -> String {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+    let code = error.raw_os_error().map(|value| value as u32);
+    NativeIoFailure::classify(
+        error.kind(),
+        matches!(code, Some(ERROR_ACCESS_DENIED)),
+        matches!(code, Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED)),
+    )
+    .reason()
+    .into()
+}
 // Storage handles live only for one transaction; inventory never prevents eject.
 fn identify(path: PathBuf, file: &File) -> Result<Device, String> {
     let mut descriptor = [0u8; 1024];
@@ -71,11 +84,7 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
         .write(write)
         .share_mode(3)
         .open(path)
-        .map_err(|error| {
-            format!(
-                "Native storage access unavailable ({error}); administrator access may be required"
-            )
-        })
+        .map_err(native_io_reason)
 }
 fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, String> {
     let mut returned = 0u32;
@@ -92,10 +101,7 @@ fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, 
         )
     };
     if ok == 0 {
-        return Err(format!(
-            "Native SMART request unsupported or unavailable ({})",
-            std::io::Error::last_os_error()
-        ));
+        return Err(native_io_reason(std::io::Error::last_os_error()));
     }
     Ok(returned as usize)
 }
@@ -237,4 +243,28 @@ pub(super) fn short_test(
         return Err("Drive rejected the short self-test".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod probe_error_tests {
+    use super::*;
+    #[test]
+    fn windows_native_codes_do_not_guess_from_invalid_parameters_or_io_failures() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_IO_DEVICE,
+            ERROR_NOT_SUPPORTED,
+        };
+        for (code, expected) in [
+            (ERROR_ACCESS_DENIED, NativeIoFailure::PermissionDenied),
+            (ERROR_INVALID_FUNCTION, NativeIoFailure::Unsupported),
+            (ERROR_NOT_SUPPORTED, NativeIoFailure::Unsupported),
+            (ERROR_INVALID_PARAMETER, NativeIoFailure::Unavailable),
+            (ERROR_IO_DEVICE, NativeIoFailure::Unavailable),
+        ] {
+            assert_eq!(
+                native_io_reason(std::io::Error::from_raw_os_error(code as i32)),
+                expected.reason()
+            );
+        }
+    }
 }

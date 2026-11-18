@@ -39,6 +39,49 @@ mod platform {
         Err("Native short self-test unavailable".into())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeIoFailure {
+    PermissionDenied,
+    Unsupported,
+    Unavailable,
+}
+impl NativeIoFailure {
+    fn classify(kind: std::io::ErrorKind, denied: bool, unsupported: bool) -> Self {
+        if denied || kind == std::io::ErrorKind::PermissionDenied {
+            Self::PermissionDenied
+        } else if unsupported || kind == std::io::ErrorKind::Unsupported {
+            Self::Unsupported
+        } else {
+            Self::Unavailable
+        }
+    }
+    fn from_probe_reason(reason: &str) -> Self {
+        // Legacy native helpers use String errors. Publish only our exact
+        // controlled diagnostic tags, never a free-form OS/device/path string.
+        if reason == Self::PermissionDenied.reason() {
+            Self::PermissionDenied
+        } else if reason == Self::Unsupported.reason() {
+            Self::Unsupported
+        } else {
+            Self::Unavailable
+        }
+    }
+    fn reason(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "Native SMART access was denied by the operating system",
+            Self::Unsupported => "Native SMART operation is not supported by this device or driver",
+            Self::Unavailable => "Native SMART health data is unavailable",
+        }
+    }
+}
+fn failed_probe(device: &Device, at: i64, failure: NativeIoFailure) -> DriveHealth {
+    let mut snapshot = device.empty(at);
+    snapshot.checked_at = Some(at);
+    snapshot.reasons.push(failure.reason().into());
+    snapshot
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -325,7 +368,7 @@ fn scheduled_short_test(
         crate::profile::Lease::acquire(&lock).map_err(|_| "Short-test scheduler already owned")?;
     let mut schedule = Schedule::load(&schedule_path)?;
     let allowed = || {
-        use crate::features::{enabled, Feature};
+        use crate::features::{Feature, enabled};
         enabled(path, Feature::Metrics)
             && enabled(path, Feature::DriveHealth)
             && enabled(path, Feature::DriveTests)
@@ -519,10 +562,16 @@ impl Collector {
                             entry.snapshot.reasons =
                                 vec!["Drive is sleeping; checks resume when it wakes".into()];
                         }
-                        _ => {
-                            entry.snapshot = entry.device.empty(at);
-                            entry.snapshot.checked_at = Some(at);
-                            entry.snapshot.reasons.push("SMART is unsupported, unavailable, or requires native device permission".into());
+                        Ok(Err(reason)) => {
+                            entry.snapshot = failed_probe(
+                                &entry.device,
+                                at,
+                                NativeIoFailure::from_probe_reason(&reason),
+                            );
+                        }
+                        Err(_) => {
+                            entry.snapshot =
+                                failed_probe(&entry.device, at, NativeIoFailure::Unavailable);
                         }
                     }
                 }
@@ -997,6 +1046,73 @@ mod tests {
         );
         assert_eq!(nvme_bytes(&u128::MAX.to_le_bytes()), None);
         assert_eq!(nvme_bytes(&(i64::MAX as u128).to_le_bytes()), None);
+    }
+    #[test]
+    fn native_io_diagnostics_preserve_fixed_categories_without_fabricating_health() {
+        use std::io::ErrorKind;
+        for (kind, denied, unsupported, expected) in [
+            (
+                ErrorKind::Other,
+                true,
+                false,
+                NativeIoFailure::PermissionDenied,
+            ),
+            (ErrorKind::Other, false, true, NativeIoFailure::Unsupported),
+            (
+                ErrorKind::PermissionDenied,
+                false,
+                false,
+                NativeIoFailure::PermissionDenied,
+            ),
+            (
+                ErrorKind::Unsupported,
+                false,
+                false,
+                NativeIoFailure::Unsupported,
+            ),
+            (
+                ErrorKind::InvalidInput,
+                false,
+                false,
+                NativeIoFailure::Unavailable,
+            ),
+            (ErrorKind::Other, false, false, NativeIoFailure::Unavailable),
+        ] {
+            let failure = NativeIoFailure::classify(kind, denied, unsupported);
+            assert_eq!(failure, expected);
+            assert_eq!(
+                NativeIoFailure::from_probe_reason(failure.reason()),
+                failure
+            );
+            let snapshot = failed_probe(&device("diagnostic-fixture"), 1000, failure);
+            assert!(snapshot.valid());
+            assert_eq!(snapshot.status, DriveStatus::Unavailable);
+            assert!(snapshot.present);
+            assert_eq!(snapshot.checked_at, Some(1000));
+            assert_eq!(snapshot.temperature, None);
+            assert_eq!(snapshot.media_errors, None);
+            assert_eq!(snapshot.reasons, vec![expected.reason()]);
+        }
+    }
+    #[test]
+    fn native_probe_free_form_errors_are_never_published() {
+        for reason in [
+            "Permission denied: /private/device-serial",
+            "unsupported /dev/secret",
+            "standby-user-token",
+            "",
+            "\n",
+            "Native driver response 87",
+        ] {
+            let failure = NativeIoFailure::from_probe_reason(reason);
+            let snapshot = failed_probe(&device("reason-fixture"), 1000, failure);
+            assert!(snapshot.valid());
+            assert_eq!(failure, NativeIoFailure::Unavailable);
+            assert_eq!(
+                snapshot.reasons,
+                vec![NativeIoFailure::Unavailable.reason()]
+            );
+        }
     }
     #[test]
     fn hotplug_keeps_hardware_identity_and_marks_removed_drive_unknown() {

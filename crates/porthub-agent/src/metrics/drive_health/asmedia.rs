@@ -12,7 +12,7 @@ use std::{
     },
     path::{Path, PathBuf},
 };
-const ERROR: &str = "Native USB NVMe SMART access is unsupported or unavailable";
+const ERROR: &str = "Native USB NVMe SMART access is unavailable";
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
     block: PathBuf,
@@ -176,6 +176,9 @@ fn transfer(file: &File, query: Query) -> Result<Vec<u8>, String> {
         info: 0,
     };
     let ok = unsafe { libc::ioctl(file.as_raw_fd(), 0x2285, &mut request) };
+    if ok < 0 {
+        return Err(super::native_io_reason(std::io::Error::last_os_error()));
+    }
     if ok != 0
         || !completion(
             request.status,

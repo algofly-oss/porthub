@@ -8,6 +8,17 @@ use std::{
         unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     },
 };
+
+fn native_io_reason(error: std::io::Error) -> String {
+    let code = error.raw_os_error();
+    NativeIoFailure::classify(
+        error.kind(),
+        matches!(code, Some(libc::EPERM | libc::EACCES)),
+        matches!(code, Some(libc::ENOTTY | libc::ENOSYS | libc::EOPNOTSUPP)),
+    )
+    .reason()
+    .into()
+}
 // Inventory caches only a kernel sysfs-generation witness, never raw handles.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Binding {
@@ -23,7 +34,7 @@ fn native_open(path: &Path) -> Result<File, String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
-        .map_err(|_| "Native drive object unavailable".into())
+        .map_err(native_io_reason)
 }
 fn key(path: &Path) -> Result<(u64, u64), String> {
     let m = std::fs::metadata(path).map_err(|_| "Native drive identity unavailable")?;
@@ -365,8 +376,12 @@ fn nvme_command(
     if allowed.is_some_and(|check| !check()) {
         return Err("Short self-tests disabled locally".into());
     }
-    if unsafe { libc::ioctl(file.as_raw_fd(), code as _, &mut cmd) } != 0 {
-        return Err("NVMe SMART command unavailable".into());
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), code as _, &mut cmd) };
+    if result < 0 {
+        return Err(native_io_reason(std::io::Error::last_os_error()));
+    }
+    if result != 0 {
+        return Err("NVMe SMART command response is unavailable".into());
     }
     Ok(())
 }
@@ -447,10 +462,10 @@ fn ata_command(
     if allowed.is_some_and(|check| !check()) {
         return Err("Short self-tests disabled locally".into());
     }
-    if unsafe { libc::ioctl(file.as_raw_fd(), 0x2285, &mut io) } < 0
-        || io.host_status != 0
-        || io.resid > 0
-    {
+    if unsafe { libc::ioctl(file.as_raw_fd(), 0x2285, &mut io) } < 0 {
+        return Err(native_io_reason(std::io::Error::last_os_error()));
+    }
+    if io.host_status != 0 || io.resid > 0 {
         return Err("ATA SMART transport unavailable".into());
     }
     let mut offset = 8;
@@ -473,7 +488,7 @@ fn ata_command(
             return Err("ATA device rejected SMART command".into());
         }
     } else if io.status != 0 || io.driver_status != 0 {
-        return Err("ATA SMART pass-through unsupported".into());
+        return Err("ATA SMART pass-through response is unavailable".into());
     }
     Ok(registers.unwrap_or_default())
 }
@@ -628,5 +643,26 @@ mod inventory_failure_tests {
         let partial = inventory_at(root.path()).unwrap();
         assert!(partial.devices.is_empty());
         assert!(partial.uncertain.contains(Path::new("/dev/sda")));
+    }
+}
+
+#[cfg(test)]
+mod probe_error_tests {
+    use super::*;
+    #[test]
+    fn linux_native_codes_distinguish_permissions_unsupported_and_ambiguous_io() {
+        for (code, expected) in [
+            (libc::EPERM, NativeIoFailure::PermissionDenied),
+            (libc::EACCES, NativeIoFailure::PermissionDenied),
+            (libc::ENOTTY, NativeIoFailure::Unsupported),
+            (libc::EOPNOTSUPP, NativeIoFailure::Unsupported),
+            (libc::EINVAL, NativeIoFailure::Unavailable),
+            (libc::EIO, NativeIoFailure::Unavailable),
+        ] {
+            assert_eq!(
+                native_io_reason(std::io::Error::from_raw_os_error(code)),
+                expected.reason()
+            );
+        }
     }
 }
