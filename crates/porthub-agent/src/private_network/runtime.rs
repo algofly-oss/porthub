@@ -99,6 +99,23 @@ fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Insta
     }
 }
 
+// Native fixture observation only: increments after the guarded stream path
+// successfully writes TCP payload to this process's real owned TUN. Raw packet
+// fallback and handshake-only events cannot satisfy the worker's data proof.
+#[cfg(all(target_os="linux",feature="netns-tests",feature="private-sparse",feature="private-stream"))]
+static TEST_GUARDED_NATIVE_PAYLOAD:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(target_os="linux",feature="netns-tests",feature="private-sparse",feature="private-stream"))]
+pub fn test_guarded_native_payload_bytes()->u64 {TEST_GUARDED_NATIVE_PAYLOAD.load(std::sync::atomic::Ordering::Relaxed)}
+#[cfg(all(target_os="linux",feature="netns-tests",feature="private-sparse",feature="private-stream"))]
+fn observe_guarded_native_payload(bytes:&[u8]) {
+    if bytes.len()<40||bytes[0]>>4!=4||bytes[9]!=6{return;}
+    let ip=usize::from(bytes[0]&15)*4;
+    if ip<20||bytes.len()<ip+20{return;}
+    let tcp=usize::from(bytes[ip+12]>>4)*4;
+    if tcp<20||bytes.len()<=ip+tcp{return;}
+    TEST_GUARDED_NATIVE_PAYLOAD.fetch_add((bytes.len()-ip-tcp)as u64,std::sync::atomic::Ordering::Relaxed);
+}
+
 fn relay_probe(
     sender: &super::relay::Sender,
     ips: &HashMap<String, std::net::Ipv4Addr>,
@@ -792,6 +809,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let delivered=packet.deliver(|bytes|async move {
                         tokio::select!{_=cancelled.cancelled()=>anyhow::bail!("private native owner ended before delivery"),result=write_authorized(authority,handles,Some(remote),tun,&bytes)=>result}
                     }).await;
+                    #[cfg(all(target_os="linux",feature="netns-tests"))]
+                    if delivered.is_ok(){observe_guarded_native_payload(packet.bytes());}
                     // Retired per-flow originals are dropped; an actual native
                     // IO failure remains actionable instead of hiding it.
                     if packet.valid(){delivered?;}
