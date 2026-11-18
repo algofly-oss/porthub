@@ -19,6 +19,61 @@ pub async fn record(app:&App,owner:ObjectId,peer:&Document,request:&Request)->Ap
     if queue.find_one(doc!{"_id":peer_id}).await?.as_ref()==Some(&row){return Ok(());}
     queue.replace_one(doc!{"_id":peer_id},row).upsert(true).await?;Ok(())
 }
+/// Caller holds the workspace publication guard (and allocation for writers).
+/// A stable head and the published pool generation must agree; pool expansion
+/// may legitimately add current pools not listed in the prior migration plan.
+pub(crate) async fn published_generation(app:&App,owner:ObjectId,prefs:&Document)->ApiResult<i64>{
+    let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?;
+    match head {
+        None if !prefs.contains_key("_address_generation") && !prefs.contains_key("_renumber_job")=>Ok(0),
+        Some(head) if head.get_str("state").ok()==Some("stable")=>{
+            let generation=head.get_i64("generation").map_err(|_|invalid("Invalid published address generation"))?;
+            if generation==0 && !prefs.contains_key("_address_generation") && !prefs.contains_key("_renumber_job") && !head.contains_key("job"){return Ok(0);}
+            if generation<=0 || prefs.get_i64("_address_generation").ok()!=Some(generation) || prefs.get_str("_renumber_job").ok()!=head.get_str("job").ok() || head.get_str("job").is_err(){return Err(invalid("Published address generation differs from stable migration"));}
+            Ok(generation)
+        },
+        _=>Err(invalid("Private address publication is not stable")),
+    }
+}
+/// Compatibility for enrollments created by the former missing-generation bug.
+/// Never reinterpret explicit stale generations or a migrated peer with erased
+/// metadata. Exact assignment/credential CAS preserves concurrent foreign edits.
+async fn repair_missing_generation(app:&App,owner:ObjectId,prefs:&Document,row:&Document,generation:i64,migrated:&std::collections::HashSet<String>,retired:&[crate::domain::enrollment::Network],addresses:&[std::net::Ipv4Addr])->ApiResult<()>{
+    if row.contains_key("address_generation"){return Err(invalid("Native repair peer generation changed"));}
+    let ip=row.get_str("ip").map_err(|_|invalid("Missing repair assignment"))?.parse::<std::net::Ipv4Addr>().map_err(|_|invalid("Invalid repair assignment"))?;
+    if !crate::domain::private_networks::pools(prefs)?.iter().any(|pool|pool.contains(ip)){return Err(invalid("Historical enrollment is outside published pools"));}
+    if retired.iter().any(|pool|pool.contains(ip))||addresses.contains(&ip){return Err(invalid("Historical enrollment uses a retired source"));}
+    if migrated.contains(row.get_str("_id").map_err(|_|invalid("Missing enrollment identity"))?){return Err(invalid("Migrated peer lost its address generation"));}
+    let mut filter=doc!{"_id":row.get("_id"),"workspace_id":owner,"ip":row.get("ip"),"address_generation":{"$exists":false}};
+    for field in ["machine_id","credential_hash","enrollment_generation"]{filter.insert(field,row.get(field).cloned().unwrap_or_else(||mongodb::bson::Bson::Document(doc!{"$exists":false})));}
+    let result=journal::durable(app,"private_peers").update_one(filter,doc!{"$set":{"address_generation":generation}}).await?;
+    if result.matched_count!=1{return Err(invalid("Historical enrollment changed during generation repair"));}
+    Ok(())
+}
+
+/// Repair only demonstrably post-migration enrollments. The caller must hold
+/// the workspace publication guard; this function grants no network authority.
+pub(crate) async fn ensure_assignment_generations(app:&App,owner:ObjectId,prefs:&Document,rows:&[Document])->ApiResult<i64>{
+    let generation=published_generation(app,owner,prefs).await?;
+    let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?;
+    let mut migrated=std::collections::HashSet::new();
+    let mut retained=(Vec::new(),Vec::new());
+    if generation>0 && rows.iter().any(|row|!row.contains_key("address_generation")) {
+        let head=head.as_ref().ok_or_else(||invalid("Missing migration origin"))?;
+        let job=head.get_str("job").map_err(|_|invalid("Missing stable migration origin"))?;
+        if head.get_i64("applied").ok()!=head.get_i64("count").ok(){return Err(invalid("Stable migration progress is incomplete"));}
+        super::apply::verify(app,owner,job,head).await?;
+        let mut previous=app.collection("private_renumber_assignments").find(doc!{"job":job}).projection(doc!{"peer":1}).batch_size(256).await?;
+        while let Some(row)=previous.try_next().await?{migrated.insert(row.get_str("peer").map_err(|_|invalid("Invalid prior migration identity"))?.to_owned());}
+        retained=super::retirement::occupied(app).await?;
+    }
+    for row in rows {
+        if row.get_i64("address_generation").ok()==Some(generation) || generation==0 && !row.contains_key("address_generation"){continue;}
+        repair_missing_generation(app,owner,prefs,row,generation,&migrated,&retained.0,&retained.1).await?;
+    }
+    Ok(generation)
+}
+
 /// A complete immutable plan is prepared under the existing allocation and
 /// publication guards. The normal roll-forward worker, not this report, applies it.
 pub async fn plan_once(app:&App,request:&Document)->ApiResult<bool>{
@@ -36,17 +91,18 @@ pub async fn plan_once(app:&App,request:&Document)->ApiResult<bool>{
     if generation<0||generation==i64::MAX{return Err(invalid("Native repair generation exhausted"));}
     let prefs=app.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap_or_default();
     let pools=crate::domain::private_networks::pools(&prefs)?;
+    if published_generation(app,owner,&prefs).await?!=generation{return Err(invalid("Native repair generation changed"));}
     let blocked=request.get_array("blocked").map_err(|_|invalid("Missing native repair scope"))?;
     if blocked.is_empty()||blocked.len()>porthub_network::capture_routes::MAX_CAPTURE_PREFIXES||blocked.iter().any(|b|!pools.iter().any(|p|Some(p.cidr().as_str())==b.as_str())){return Ok(true);}
-    let rows:Vec<_>=app.collection("private_peers").find(doc!{"workspace_id":owner}).projection(doc!{"_id":1,"machine_id":1,"workspace_id":1,"enrollment_generation":1,"address_generation":1,"ip":1}).sort(doc!{"_id":1}).limit(65537).batch_size(256).await?.try_collect().await?;
+    let rows:Vec<_>=app.collection("private_peers").find(doc!{"workspace_id":owner}).projection(doc!{"_id":1,"machine_id":1,"workspace_id":1,"enrollment_generation":1,"address_generation":1,"credential_hash":1,"ip":1}).sort(doc!{"_id":1}).limit(65537).batch_size(256).await?.try_collect().await?;
     if rows.is_empty()||rows.len()>65536{return Err(invalid("Native repair workspace exceeds migration budget"));}
+    ensure_assignment_generations(app,owner,&prefs,&rows).await?;
     let targets=crate::domain::private_networks::migration_targets_locked(app,&owner.to_hex(),rows.len(),blocked).await?;
     let mut slots=targets.iter().flat_map(|pool|(0..pool.capacity()).map(move|offset|pool.migration_address(offset).expect("bounded planned pool")));
     let mut assignments=Vec::with_capacity(rows.len());
     for row in rows{
         let peer=row.get_str("_id").map_err(|_|invalid("Invalid migration peer"))?.to_owned();
         let machine=crate::store::id(row.get("machine_id"));
-        if row.get_i64("address_generation").unwrap_or(0)!=generation{return Err(invalid("Native repair peer generation changed"));}
         let old=row.get_str("ip").map_err(|_|invalid("Missing migration address"))?.parse().map_err(|_|invalid("Invalid migration address"))?;
         let new=slots.next().ok_or_else(||invalid("Native repair target capacity changed"))?;
         assignments.push(Assignment{peer,machine,workspace:owner.to_hex(),credential_generation:row.get_str("enrollment_generation").unwrap_or("legacy").into(),old,new,previous_generation:generation as u64,generation:generation as u64+1});
@@ -85,7 +141,7 @@ pub async fn pending_once(app:&App,after:Option<String>)->ApiResult<Option<Strin
         let response=crate::routes::private_sync::router().with_state(app).oneshot(axum::http::Request::builder().method("POST").uri("/api/access/private/sync").header("Content-Type","application/json").body(axum::body::Body::from(serde_json::to_vec(&body)?))?).await?;
         Ok(response.status())
     }
-    async fn seed(app:&App,owner:ObjectId,token:&str)->anyhow::Result<Vec<Document>>{
+    pub(super) async fn seed(app:&App,owner:ObjectId,token:&str)->anyhow::Result<Vec<Document>>{
         app.collection("users").insert_one(doc!{"_id":owner,"email":"private-repair-fixture.invalid"}).await?;
         app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.203.0.0/24","dns_suffix":"kept.private","custom_setting":"preserved"}).await?;
         let mut peers=Vec::new();
@@ -97,7 +153,7 @@ pub async fn pending_once(app:&App,after:Option<String>)->ApiResult<Option<Strin
         app.collection("access_rulebooks").insert_one(doc!{"_id":ObjectId::new(),"user_id":owner,"enabled":true,"rules":[]}).await?;
         Ok(peers)
     }
-    fn report()->Request{Request{protocol:1,nonce:"a".repeat(32),source:"10.203.0.2".parse().unwrap(),blocked:vec!["10.203.0.0/24".parse().unwrap()]}}
+    pub(super) fn report()->Request{Request{protocol:1,nonce:"a".repeat(32),source:"10.203.0.2".parse().unwrap(),blocked:vec!["10.203.0.0/24".parse().unwrap()]}}
     #[tokio::test]
     #[ignore="requires Root-owned isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
     async fn processed_queue_binding_cannot_delete_same_nonce_replacement()->anyhow::Result<()>{
@@ -229,4 +285,71 @@ pub async fn pending_once(app:&App,after:Option<String>)->ApiResult<Option<Strin
         }).catch_unwind().await;db.drop().await?;match result{Ok(value)=>value,Err(panic)=>std::panic::resume_unwind(panic)}
     }
 
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use futures_util::FutureExt;
+    #[tokio::test]
+    #[ignore="requires owned isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+    async fn actual_expansion_enrollments_missing_generation_repair_without_certifying_stale_or_migrated_rows()->anyhow::Result<()> {
+        let client=mongodb::Client::with_uri_str(std::env::var("PORTHUB_TEST_MONGO_URI")?).await?;
+        let db=client.database(&format!("porthub_repair_generation_{}",uuid::Uuid::new_v4().simple()));
+        let result=std::panic::AssertUnwindSafe(async {
+            let app=App::new(crate::config::Config::default(),db.clone());let owner=ObjectId::new();
+            let original=super::tests::seed(&app,owner,"generation-fixture-credential-0123456789").await?;
+            let initial=app.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();
+            app.collection("private_renumber_heads").insert_one(doc!{"_id":owner.to_hex(),"generation":0_i64,"state":"stable"}).await?;
+            assert_eq!(published_generation(&app,owner,&initial).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,0);
+            let mut bad_zero=initial.clone();bad_zero.insert("_address_generation",0_i64);assert!(published_generation(&app,owner,&bad_zero).await.is_err());
+            let request=super::tests::report();record(&app,owner,&original[0],&request).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            let queued=app.collection("private_native_repairs").find_one(doc!{"_id":original[0].get("_id")}).await?.unwrap();
+            assert!(plan_once(&app,&queued).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?);
+            assert_eq!(super::super::recover::workspace(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,super::super::recover::Outcome::Committed);
+            let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();
+            let mut prefs=app.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();
+            // Legitimate expansion beyond the committed job's target is current
+            // authoritative allocation state, not a stale original pool.
+            let expansion="10.252.251.0/24";
+            let mut pools=prefs.get_array("additional_cidrs").cloned().unwrap_or_default();pools.push(expansion.into());prefs.insert("additional_cidrs",pools);
+            app.collection("private_networks").replace_one(doc!{"_id":owner.to_hex()},prefs.clone()).await?;
+            assert_eq!(published_generation(&app,owner,&prefs).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,1);
+            let automatic_machine=doc!{"_id":ObjectId::new(),"user_id":owner,"name":"Automatic generation fixture"};
+            app.collection("machines").insert_one(automatic_machine.clone()).await?;
+            crate::domain::enrollment::ensure(&app,&automatic_machine).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            let automatic=app.collection("private_peers").find_one(doc!{"machine_id":automatic_machine.get("_id")}).await?.unwrap();
+            assert_eq!(automatic.get_i64("address_generation")?,1);
+            let mut fresh=Vec::new();
+            for n in 1..=5 {let machine=ObjectId::new();app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":format!("Expansion {n}")}).await?;
+                let row=doc!{"_id":format!("{owner}:{machine}"),"workspace_id":owner,"owner_id":owner,"machine_id":machine,"enabled":true,"credential_hash":"fresh-fixture-unchanged","enrollment_generation":"fresh-enrollment","ip":format!("10.252.251.{n}")};
+                app.collection("private_peers").insert_one(row.clone()).await?;fresh.push(row);}
+            let migrated=original.iter().map(|p|p.get_str("_id").unwrap().to_owned()).collect::<std::collections::HashSet<_>>();
+            let retained=super::super::retirement::occupied(&app).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            let mut stale=fresh[0].clone();stale.insert("address_generation",0_i64);
+            assert!(repair_missing_generation(&app,owner,&prefs,&stale,1,&migrated,&retained.0,&retained.1).await.is_err());
+            let mut lost=app.collection("private_peers").find_one(doc!{"_id":original[0].get("_id")}).await?.unwrap();lost.remove("address_generation");
+            assert!(repair_missing_generation(&app,owner,&prefs,&lost,1,&migrated,&retained.0,&retained.1).await.is_err());
+            let mut corrupt_prefs=prefs.clone();corrupt_prefs.insert("_address_generation",2_i64);
+            assert!(published_generation(&app,owner,&corrupt_prefs).await.is_err());
+            let mut retired=fresh[0].clone();retired.insert("ip","10.203.0.2");
+            assert!(repair_missing_generation(&app,owner,&prefs,&retired,1,&migrated,&retained.0,&retained.1).await.is_err());
+            assert_eq!(ensure_assignment_generations(&app,owner,&prefs,&fresh[..1]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,1);
+            let mut moved=app.collection("private_peers").find_one(doc!{"_id":original[0].get("_id")}).await?.unwrap();
+            let source=moved.get_str("ip")?.parse()?;
+            let blocked=crate::domain::private_networks::pools(&prefs).map_err(|e|anyhow::anyhow!("{}",e.detail))?.into_iter().filter(|p|p.contains(source)).map(|p|p.cidr().parse().unwrap()).collect();
+            let next=Request{protocol:1,source,blocked,nonce:"b".repeat(32)};
+            record(&app,owner,&moved,&next).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            let queued=app.collection("private_native_repairs").find_one(doc!{"_id":moved.get("_id")}).await?.unwrap();
+            assert!(plan_once(&app,&queued).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?);
+            for mut row in fresh {let after=app.collection("private_peers").find_one(doc!{"_id":row.get("_id")}).await?.unwrap();row.insert("address_generation",1_i64);assert_eq!(after,row);}
+            let next_head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(next_head.get_i64("generation")?,2);assert_eq!(next_head.get_i64("count")?,8);
+            // No peer addresses, credential generations, names or rules were
+            // changed by metadata repair; the ordinary worker owns migration.
+            moved=app.collection("private_peers").find_one(doc!{"_id":moved.get("_id")}).await?.unwrap();assert_eq!(moved.get_str("ip")?.parse::<std::net::Ipv4Addr>()?,source);
+            assert_eq!(head.get_i64("generation")?,1);
+            Ok::<_,anyhow::Error>(())
+        }).catch_unwind().await;
+        db.drop().await?;match result{Ok(value)=>value,Err(panic)=>std::panic::resume_unwind(panic)}
+    }
 }

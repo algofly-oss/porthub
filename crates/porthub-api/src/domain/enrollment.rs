@@ -248,12 +248,18 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
         )
         .await?;
         let now = DateTime::now();
+        let mut assignment=doc!{"workspace_id":owner,"owner_id":owner,"machine_id":machine_id,"ip":ip,
+            "enabled":true,"revision":0,"created_at":now,"updated_at":now};
+        #[cfg(feature="private-sparse")]
+        {
+            let prefs=app.collection("private_networks").find_one(doc!{"_id":store::id(Some(owner))}).await?.unwrap_or_default();
+            let generation=crate::private_renumber::native_repair::published_generation(app,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?,&prefs).await?;
+            assignment.insert("address_generation",generation);
+        }
         let result = peers
             .update_one(
                 doc! {"_id":&id},
-                doc! {"$setOnInsert":{
-                "workspace_id":owner,"owner_id":owner,"machine_id":machine_id,"ip":ip,
-                "enabled":true,"revision":0,"created_at":now,"updated_at":now}},
+                doc! {"$setOnInsert":assignment},
             )
             .upsert(true)
             .await;

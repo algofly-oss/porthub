@@ -90,6 +90,12 @@ async fn enroll(
     }
     let prefs = crate::domain::private_networks::ensure_locked(&app, &owner.to_hex()).await?;
     let (_, suffix) = preferences(&prefs)?;
+    #[cfg(feature="private-sparse")]
+    let address_generation=crate::private_renumber::native_repair::published_generation(&app,owner,&prefs).await?;
+    #[cfg(feature="private-sparse")]
+    if let Some(peer)=&existing {
+        crate::private_renumber::native_repair::ensure_assignment_generations(&app,owner,&prefs,std::slice::from_ref(peer)).await?;
+    }
     if let Some(name) = &name {
         enrollment::check_name(&app, owner, &Bson::ObjectId(mid), name).await?;
     }
@@ -105,6 +111,8 @@ async fn enroll(
             crate::domain::private_networks::allocate_locked(&app, &owner.to_hex(), &mid.to_hex(), &enrollment::occupied(&peers)).await?
         };
         let mut set = doc! {"workspace_id":owner,"machine_id":mid,"owner_id":machine.get("user_id"),"ip":&address,"enabled":true,"updated_at":now,"enrollment_generation":&generation};
+        #[cfg(feature="private-sparse")]
+        set.insert("address_generation",address_generation);
         if let Some(name) = &name {
             set.insert("hostname", name);
         }
