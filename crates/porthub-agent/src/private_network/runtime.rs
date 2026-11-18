@@ -29,6 +29,9 @@ mod cold_datagrams;
 #[path="pending_exit.rs"]
 mod pending_exit;
 #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+#[path="fixture_gate.rs"]
+mod fixture_gate;
+#[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
 pub(crate) fn provider_fixture_phase(phase:&'static str,generation:u64,count:usize){
     static EVENTS:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
     if EVENTS.fetch_add(1,std::sync::atomic::Ordering::Relaxed)<128 {
@@ -495,6 +498,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut provider_tick=tokio::time::interval(Duration::from_millis(50));
     #[cfg(all(target_os="linux",feature="private-sparse"))]
     provider_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+    let mut provider_fixture_gate=fixture_gate::Gate::new(&path,&profile.peer_id)?;
+    #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+    if provider_fixture_gate.is_some(){exit_refresh.fixture_withhold(true);}
+    #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+    let mut fixture_gate_tick=tokio::time::interval(Duration::from_millis(25));
     let mut paths = super::paths::Pinned::default();
     let mut path_quality = super::probe::Quality::default();
     let mut by_ip = HashMap::new();
@@ -748,6 +757,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             },
             Some(Event::Pair(authority))=>{
                 authority.check()?;
+                #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+                if provider_fixture_gate.as_mut().is_some_and(|gate|gate.intercept(&authority)){continue;}
                 let response=authority.accepted()?.clone();
                 if response.status!="allowed"||response.lease.is_none(){
                     if let Some(peer)=super::sparse::apply_denial(&sparse_handle,&mut policy,&response){
@@ -1142,6 +1153,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
 
             }
         },
+        fixture_wake=async {
+            #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
+            {if provider_fixture_gate.as_ref().is_some_and(|gate|gate.active()){fixture_gate_tick.tick().await;Ok::<_,anyhow::Error>(())}else{std::future::pending().await}}
+            #[cfg(not(all(target_os="linux",feature="private-sparse",feature="netns-tests")))]{std::future::pending::<Result<()>>().await}
+        }=>{fixture_wake?;#[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]if let Some(gate)=&mut provider_fixture_gate{gate.poll(&events,&exit_refresh)?;}},
         provider_wake=async {
             #[cfg(all(target_os="linux",feature="private-sparse"))]
             {if pending_provider.len()>0{tokio::select!{_=provider_tick.tick()=>Ok::<_,anyhow::Error>(()),result=exit_ready_notice.changed()=>result}}else{std::future::pending().await}}
@@ -1162,7 +1178,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if !exit_clients.contains(&packet.source())||!policy.check_exit(&entry.bytes,&peer,true){continue;}
                 let Ok(Some(original))=incoming_exit_permit(Some(&entry.base),&sparse_handle,&peer,Some(entry.origin.clone())) else{continue;};
                 if !entry.bind(&exit_native_plan,&current,original){continue;}
-                if !exit_refresh.ready(&exit_native_plan){pending_provider.pending(entry);continue;}
+                if !exit_refresh.ready(&exit_native_plan){
+                    #[cfg(feature="netns-tests")]
+                    if let Some(gate)=&mut provider_fixture_gate{gate.waiting(exit_native_plan.diagnostic_generation());}
+                    pending_provider.pending(entry);continue;
+                }
                 let Ok(Some(current_permit))=incoming_exit_permit(installed_authority.as_ref(),&sparse_handle,&peer,Some(entry.origin.clone())) else{continue;};
                 let Ok(guard)=entry.guard(&exit_native_plan,&current,current_permit,&exit_refresh) else{continue;};
                 if let Some(tun)=&device{

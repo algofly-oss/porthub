@@ -25,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sparse', action='store_true')
     parser.add_argument('--worker-profile', choices=['test', 'agent-dev'], default='test', help='explicit worker-only profile; host API fixture remains test profile')
-    parser.add_argument('--scenario', choices=['exits', 'peers'], default='exits')
+    parser.add_argument('--scenario', choices=['exits', 'peers', 'relay-origin'], default='exits')
     parser.add_argument('--source', required=True, help='exact immutable source SHA')
     parser.add_argument('--image', required=True, help='existing local sha256 image ID; no pull/build')
     parser.add_argument('--receipt', required=True)
@@ -33,7 +33,7 @@ def main():
     args = parser.parse_args()
     assert re.fullmatch('[0-9a-f]{40}', args.source)
     assert re.fullmatch('sha256:[0-9a-f]{64}', args.image)
-    assert args.scenario != 'peers' or args.sparse, 'paired quic3 proof requires sparse negotiation'
+    assert args.scenario == 'exits' or args.sparse, 'paired quic3/relay-origin proof requires sparse negotiation'
     assert output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD']) == args.source
     assert not output(['git', '-C', str(ROOT), 'diff', '--name-only', 'HEAD']), 'tracked source changes present'
     receipt = pathlib.Path(args.receipt)
@@ -131,7 +131,7 @@ def main():
                    PORTHUB_TEST_WORKER_BINARY=artifacts['exit_worker'], PORTHUB_TEST_WORKER_IMAGE=args.image,
                    PORTHUB_TEST_FIXTURE_NONCE=prefix, PORTHUB_TEST_SPARSE='1' if args.sparse else '0',
                    PORTHUB_TEST_RUNTIME_ROOT=str(runtime_root), PORTHUB_TEST_RUNTIME_LOADER=pathlib.Path(loader).name)
-        test = 'native_agents_use_two_exits_and_preserve_established_tcp' if args.scenario == 'exits' else 'native_agents_negotiate_quic3_and_transfer_owned_tcp'
+        test = {'exits': 'native_agents_use_two_exits_and_preserve_established_tcp', 'peers': 'native_agents_negotiate_quic3_and_transfer_owned_tcp', 'relay-origin': 'native_relay_exit_first_udp_waits_for_pair_and_native_ack'}[args.scenario]
         proof['test'] = test
         proof['native_executed'] = True
         run([artifacts['exit_network'], '--ignored', '--exact', test, '--nocapture'], cwd=ROOT, env=env, timeout=300)

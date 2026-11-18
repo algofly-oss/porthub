@@ -34,6 +34,7 @@ pub(crate) struct Readiness {
     desired: tokio::sync::watch::Sender<Plan>,
     applied: tokio::sync::watch::Receiver<Option<Plan>>,
     failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(feature="netns-tests")] fixture_withheld:std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 pub(crate) struct Requests {
     desired: tokio::sync::watch::Receiver<Plan>,
@@ -50,6 +51,7 @@ pub(crate) fn readiness_channel() -> (Readiness, Requests) {
             desired,
             applied: observed,
             failed: Default::default(),
+            #[cfg(feature="netns-tests")] fixture_withheld:Default::default(),
         },
         Requests {
             desired: requests,
@@ -82,7 +84,11 @@ impl Readiness {
         }
         Ok(self.desired.borrow().clone())
     }
+    #[cfg(feature="netns-tests")]
+    pub(crate) fn fixture_withhold(&self,held:bool){self.fixture_withheld.store(held,std::sync::atomic::Ordering::SeqCst);}
     pub(crate) fn ready(&self, plan: &Plan) -> bool {
+        #[cfg(feature="netns-tests")]
+        if self.fixture_withheld.load(std::sync::atomic::Ordering::SeqCst){return false;}
         !self.failed.load(std::sync::atomic::Ordering::SeqCst)
             && !self.applied.has_changed().is_err()
             // Plan equality is generation+immutable publication Arc identity,

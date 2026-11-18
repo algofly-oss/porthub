@@ -51,6 +51,17 @@ fn icmp_echo(target: std::net::Ipv4Addr) -> Result<()> {
     ensure!(header + echo.len() <= size as usize && bytes[header] == 0 && bytes[header + 4..header + echo.len()] == echo[4..], "ICMP exit reply mismatch");
     Ok(())
 }
+async fn relay_origin_consumer(target:&str)->Result<()> {
+    let nonce=std::env::var("PORTHUB_TEST_FIXTURE_NONCE")?;let expected=format!("relay-origin-first-{nonce}");
+    let socket=tokio::time::timeout(Duration::from_secs(20),async{loop{
+        let socket=tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        if socket.connect(target).await.is_ok()&&socket.local_addr()?.ip()=="10.234.240.10".parse::<IpAddr>()?{break Ok::<_,anyhow::Error>(socket);}
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }}).await.context("owned native exit route did not become ready")??;
+    ensure!(socket.send(expected.as_bytes()).await?==expected.len(),"owned relay UDP send incomplete");println!("native_relay_first_udp sent_once=true");
+    let mut response=[0u8;256];let n=tokio::time::timeout(Duration::from_secs(3),socket.recv(&mut response)).await.context("first relay EXIT UDP response timeout")??;
+    ensure!(&response[..n]==expected.as_bytes(),"owned relay UDP payload mismatch");println!("native_relay_first_udp payload_verified=true sends=1");Ok(())
+}
 async fn consumer(target: &str) -> Result<()> {
     let phase_started=std::time::Instant::now();
     let phase=|name:&'static str|println!("native_exit_phase phase={name} elapsed_ms={}",phase_started.elapsed().as_millis());
@@ -296,7 +307,7 @@ async fn isolated_exit_worker() -> Result<()> {
     let path = std::path::PathBuf::from(format!("/state/{id}.json"));
     porthub_agent::profile::write_private(&path, profile.as_bytes(), false)?;
     let role = std::env::var("PORTHUB_TEST_ROLE")?;
-    if role.starts_with("private-") {
+    if role.starts_with("private-")||role.starts_with("relay-origin-") {
         porthub_agent::private_network::strategy::save(&path,porthub_agent::private_network::strategy::Mode::PreferGateway)?;
     }
     let cancel = CancellationToken::new();
@@ -350,6 +361,9 @@ async fn isolated_exit_worker() -> Result<()> {
             result = http_consumer() => result,
             result = &mut runtime => anyhow::bail!("agent stopped: {result:?}"),
         }
+    } else if role=="relay-origin-consumer" {
+        let target=std::env::var("PORTHUB_TEST_TARGET")?;
+        tokio::select!{result=relay_origin_consumer(&target)=>result,result=&mut runtime=>anyhow::bail!("agent stopped during owned relay payload proof: {result:?}")}
     } else if role == "consumer" {
         let target = std::env::var("PORTHUB_TEST_TARGET")?;
         tokio::select! {
