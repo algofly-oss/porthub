@@ -653,6 +653,9 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         } else {app.private_relay.publish_admitted(&input.peer_id,hash,&input.instance,ip,allowed,Some(admission))};
     }
     if relay_auth_token.is_empty(){return Err(ApiError::new(StatusCode::CONFLICT,"Private authority changed or is busy; retry sync"));}
+    let source_origin:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(&updated)).map_err(|_|ApiError::bad_request("Invalid relay origin identity"))?;
+    if !app.private_relay.bind_origin(source_origin,hash,admission){return Err(ApiError::new(StatusCode::CONFLICT,"Private relay identity changed; retry sync"));}
+
     for target in retirements{app.private_relay.retire_pair_admitted(&input.peer_id,hash,&input.instance,admission,&target);}
     for target in exit_retirements{app.private_relay.retire_exit_pair_admitted(&input.peer_id,hash,&input.instance,admission,&target);}
 
@@ -670,13 +673,14 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             if revision==0 {
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
-            let remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
+            let mut remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
+            app.private_relay.project_origin(&mut remote,store::string(target,"credential_hash"));
             let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl,exit:exit_pairs.get(id).cloned()};
             let value=json!({"query":query,"status":"allowed","lease":lease});
             if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384{
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
-            let pin=crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),generation:None};
+            let pin=crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),origin_stamp:lease.peer.relay_origin.clone(),generation:None};
             let private_ok=lease.acl.is_none()||app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&pin);
             let exit_ok=if let Some(exit)=&lease.exit{
                 let mut pin=pin;pin.epoch=target_exit_epochs.get(id).cloned();

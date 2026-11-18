@@ -230,6 +230,24 @@ async fn dispatch_record(frame: Bytes, events: &mpsc::Sender<Event>) {
         }
     }
 }
+async fn dispatch_downstream(frame:Bytes, origins:bool, events:&mpsc::Sender<Event>) {
+    if frame.starts_with(porthub_mesh::relay_origin::MAGIC) {
+        if !origins {return;}
+        let Ok(records)=porthub_mesh::relay_origin::decode(frame) else{return;};
+        if records.iter().any(|(origin,bytes)|bytes.get(12..16)!=Some(origin.ip.octets().as_slice())){return;}
+        let received_at=Instant::now();
+        let frame_boot=records.iter().find_map(|(_,bytes)|super::controller::exit_ingress_boot(bytes));
+        let mut identities=std::collections::HashMap::new();
+        for(origin,bytes)in records {
+            let identity=identities.entry(origin.stamp.clone()).or_insert_with(||Arc::new(porthub_network::policy::PeerInfo{
+                id:origin.peer.clone(),ip:origin.ip,fingerprint:origin.fingerprint.clone(),instance:origin.instance.clone(),relay_origin:Some(origin.stamp.clone()),
+                online:false,stream_transport:String::new(),lan_networks:Vec::new(),hostname:String::new(),aliases:Vec::new(),
+            })).clone();
+            let received_boot=if bytes.get(9)==Some(&porthub_mesh::control_packet::EXIT){frame_boot}else{None};
+            if events.send(Event::Packet{peer:origin.peer.clone(),bytes,origin:Some(identity),received_boot,direct:false,carrier_direct:false,received_at}).await.is_err(){return;}
+        }
+    }else{dispatch_frame(frame,events).await;}
+}
 async fn dispatch_frame(frame: Bytes, events: &mpsc::Sender<Event>) {
     if let Ok(records) = porthub_mesh::batch::decode(frame) {
         for record in records {
@@ -426,6 +444,7 @@ type RelaySocket =
 type RelaySink = futures_util::stream::SplitSink<RelaySocket, Message>;
 
 struct ConnectedLane {
+    origins: bool,
     lane: usize,
     socket: RelaySocket,
     batch: bool,
@@ -459,6 +478,7 @@ async fn connect_lane(
     headers.insert("x-porthub-peer", peer.parse()?);
     headers.insert("x-porthub-instance", instance.parse()?);
     headers.insert("authorization", format!("Bearer {token}").parse()?);
+    headers.insert("x-porthub-relay-origin", "1".parse()?);
     headers.insert("x-porthub-relay-batch", "1".parse()?);
     headers.insert("x-porthub-relay-prefix", "1".parse()?);
     headers.insert("x-porthub-relay-lane", lane.to_string().parse()?);
@@ -518,7 +538,9 @@ async fn connect_lane(
             .headers()
             .get("x-porthub-relay-prefix")
             .is_some_and(|value| value == "1");
+    let origins=response.headers().get("x-porthub-relay-origin").is_some_and(|v|v=="1");
     Ok(Some(ConnectedLane {
+        origins,
         lane: usize::from(lane),
         socket,
         batch,
@@ -545,12 +567,13 @@ async fn serve_lanes(
         sender.set_ready(lane, true);
         let read_events = events.clone();
         let read_cancel = reading.clone();
+        let origins=connection.origins;
         readers.spawn(async move {
             loop {
                 tokio::select! {
                     _=read_cancel.cancelled()=>break,
                     frame=incoming.next()=>match frame {
-                        Some(Ok(Message::Binary(frame)))=>tokio::select! {_=read_cancel.cancelled()=>break,_=dispatch_frame(frame,&read_events)=>{}},
+                        Some(Ok(Message::Binary(frame)))=>tokio::select! {_=read_cancel.cancelled()=>break,_=dispatch_downstream(frame,origins,&read_events)=>{}},
                         Some(Ok(Message::Ping(bytes)))=>if pongs.try_send(bytes).is_err(){break;},
                         Some(Ok(Message::Pong(_)))=>{},
                         _=>break,
@@ -1237,4 +1260,22 @@ mod exit_authority_tests {
         assert!(sender.send_probe("b",&probe_wire(&measurement(false))).is_err());
     }
 
+}
+
+#[cfg(test)]
+mod relay_origin_tests {
+    use super::*;
+    #[tokio::test]
+    async fn only_negotiated_server_origin_is_retained_and_shared(){
+        let origin=Arc::new(porthub_mesh::relay_origin::Origin{peer:"remote".into(),ip:"10.203.0.1".parse().unwrap(),fingerprint:"fp".into(),instance:"instance".into(),stamp:"a".repeat(32)});
+        let mut packet=vec![0;20];packet[0]=0x45;packet[3]=20;packet[12..16].copy_from_slice(&origin.ip.octets());
+        let frame=porthub_mesh::relay_origin::encode(&[(origin.clone(),Bytes::from(packet.clone())),(origin.clone(),Bytes::from(packet))]).unwrap();
+        let(tx,mut rx)=mpsc::channel(4);dispatch_downstream(frame.clone(),false,&tx).await;assert!(rx.try_recv().is_err());
+        dispatch_downstream(frame,true,&tx).await;
+        let Event::Packet{origin:Some(first),..}=rx.recv().await.unwrap()else{panic!("missing origin")};
+        let Event::Packet{origin:Some(second),..}=rx.recv().await.unwrap()else{panic!("missing origin")};
+        assert!(Arc::ptr_eq(&first,&second));assert_eq!(first.relay_origin.as_deref(),Some(origin.stamp.as_str()));
+        let mut legacy=vec![6];legacy.extend_from_slice(b"remote");legacy.extend_from_slice(&[0;20]);dispatch_downstream(legacy.into(),true,&tx).await;
+        assert!(matches!(rx.recv().await.unwrap(),Event::Packet{origin:None,..}));
+    }
 }

@@ -37,6 +37,7 @@ const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
 struct Lease {
     credential_hash: String,
     identity_generation:u64,
+    origin: Option<Arc<porthub_mesh::relay_origin::Origin>>,
     hash: String,
     relay_token: String,
     instance: String,
@@ -47,7 +48,7 @@ struct Lease {
     exit_epoch: Option<String>,
     workspace: Option<(String,u64)>,
 }
-pub(crate) struct PairPeerPin {pub id:String,pub hash:String,pub instance:String,pub ip:Ipv4Addr,pub epoch:Option<String>,pub generation:Option<u64>}
+pub(crate) struct PairPeerPin {pub id:String,pub hash:String,pub instance:String,pub ip:Ipv4Addr,pub epoch:Option<String>,pub origin_stamp:Option<String>,pub generation:Option<u64>}
 #[derive(Clone)]
 struct PairAuthority {
     generation:u64,
@@ -88,6 +89,7 @@ struct Forward<'a> {
     generation: u64,
     expires: Instant,
     receipt: ForwardReceipt,
+    origin: Option<Arc<porthub_mesh::relay_origin::Origin>>,
 }
 struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
 #[derive(Default)]
@@ -110,6 +112,7 @@ struct Inner {
 }
 struct QueuedPacket {
     bytes: Vec<u8>,
+    origin: Option<Arc<porthub_mesh::relay_origin::Origin>>,
     receipt: Option<ForwardReceipt>,
     // Released on dequeue/drop, including connection teardown and cancellation.
     _budget: OwnedSemaphorePermit,
@@ -268,12 +271,15 @@ impl Hub {
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         let old=hub.leases.get(id);
+        let old_origin=old.and_then(|lease|lease.origin.clone());
         let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
+        let origin=old_origin.filter(|_|stable.is_some());
         hub.leases.insert(
             id.into(),
             Lease {
                 credential_hash: hash.into(),
+                origin,
                 identity_generation,
                 hash: token_digest(&relay_token),
                 relay_token: relay_token.clone(),
@@ -312,13 +318,44 @@ impl Hub {
         let unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
         let exit_unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.exit_epoch.as_deref()==exit_epoch);
         let token=old.filter(|l|l.credential_hash==hash&&l.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
+        let old_origin=old.and_then(|lease|lease.origin.clone());
         let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_some()).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         if !unchanged {hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         if !exit_unchanged {hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
-        hub.leases.insert(id.into(),Lease{workspace,credential_hash:hash.into(),identity_generation,hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
+        let origin=old_origin.filter(|_|stable.is_some());
+        hub.leases.insert(id.into(),Lease{origin,workspace,credential_hash:hash.into(),identity_generation,hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
         token
+    }
+    /// Called from the authenticated sync's fresh source projection, never from
+    /// relay frames. Cache one immutable identity per server lease incarnation.
+    pub(crate) fn bind_origin(&self, peer: porthub_network::policy::PeerInfo, hash:&str, admission:u64) -> bool {
+        let mut origin=porthub_mesh::relay_origin::Origin{peer:peer.id,ip:peer.ip,fingerprint:peer.fingerprint,instance:peer.instance,stamp:"0".repeat(32)};
+        // Validate before any retirement and before entering the packet path.
+        if origin.validate().is_err(){return false;}
+        let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if !hub.admissions.get(&origin.peer).is_some_and(|a|a.hash==hash&&a.instance==origin.instance&&a.generation==admission&&a.expires>now){return false;}
+        let Some(lease)=hub.leases.get(&origin.peer) else{return false;};
+        if lease.expires<=now||lease.credential_hash!=hash || lease.instance!=origin.instance || lease.ip!=origin.ip{return false;}
+        if lease.origin.as_ref().is_some_and(|old|old.fingerprint==origin.fingerprint){return true;}
+        let replacing=lease.origin.is_some();
+        if replacing {
+            let Some(next)=hub.lease_generation.checked_add(1) else{return false;};hub.lease_generation=next;
+            hub.pairs.retain(|_,p|p.left!=origin.peer&&p.right!=origin.peer);
+            hub.exit_pairs.retain(|_,p|p.left!=origin.peer&&p.right!=origin.peer);
+            hub.leases.get_mut(&origin.peer).unwrap().identity_generation=next;
+        }
+        origin.stamp=uuid::Uuid::new_v4().simple().to_string();let id=origin.peer.clone();
+        hub.leases.get_mut(&id).unwrap().origin=Some(Arc::new(origin));
+        true
+    }
+    pub(crate) fn project_origin(&self,peer:&mut porthub_network::policy::PeerInfo,hash:&str) {
+        peer.relay_origin=None;
+        let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
+        if let Some(lease)=hub.leases.get(&peer.id).filter(|l|l.expires>Instant::now()&&l.credential_hash==hash&&l.instance==peer.instance&&l.ip==peer.ip){
+            if let Some(origin)=lease.origin.as_ref().filter(|origin|origin.fingerprint==peer.fingerprint){peer.relay_origin=Some(origin.stamp.clone());}
+        }
     }
     /// Called only after an authenticated API pair lookup has compiled a nonempty exact ACL.
     /// Coarse relay eligibility is reciprocal; the endpoint engines still enforce packet ACLs.
@@ -339,6 +376,7 @@ impl Hub {
         hub.exit_pairs.retain(|_,p|p.expires>now);
         let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return false;};
         if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return false;}
+        if request.is_some_and(|(_,_,_,pin)| a.origin.is_some() && pin.origin_stamp.as_deref()!=b.origin.as_ref().map(|origin|origin.stamp.as_str())){return false;}
         if a.expires<=now || b.expires<=now || (if exit{a.exit_epoch.as_deref()}else{a.sparse_epoch.as_deref()})!=Some(epoch)
             || (if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()}).is_some_and(|e|e!=target_epoch)
             || (exit&&b.exit_epoch.is_none())
@@ -364,9 +402,9 @@ impl Hub {
         hub.pairs.values().filter_map(|p|{
             if p.expires<=now{return None;}
             let pin=if p.left==source&&p.left_hash==hash&&p.left_instance==instance{
-                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),generation:Some(p.generation)}
+                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),origin_stamp:None,generation:Some(p.generation)}
             }else if p.right==source&&p.right_hash==hash&&p.right_instance==instance{
-                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),generation:Some(p.generation)}
+                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),origin_stamp:None,generation:Some(p.generation)}
             }else{return None;};Some((pin.id.clone(),pin))
         }).collect()
     }
@@ -398,9 +436,9 @@ impl Hub {
         hub.exit_pairs.values().filter_map(|p|{
             if p.expires<=now{return None;}
             let pin=if p.left==source&&p.left_hash==hash&&p.left_instance==instance{
-                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),generation:Some(p.generation)}
+                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),origin_stamp:None,generation:Some(p.generation)}
             }else if p.right==source&&p.right_hash==hash&&p.right_instance==instance{
-                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),generation:Some(p.generation)}
+                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),origin_stamp:None,generation:Some(p.generation)}
             }else{return None;};Some((pin.id.clone(),pin))
         }).collect()
     }
@@ -518,7 +556,7 @@ impl Hub {
             forwarded.push(source.len() as u8);
             forwarded.extend_from_slice(source.as_bytes());
             forwarded.extend_from_slice(current.packet);
-            permit.send(QueuedPacket { bytes: forwarded, receipt:Some(route.receipt), _budget: budget });
+            permit.send(QueuedPacket { bytes: forwarded, origin:route.origin, receipt:Some(route.receipt), _budget: budget });
         }
     }
     async fn while_authorized<T>(&self,receipts:&[ForwardReceipt],operation:impl std::future::Future<Output=T>)->Option<T> {
@@ -596,6 +634,7 @@ impl Hub {
             generation: connection.generation,
             expires,
             receipt,
+            origin:a.origin.clone(),
         })
     }
 }
@@ -681,6 +720,7 @@ async fn upgrade(
         && headers
             .get("x-porthub-relay-prefix")
             .is_some_and(|value| value == "1");
+    let origins = headers.get("x-porthub-relay-origin").is_some_and(|v|v=="1");
     let mut response = ws
         .read_buffer_size(8192)
         .write_buffer_size(8192)
@@ -689,9 +729,10 @@ async fn upgrade(
         .max_frame_size(65536)
         .on_upgrade(move |socket| {
             serve(
-                app, socket, id, hash, instance, lane, lanes, batch, prefixes,
+                app, socket, id, hash, instance, lane, lanes, batch, prefixes, origins,
             )
         });
+    if origins {response.headers_mut().insert("x-porthub-relay-origin",HeaderValue::from_static("1"));}
     if batch {
         response
             .headers_mut()
@@ -718,6 +759,7 @@ async fn serve(
     lanes: u8,
     batch: bool,
     prefixes: bool,
+    origins: bool,
 ) {
     let (generation, mut packets) = {
         let mut hub = app
@@ -807,24 +849,31 @@ async fn serve(
             packet=packets.recv()=>{
                 let Some(packet)=packet else{break;};
                 if !app.private_relay.authorized(&id,&hash,&instance){break;}
-                let QueuedPacket{bytes:mut output,receipt,_budget}=packet;
+                let QueuedPacket{bytes:mut output,receipt,_budget,origin}=packet;
+                let mut origin_records=vec![origin];
                 let mut budgets=vec![_budget];
                 let mut receipts=receipt.into_iter().collect::<Vec<_>>();
                 {let hub=app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner());if receipts.iter().any(|r|!r.valid(&hub,Instant::now())){continue;}}
                 if batch {
                     let mut records=vec![output];
-                    while records.len()<32 {
+                    while records.len()<if origins{24}else{32} {
                         match packets.try_recv(){Ok(packet)=>{
-                            let QueuedPacket{bytes,receipt,_budget}=packet;
+                            let QueuedPacket{bytes,receipt,_budget,origin}=packet;
                             if let Some(receipt)=receipt {
                                 if !receipt.valid(&app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner()),Instant::now()){continue;}
                                 receipts.push(receipt);
                             }
-                            budgets.push(_budget);records.push(bytes);
+                            budgets.push(_budget);records.push(bytes);origin_records.push(origin);
                         },Err(_)=>break}
                     }
-                    let Ok(encoded)=porthub_mesh::batch::encode(&records,prefixes) else {break;};
+                    let encoded=if origins && origin_records.iter().all(Option::is_some) && records.iter().any(|bytes|bytes.get(1+usize::from(bytes[0])+9)==Some(&porthub_mesh::control_packet::EXIT)) {
+                        let records:Vec<_>=records.into_iter().zip(origin_records).map(|(bytes,origin)|{let n=usize::from(bytes[0]);(origin.unwrap(),Bytes::copy_from_slice(&bytes[1+n..]))}).collect();
+                        porthub_mesh::relay_origin::encode(&records).map(|b|b.to_vec())
+                    }else{porthub_mesh::batch::encode(&records,prefixes)};
+                    let Ok(encoded)=encoded else {break;};
                     output=encoded;
+                }else if origins && output.get(1+usize::from(output[0])+9)==Some(&porthub_mesh::control_packet::EXIT) {
+                    if let Some(origin)=origin_records.pop().flatten(){let n=usize::from(output[0]);let Ok(encoded)=porthub_mesh::relay_origin::encode(&[(origin,Bytes::copy_from_slice(&output[1+n..]))]) else{break;};output=encoded.to_vec();}
                 }
                 let sent=app.private_relay.while_authorized(&receipts,tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(output.into())))).await;
                 drop(budgets);
@@ -921,7 +970,7 @@ mod tests {
         let target_read=hub.begin_admission("b","hash-b","instance-b").unwrap();
         hub.publish_sparse_admitted("b","hash-b","instance-b",remote,&b,Some(target_read));
         hub.publish_sparse("c","hash-c","instance-c",Ipv4Addr::new(10,0,0,3),&c);
-        let old=PairPeerPin{id:"b".into(),hash:"hash-b".into(),instance:"instance-b".into(),ip:remote,epoch:Some(b.clone()),generation:None};
+        let old=PairPeerPin{id:"b".into(),hash:"hash-b".into(),instance:"instance-b".into(),ip:remote,epoch:Some(b.clone()),origin_stamp:None,generation:None};
         assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",first,&old));
         let observed_first=hub.observe_pairs("a","hash-a","instance-a",first).remove("b").unwrap();
         let later=hub.begin_admission("a","hash-a","instance-a").unwrap();
@@ -935,13 +984,13 @@ mod tests {
         let observed=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
         // A newer committed target decision is protected even when bindings and
         // policy hashes happen to be identical: its pair generation changed.
-        assert!(hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),generation:None}));
+        assert!(hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),origin_stamp:None,generation:None}));
         assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",later,&observed));
         let observed=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
         assert!(hub.retire_pair_admitted("a","hash-a","instance-a",later,&observed));
         assert!(!hub.pair_allowed("a","b"));assert!(hub.pair_allowed("a","c"));
         assert!(hub.admission_snapshot("b","hash-b","instance-b").is_none(),"target in-flight read must not reintroduce retired authority");
-        assert!(!hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),generation:None}));
+        assert!(!hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),origin_stamp:None,generation:None}));
         let fresh=hub.begin_admission("b","hash-b","instance-b").unwrap();
         hub.publish_sparse_admitted("b","hash-b","instance-b",remote,&a,Some(fresh));
         assert!(!hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&old));
@@ -1118,7 +1167,7 @@ mod tests {
         let mut record = vec![1, b'b'];
         record.extend_from_slice(&packet);
         let hash = token_digest(&token);
-        output.send(QueuedPacket { bytes: vec![0], receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], origin:None, receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
             Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
@@ -1138,7 +1187,7 @@ mod tests {
         assert_eq!(&forwarded[..2], &[1, b'a']);
         assert_eq!(&forwarded[2..], packet.as_ref());
 
-        output.send(QueuedPacket { bytes: vec![0], receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], origin:None, receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
             Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
@@ -1383,7 +1432,7 @@ mod exit_scope_tests {
         let ip=if id=="a"{Ipv4Addr::new(10,203,0,1)}else{Ipv4Addr::new(10,203,0,2)};
         assert!(!hub.publish_sparse_exit_admitted(id,&format!("hash-{id}"),&format!("instance-{id}"),ip,private,exit,Some(ticket)).is_empty());ticket
     }
-    fn pin(id:&str,epoch:&str)->PairPeerPin {PairPeerPin{id:id.into(),hash:format!("hash-{id}"),instance:format!("instance-{id}"),ip:if id=="a"{Ipv4Addr::new(10,203,0,1)}else{Ipv4Addr::new(10,203,0,2)},epoch:Some(epoch.into()),generation:None}}
+    fn pin(id:&str,epoch:&str)->PairPeerPin {PairPeerPin{id:id.into(),hash:format!("hash-{id}"),instance:format!("instance-{id}"),ip:if id=="a"{Ipv4Addr::new(10,203,0,1)}else{Ipv4Addr::new(10,203,0,2)},epoch:Some(epoch.into()),origin_stamp:None,generation:None}}
     fn fixture()->(Hub,mpsc::Receiver<QueuedPacket>,u64,u64) {
         let hub=Hub::default();let a=publish(&hub,"a",&"a".repeat(64),&"e".repeat(64));let b=publish(&hub,"b",&"b".repeat(64),&"f".repeat(64));
         let(tx,rx)=mpsc::channel(8);hub.0.lock().unwrap().connections.insert("b".into(),HashMap::from([(0,Connection{instance:"instance-b".into(),generation:1,output:tx})]));(hub,rx,a,b)
@@ -1460,4 +1509,73 @@ mod exit_scope_tests {
         assert!(hub.pair_allowed("a","b"));assert!(receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    fn peer()->porthub_network::policy::PeerInfo{serde_json::from_value(serde_json::json!({"id":"a","ip":"10.203.0.1","fingerprint":"fp","instance":"instance","hostname":"a.phub"})).unwrap()}
+    fn publish(hub:&Hub)->u64{let p=peer();let a=hub.begin_admission(&p.id,"hash",&p.instance).unwrap();assert!(!hub.publish_sparse_admitted(&p.id,"hash",&p.instance,p.ip,&"a".repeat(64),Some(a)).is_empty());assert!(hub.bind_origin(p,"hash",a));a}
+    #[test]
+    fn final_pair_publication_rejects_projected_stamp_from_before_target_revival(){
+      for exit in [false,true] {
+        let hub=Hub::default();let source=publish(&hub);let epoch="a".repeat(64);let exit_epoch="e".repeat(64);
+        if exit{hub.publish_sparse_exit_admitted("a","hash","instance",Ipv4Addr::new(10,203,0,1),&epoch,&exit_epoch,Some(source));}
+        let publish_b=||{
+            let ticket=hub.begin_admission("b","hash-b","instance-b").unwrap();
+            if exit{hub.publish_sparse_exit_admitted("b","hash-b","instance-b",Ipv4Addr::new(10,203,0,2),&epoch,&exit_epoch,Some(ticket));}
+            else{hub.publish_sparse_admitted("b","hash-b","instance-b",Ipv4Addr::new(10,203,0,2),&epoch,Some(ticket));}
+            let peer=serde_json::from_value(serde_json::json!({"id":"b","ip":"10.203.0.2","fingerprint":"fp-b","instance":"instance-b","hostname":"b.phub"})).unwrap();
+            assert!(hub.bind_origin(peer,"hash-b",ticket));
+        };publish_b();
+        let stamp=hub.0.lock().unwrap().leases["b"].origin.as_ref().unwrap().stamp.clone();
+        let permission=if exit{&exit_epoch}else{&epoch};
+        let mut pin=PairPeerPin{id:"b".into(),hash:"hash-b".into(),instance:"instance-b".into(),ip:Ipv4Addr::new(10,203,0,2),epoch:Some(permission.clone()),origin_stamp:Some(stamp),generation:None};
+        let publish_pair=|pin:&PairPeerPin|if exit{hub.publish_exit_pair_admitted("a",permission,"hash","instance",source,pin)}else{hub.publish_pair_admitted("a",permission,"hash","instance",source,pin)};
+        assert!(publish_pair(&pin));
+        let stamp=pin.origin_stamp.take();assert!(!publish_pair(&pin),"missing stamp is not a wildcard");pin.origin_stamp=stamp;
+        hub.0.lock().unwrap().leases.get_mut("b").unwrap().expires=Instant::now()-Duration::from_secs(1);publish_b();
+        assert!(!publish_pair(&pin));
+        pin.origin_stamp=Some(hub.0.lock().unwrap().leases["b"].origin.as_ref().unwrap().stamp.clone());
+        assert!(publish_pair(&pin));
+      }
+    }
+    #[test]
+    fn expired_lease_cannot_bind_and_malformed_replacement_has_no_retirement_side_effect(){
+        let hub=Hub::default();publish(&hub);let original=hub.0.lock().unwrap().leases["a"].origin.clone().unwrap();
+        let ticket=hub.begin_admission("a","hash","instance").unwrap();
+        let mut malformed=peer();malformed.fingerprint="x".repeat(257);
+        assert!(!hub.bind_origin(malformed,"hash",ticket));assert!(Arc::ptr_eq(hub.0.lock().unwrap().leases["a"].origin.as_ref().unwrap(),&original));
+        hub.0.lock().unwrap().leases.get_mut("a").unwrap().expires=Instant::now()-Duration::from_secs(1);
+        let fresh=hub.begin_admission("a","hash","instance").unwrap();assert!(!hub.bind_origin(peer(),"hash",fresh));
+    }
+    #[tokio::test]
+    async fn queued_packet_keeps_original_server_stamp_and_receipt_retires_on_same_identity_revival(){
+        let hub=Hub::default();let epoch="a".repeat(64);publish(&hub);
+        let b=hub.begin_admission("b","hash-b","instance-b").unwrap();
+        hub.publish_sparse_admitted("b","hash-b","instance-b",Ipv4Addr::new(10,203,0,2),&epoch,Some(b));
+        assert!(hub.publish_pair("a","b",&epoch));
+        let(tx,mut rx)=mpsc::channel(4);hub.0.lock().unwrap().connections.insert("b".into(),HashMap::from([(0,Connection{instance:"instance-b".into(),generation:1,output:tx})]));
+        let mut packet=vec![0;20];packet[0]=0x45;packet[3]=20;packet[9]=17;packet[12..16].copy_from_slice(&[10,203,0,1]);packet[16..20].copy_from_slice(&[10,203,0,2]);
+        let mut frame=vec![1,b'b'];frame.extend_from_slice(&packet);
+        hub.route("a","hash","instance",0,frame.into()).await;
+        let queued=rx.recv().await.unwrap();let original=queued.origin.as_ref().unwrap().stamp.clone();
+        assert!(queued.receipt.as_ref().unwrap().valid(&hub.0.lock().unwrap(),Instant::now()));
+        hub.0.lock().unwrap().leases.get_mut("a").unwrap().expires=Instant::now()-Duration::from_secs(1);
+        publish(&hub);
+        assert!(!queued.receipt.as_ref().unwrap().valid(&hub.0.lock().unwrap(),Instant::now()));
+        assert_eq!(queued.origin.as_ref().unwrap().stamp,original);
+        assert_ne!(hub.0.lock().unwrap().leases["a"].origin.as_ref().unwrap().stamp,original);
+    }
+    #[test]
+    fn heartbeat_retains_stamp_but_expiry_restart_and_fingerprint_rebind_do_not(){
+        let hub=Hub::default();publish(&hub);let mut original=peer();hub.project_origin(&mut original,"hash");let stamp=original.relay_origin.clone().unwrap();assert_eq!(stamp.len(),32);
+        publish(&hub);let mut same=peer();hub.project_origin(&mut same,"hash");assert_eq!(same.relay_origin,Some(stamp.clone()));
+        let pinned=hub.0.lock().unwrap().leases["a"].origin.clone().unwrap();
+        hub.0.lock().unwrap().leases.get_mut("a").unwrap().expires=Instant::now()-Duration::from_secs(1);
+        publish(&hub);let mut revived=peer();hub.project_origin(&mut revived,"hash");assert_ne!(revived.relay_origin,original.relay_origin);assert_eq!(pinned.stamp,stamp);
+        let admission=hub.admission_snapshot("a","hash","instance").unwrap();let mut changed=peer();changed.fingerprint="fp-new".into();assert!(hub.bind_origin(changed.clone(),"hash",admission));hub.project_origin(&mut changed,"hash");assert_ne!(changed.relay_origin,revived.relay_origin);
+        let restart=Hub::default();publish(&restart);let mut fresh=peer();restart.project_origin(&mut fresh,"hash");assert_ne!(fresh.relay_origin,original.relay_origin);
+        let mut wrong=peer();restart.project_origin(&mut wrong,"wrong-hash");assert!(wrong.relay_origin.is_none());
+    }
 }
