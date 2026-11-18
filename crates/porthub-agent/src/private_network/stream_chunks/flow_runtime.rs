@@ -17,6 +17,9 @@ use std::net::Ipv4Addr;
 use tokio::sync::watch;
 const FLOWS: usize = 256;
 const PER_PEER: usize = 4;
+// Optimization is opportunistic. No native flow-open is sent before this
+// deadline, so a failed pre-connect can safely return its original SYN to raw.
+const PRECONNECT_BUDGET: Duration = Duration::from_secs(1);
 // Same bound as the existing raw transport flow-pinning table. Exhaustion
 // declines new optimizations; it never truncates identities or raw packets.
 const DECISIONS: usize = 65536;
@@ -39,6 +42,7 @@ type Id = (String, [u8; 16]);
 pub(crate) enum Phase {
     Opening,
     Running,
+    RawPending,
     Complete,
     Failed,
     Retired,
@@ -85,6 +89,44 @@ struct Inner {
 }
 #[derive(Clone)]
 pub(crate) struct Runtime(Arc<Inner>);
+/// Sole ownership of an original SYN after its QUIC-only pre-connect ended.
+/// Construction happens only after exact endpoints/output tasks are retired;
+/// no flow-open/native SYN has been issued. Drop cannot revive stream ownership.
+pub(crate) struct RawSyn {
+    runtime: std::sync::Weak<Inner>,
+    record: Arc<Record>,
+    syn: Option<PendingSyn>,
+}
+impl RawSyn {
+    pub(crate) fn peer(&self) -> &str { &self.record.peer }
+    pub(crate) fn release(mut self) -> Result<(Bytes, SendPermit)> {
+        let runtime=Runtime(self.runtime.upgrade().ok_or_else(||anyhow::anyhow!("raw pre-open runtime owner dropped"))?);
+        ensure!(!runtime.0.cancel.is_cancelled(),"raw pre-open profile owner retired");
+        let current=(runtime.0.current)(&self.record.peer)
+            .ok_or_else(||anyhow::anyhow!("raw pre-open handoff authority unavailable"))?;
+        let syn=self.syn.take().ok_or_else(||anyhow::anyhow!("raw pre-open SYN already consumed"))?;
+        // Preserve the queued original and recheck current identity, epoch and
+        // service permission. A replacement base cannot renew this request.
+        let (bytes,original)=syn.into_raw(&current)?;
+        let owner=runtime.0.cancel.clone();
+        let packet=(bytes,original.constrain(move ||!owner.is_cancelled()));
+        let mut state=runtime.0.state.lock().unwrap_or_else(|p|p.into_inner());
+        let id=(self.record.peer.clone(),self.record.nonce);
+        let flow=self.record.kernel.lock().unwrap_or_else(|p|p.into_inner())
+            .ok_or_else(||anyhow::anyhow!("raw pre-open tuple absent"))?;
+        ensure!(state.records.get(&id).is_some_and(|record|Arc::ptr_eq(record,&self.record))
+            && state.kernel.get(&flow)==Some(&id)
+            && *self.record.phase.borrow()==Phase::RawPending
+            && self.record.ingress.borrow().is_none(),"raw pre-open ownership retired or native open started");
+        state.records.remove(&id);state.kernel.remove(&flow);
+        state.decisions.insert(flow,Decision::Raw);
+        Ok(packet)
+    }
+}
+impl Drop for RawSyn {
+    fn drop(&mut self) { if let Some(inner)=self.runtime.upgrade(){Runtime(inner).remove(&self.record);} }
+}
+
 pub(crate) struct Background {
     runtime: Runtime,
     commands: mpsc::Receiver<Command>,
@@ -534,7 +576,26 @@ impl Background {
         native.spawn(self.runner.run(stop.clone()));
         let result=async{loop{tokio::select!{
    _=stop.cancelled()=>break,
-   command=self.commands.recv()=>{let Some(command)=command else{break};let runtime=self.runtime.clone();flows.spawn(async move{let(record,result)=match command{Command::Source{record,syn}=>{let result=run_source(&runtime,&record,syn).await;(record,result)},Command::Target{record,key,receiver}=>{let result=run_target(&runtime,&record,key,receiver).await;(record,result)}};record.phase.send_replace(if result.is_ok(){Phase::Retired}else{Phase::Failed});runtime.remove(&record);Runtime::reap_output(&record).await;result});},
+   command=self.commands.recv()=>{let Some(command)=command else{break};let runtime=self.runtime.clone();flows.spawn(async move{
+    let(record,result)=match command{
+        Command::Source{record,syn}=>{
+            match run_source(&runtime,&record,syn).await {
+                Ok(Some(syn))=>{
+                    Runtime::reap_output(&record).await;
+                    record.phase.send_replace(Phase::RawPending);
+                    let handoff=RawSyn{runtime:Arc::downgrade(&runtime.0),record,syn:Some(syn)};
+                    // A closed/full owner never changes the tuple to raw. The
+                    // bounded event retains one SYN and its original authority.
+                    return runtime.0.events.send(Event::GuardedRawSyn{handoff}).await
+                        .map_err(|_|anyhow::anyhow!("raw pre-open event owner stopped"));
+                },
+                other=>(record,other.map(|_|())),
+            }
+        },
+        Command::Target{record,key,receiver}=>{let result=run_target(&runtime,&record,key,receiver).await;(record,result)},
+    };
+    record.phase.send_replace(if result.is_ok(){Phase::Retired}else{Phase::Failed});runtime.remove(&record);Runtime::reap_output(&record).await;result
+});},
    packet=self.packets.recv()=>{let Some(packet)=packet else{if stop.is_cancelled(){break;}anyhow::bail!("native output stack stopped")};let Some(flow)=tcp_stream::Flow::from_packet(packet.bytes())else{continue};let record={let state=self.runtime.0.state.lock().unwrap_or_else(|p|p.into_inner());state.kernel.get(&flow.reverse()).and_then(|id|state.records.get(id)).cloned()};if let Some(record)=record{let _=record.output.try_send(packet);}},
    finished=flows.join_next(),if !flows.is_empty()=>{if let Some(finished)=finished{if let Some(summary)=failure_reporter.completed(finished,std::time::Instant::now())?{tracing::warn!(stage=summary.stage,reason=summary.reason,error_fingerprint=summary.fingerprint,suppressed=summary.suppressed,"guarded native TCP flow failed");}}},
    finished=native.join_next()=>match finished{Some(Ok(Ok(()))) if stop.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("native runner stopped")},
@@ -632,7 +693,7 @@ async fn attach(
     ));
     Ok(slot)
 }
-async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) -> Result<()> {
+async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) -> Result<Option<PendingSyn>> {
     let mut tasks = tokio::task::JoinSet::new();
     let result = async {
         let source = attach(
@@ -653,7 +714,15 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
         let local =
             current().ok_or_else(|| anyhow::anyhow!("source flow authority unavailable"))?;
         let peer = local.channel_identity().peer().clone();
-        let client = source.endpoint().connect_source(&peer).await.context("source-connect")?;
+        let client = match tokio::time::timeout(PRECONNECT_BUDGET,source.endpoint().connect_source(&peer)).await {
+            Ok(Ok(client))=>client,
+            // This is the ONLY raw handoff boundary. TLS setup alone cannot
+            // create either native TCP leg; never fall back after flow-open.
+            _=>{
+                tracing::debug!("guarded TCP preconnect unavailable; original SYN retained for raw handoff");
+                return Ok(Some(syn));
+            },
+        };
         let opened = flow_open::initiate_native(&client, &source.gate(), &local, &syn).await.context("source-open")?;
         let opening = opened.prepare_source(&runtime.0.native, syn).await.context("source-native-prepare")?;
         record
@@ -685,7 +754,8 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
             receiver.gate(),
             &mut tasks,
         )
-        .await.context("source-duplex")
+        .await.context("source-duplex")?;
+        Ok(None)
     };
     let result = tokio::select! {_=record.cancel.cancelled()=>Err(anyhow::anyhow!("source flow owner retired")),result=result=>result};
     record.cancel.cancel();

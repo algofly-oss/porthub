@@ -213,6 +213,10 @@ impl PendingSyn {
         );
         Ok(permit)
     }
+    pub(super) fn into_raw(self, current: &LocalAuthority) -> Result<(Bytes, SendPermit)> {
+        let permit = self.bind_current(current)?;
+        Ok((self.bytes, permit))
+    }
     pub(super) async fn prepare(
         self,
         context: &Context,

@@ -104,6 +104,13 @@ fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pair
     session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
 }
 
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+fn raw_syn_send_permit(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,original:porthub_mesh::udp::SendPermit)->Option<porthub_mesh::udp::SendPermit>{
+    let current=super::authority_event::send_permit(authority,pairs,peer).ok()?;
+    let permit=porthub_mesh::udp::SendPermit::combine(std::iter::once(original).chain(current).collect());
+    permit.valid().then_some(permit)
+}
+
 fn send_probe_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
     ensure!(super::probe::valid_frame(&bytes,true),"invalid direct measurement frame");
     session.send_guarded(bytes,super::authority_event::send_probe_permit(authority,pairs,peer)?)
@@ -915,6 +922,27 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
             },
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            Some(Event::GuardedRawSyn{handoff})=>{
+                if !sparse_handle.enabled(){continue;}
+                let peer=handoff.peer().to_owned();
+                let Ok((bytes,original))=handoff.release() else {continue;};
+                let Some(parsed)=Packet::parse(&bytes) else {continue;};
+                if peer_ips.get(&profile.peer_id)!=Some(&parsed.source())
+                    || peer_ips.get(&peer)!=Some(&parsed.destination())
+                    || !policy.check(&bytes,&peer,false){continue;}
+                let Some(permit)=raw_syn_send_permit(installed_authority.as_ref(),&sparse_handle,&peer,original) else {continue;};
+                let peers=sessions.read().await;
+                let direct=peers.get(&peer).filter(|session|session.state()==porthub_mesh::State::Ready);
+                let relay_ready=relay_sender.is_ready();let mode=*strategy.borrow();
+                let default=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
+                let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(&peer,default,Instant::now())}else{default};
+                match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer){
+                    Some(true)=>{if let Some(session)=direct{let size=bytes.len();if session.send_guarded(bytes,Some(permit)).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),size);}}}},
+                    Some(false)=>{if relay_sender.send_guarded(&peer,&bytes,Some(permit)).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,bytes.len());}}},
+                    None=>{},
+                }
+            },
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
             Some(Event::GuardedStreamLocal{peer,packet})=>{
                 // The queue owns the exact native first-origin packet. Never
                 // relabel it using StreamLocal's current-only byte delivery.
@@ -1581,4 +1609,30 @@ mod relay_origin_runtime_tests {
   pair.peer=new_origin.clone();let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};handle.installed_authority(&query,pair,base);assert!(handle.matches_relay_origin(&new_origin));
   for field in 0..3{let mut foreign=new_origin.clone();match field{0=>foreign.ip="10.203.2.9".parse().unwrap(),1=>foreign.fingerprint="foreign".into(),_=>foreign.instance="foreign".into()};assert!(!handle.matches_relay_origin(&foreign));}
  }
+}
+
+#[cfg(all(test,feature="private-sparse",feature="private-stream"))]
+mod raw_preopen_egress_tests {
+    use super::*;
+    #[test]
+    fn raw_syn_pair_expiry_is_a_local_drop_and_final_carrier_keeps_original_guard()->Result<()> {
+        use super::super::{authority_event::Authority,authority_clock::{RequestWindow,NativeClock}};
+        let a=porthub_mesh::Identity::new()?;let b=porthub_mesh::Identity::new()?;
+        let own=porthub_mesh::streams::Peer{id:"a".into(),ip:"10.234.250.1".parse()?,fingerprint:a.fingerprint().into(),instance:"a-instance".into()};
+        let peer=porthub_mesh::streams::Peer{id:"b".into(),ip:"10.235.1.2".parse()?,fingerprint:b.fingerprint().into(),instance:"b-instance".into()};
+        let expiry=chrono::Utc::now()+chrono::Duration::seconds(60);
+        let base=Authority::new((),Some(RequestWindow::start(std::sync::Arc::new(NativeClock))?),expiry);
+        let info=|p:&porthub_mesh::streams::Peer|serde_json::json!({"id":p.id,"ip":p.ip,"fingerprint":p.fingerprint,"instance":p.instance,"hostname":format!("{}.phub",p.id)});
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"sparse":{"protocol":1,"epoch":"a".repeat(64)},"peers":[info(&own)],"grants":[]}))?;
+        let pair=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":"a".repeat(64),"revision":1,"expires_at":expiry,"local":info(&own),"peer":info(&peer),"grants":[{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}]}))?;
+        let(handle,_)=super::super::sparse::channel();handle.update_base_authority(&snapshot,base.clone());
+        handle.installed_authority(&porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()},pair,base.clone());
+        let original=porthub_mesh::udp::SendPermit::bounded(||true,||Some(Duration::from_secs(5)));
+        assert!(raw_syn_send_permit(None,&handle,"b",original.clone()).is_none());
+        let queued=raw_syn_send_permit(Some(&base),&handle,"b",original.clone()).unwrap();assert!(queued.valid());
+        handle.revoke_all();
+        assert!(!queued.valid());
+        assert!(raw_syn_send_permit(Some(&base),&handle,"b",original).is_none());
+        Ok(())
+    }
 }

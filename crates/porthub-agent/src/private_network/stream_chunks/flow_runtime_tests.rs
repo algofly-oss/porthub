@@ -333,3 +333,6 @@ fn flow_failure_reports_rate_limit_and_account_for_suppressed_errors() -> Result
     let next=reporter.completed(fail(),now+Duration::from_secs(30))?.unwrap();assert_eq!(next.suppressed,100);
     assert_eq!(reporter.completed(fail(),now+Duration::from_secs(60))?.unwrap().suppressed,0);Ok(())
 }
+
+#[path = "flow_preconnect_tests.rs"]
+mod preconnect;
