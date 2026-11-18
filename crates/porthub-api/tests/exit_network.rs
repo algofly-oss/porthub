@@ -81,7 +81,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     });
-    let ids:Vec<_>=(0..if paired||gated{2}else{3}).map(|_|ObjectId::new()).collect();
+    let ids:Vec<_>=(0..if paired{2}else{3}).map(|_|ObjectId::new()).collect();
     let exit_id = ObjectId::new();
     let app = case.app.clone();
     let stopped = cancel.clone();
@@ -151,15 +151,21 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         if cfg!(feature="private-sparse") {
             case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.234.224.0/19","dns_suffix":"phub"}).await?;
         }
+        if gated {
+            let group=ObjectId::new();let book=ObjectId::new();
+            case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
+            case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,
+                "rules":[{"id":"relay-bootstrap443","name":"Owned unrelated private bootstrap","sources":[{"kind":"machine","id":ids[0].to_hex()},{"kind":"machine","id":ids[1].to_hex()}],"destinations":[{"kind":"machine","id":ids[2].to_hex()}],"protocol":"tcp","ports":"443","bidirectional":true,"enabled":true}]}).await?;
+        }
         if paired {
             let group=ObjectId::new();let book=ObjectId::new();
             case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
             case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,
                 "rules":[{"id":"native443","name":"Owned paired native stream","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"tcp","ports":"443","bidirectional":true,"enabled":true}]}).await?;
         } else {case.app.collection("private_exit_nodes").insert_one(doc! {"_id":exit_id,"workspace_id":owner,"name":"Two exits","enabled":true,"selection":"round_robin",
-            "routing_selectors":ids.iter().skip(1).map(|id|doc!{"kind":"machine","id":id.to_hex()}).collect::<Vec<_>>(),
+            "routing_selectors":ids.iter().skip(1).take(if gated{1}else{2}).map(|id|doc!{"kind":"machine","id":id.to_hex()}).collect::<Vec<_>>(),
             "distribution_selectors":[{"kind":"machine","id":ids[0].to_hex()}]}).await?;}
-        let order:Vec<usize>=if paired||gated{vec![1,0]}else{vec![1,2,0]};
+        let order:Vec<usize>=if gated{vec![2,1,0]}else if paired{vec![1,0]}else{vec![1,2,0]};
         for i in order {
             let name = format!("{network}-node-{i}");
 
@@ -169,8 +175,9 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             let runtime_mount=format!("type=bind,src={runtime_root},dst=/fixture-runtime,readonly");
             let entrypoint=format!("/fixture-runtime/{runtime_loader}");
             let env_profile = format!("PORTHUB_TEST_PROFILE={profile}");
-            let env_role = format!("PORTHUB_TEST_ROLE={}", if gated{if i==0{"relay-origin-consumer"}else{"relay-origin-provider"}}else if paired{if i==0{"private-consumer"}else{"private-provider"}}else if i==0{"consumer"}else{"exit"});
-            let env_gate=format!("PORTHUB_TEST_PROVIDER_GATE={}",if gated&&i>0{"1"}else{"0"});
+            let env_role = format!("PORTHUB_TEST_ROLE={}", if gated{if i==0{"relay-origin-consumer"}else if i==1{"relay-origin-provider"}else{"relay-origin-bootstrap"}}else if paired{if i==0{"private-consumer"}else{"private-provider"}}else if i==0{"consumer"}else{"exit"});
+            let env_gate=format!("PORTHUB_TEST_PROVIDER_GATE={}",if gated&&i==1{"1"}else{"0"});
+            let env_bootstrap_source=format!("PORTHUB_TEST_RELAY_BOOTSTRAP_SOURCE=10.234.240.{}",i+10);
             let env_peer_target="PORTHUB_TEST_PEER_TARGET=10.234.240.11:443";
             let label=format!("porthub.exit_fixture={nonce}");
             let env_nonce=format!("PORTHUB_TEST_FIXTURE_NONCE={nonce}");
@@ -183,7 +190,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
                 "--tmpfs", "/state:rw,mode=700,size=16m", "--tmpfs", "/run/porthub-exits:rw,mode=700,size=8m", "--tmpfs", "/tmp:rw,mode=1777,size=64m",
                 "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--security-opt", "no-new-privileges:true", "--security-opt", "systempaths=unconfined",
                 "--security-opt", "apparmor=unconfined", "--sysctl", "net.ipv4.ip_forward=0", "--device", "/dev/net/tun",
-                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_public, "--env", &env_role, "--env", &env_target, "--env", &env_control, "--env", env_peer_target, "--env", &env_nonce, "--env", &env_gate,
+                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_public, "--env", &env_role, "--env", &env_target, "--env", &env_control, "--env", env_peer_target, "--env", &env_nonce, "--env", &env_gate, "--env", &env_bootstrap_source,
                 "--mount", &mount, "--mount", &runtime_mount, "--entrypoint", &entrypoint, &image, "--library-path", "/fixture-runtime", "/worker", "--ignored", "--exact", "isolated_exit_worker", "--nocapture"])).await?;
             containers.push(name.clone());
             if i > 0 && !paired { docker(args(&["network", "connect", "--ip", &format!("203.0.113.{}",i+1), &external, &name])).await?; }
@@ -191,7 +198,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         }
         let consumer = containers.last().unwrap();
         if gated {
-            let provider=containers.first().context("owned provider absent")?;
+            let provider=containers.get(1).context("owned provider absent")?;
             async fn wait_phase(name:&str,phase:&str)->Result<String> {
                 tokio::time::timeout(Duration::from_secs(8),async{loop{let logs=docker(args(&["logs",name])).await?;if logs.contains(phase){return Ok::<_,anyhow::Error>(logs);}tokio::time::sleep(Duration::from_millis(25)).await;}}).await.with_context(||format!("owned relay handshake phase timeout: {phase}"))?
             }
@@ -216,7 +223,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         ensure!(status == "0", "exit consumer failed with status {status}");
         if gated {
             ensure!(udp_received.load(std::sync::atomic::Ordering::SeqCst)==1,"first owned UDP was retried or duplicated");
-            let provider=containers.first().context("owned provider missing")?;let logs=docker(args(&["logs",provider])).await?;
+            let provider=containers.get(1).context("owned provider missing")?;let logs=docker(args(&["logs",provider])).await?;
             ensure!(logs.contains("native_relay_origin negotiated=true")&&logs.contains("native_relay_origin decoded_records=")&&logs.contains("phase=pending_native_write_complete"),"actual negotiated relay/pending native delivery witness missing");
             println!("{logs}");println!("fault_injected_relay payload=true negotiated_origin=true single_udp=true native_write_after_ack=true");
         }

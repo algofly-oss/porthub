@@ -51,6 +51,15 @@ fn icmp_echo(target: std::net::Ipv4Addr) -> Result<()> {
     ensure!(header + echo.len() <= size as usize && bytes[header] == 0 && bytes[header + 4..header + echo.len()] == echo[4..], "ICMP exit reply mismatch");
     Ok(())
 }
+async fn relay_private_bootstrap()->Result<()> {
+    tokio::time::timeout(Duration::from_secs(20),async{loop{
+        if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(2),TcpStream::connect("10.234.240.12:443")).await {
+            ensure!(stream.local_addr()?.ip()==std::env::var("PORTHUB_TEST_RELAY_BOOTSTRAP_SOURCE")?.parse::<IpAddr>()?,"private bootstrap escaped own native source");
+            drop(stream);println!("native_relay_bootstrap ordinary_private_tcp=true exit_pair_preinstalled=false");return Ok::<_,anyhow::Error>(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }}).await.context("ordinary private relay bootstrap timeout")?
+}
 async fn relay_origin_consumer(target:&str)->Result<()> {
     tokio::time::timeout(Duration::from_secs(20),async{while !std::path::Path::new("/state/release-send").is_file(){tokio::time::sleep(Duration::from_millis(25)).await;}}).await.context("owned relay transport bootstrap not released")?;
     let nonce=std::env::var("PORTHUB_TEST_FIXTURE_NONCE")?;let expected=format!("relay-origin-first-{nonce}");
@@ -352,6 +361,13 @@ async fn isolated_exit_worker() -> Result<()> {
         ensure!(source == "198.18.10.2".parse::<IpAddr>()?, "fixture underlay source differs");
         println!("normal underlay verified before activating exit policy");
     }
+    let bootstrap_server=if role=="relay-origin-bootstrap" {
+        let listener=tokio::net::TcpListener::bind("0.0.0.0:443").await?;let stop=cancel.clone();
+        Some(tokio::spawn(async move{loop{tokio::select!{_=stop.cancelled()=>break,result=listener.accept()=>{let(stream,_)=result?;drop(stream);}}}Ok::<_,anyhow::Error>(())}))
+    }else{None};
+    if role=="relay-origin-provider"||role=="relay-origin-consumer" {
+        tokio::select!{result=relay_private_bootstrap()=>result?,result=&mut runtime=>anyhow::bail!("agent stopped during ordinary private bootstrap: {result:?}")}
+    }
     let result = if role=="private-provider"||role=="private-consumer" {
         tokio::select! {
             result=paired_native_tcp(&role)=>result,
@@ -394,6 +410,7 @@ async fn isolated_exit_worker() -> Result<()> {
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(5), runtime).await??;
     if let Some(churn) = churn { churn.await??; }
+    if let Some(server)=bootstrap_server{server.await??;}
     result
 }
 
