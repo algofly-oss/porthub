@@ -167,8 +167,8 @@ env['PATH']=str(pathlib.Path(job['tools']['cargo']).parent)+os.pathsep+str(pathl
 env.update(CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TARGET_DIR=str(stage/'target'),RUST_MIN_STACK='33554432')
 if job['tools']['vcvars']:
  env={key.upper():value for key,value in env.items()}
- cmd='"'+job['tools']['vcvars']+'" >nul && set'
- text=subprocess.run(['cmd.exe','/d','/s','/c',cmd],check=True,capture_output=True,text=True,timeout=30).stdout
+ cmd='cmd.exe /d /s /c ""'+job['tools']['vcvars']+'" >nul && set"'
+ text=subprocess.run(cmd,check=True,capture_output=True,text=True,timeout=30).stdout
  for line in text.splitlines():
   if '=' in line and not line.startswith('='):
    key,value=line.split('=',1); env[key.upper()]=value
