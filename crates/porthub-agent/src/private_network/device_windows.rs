@@ -31,8 +31,17 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
     for row in rows {let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());found.push((String::from_utf16(&row.Alias[..end])?,guid_hex(&row.InterfaceGuid),row.InterfaceIndex,row.Mtu));}
     Ok(found)
 }
+#[derive(Debug)]
+struct MissingSourceAdapter;
+impl std::fmt::Display for MissingSourceAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("owned source adapter disappeared")
+    }
+}
+impl std::error::Error for MissingSourceAdapter {}
+
 fn native_source_pin(index: u32) -> Result<super::native_owner::source::Pin> {
-    inspect_source_pin(index)?.context("owned source adapter disappeared")
+    inspect_source_pin(index)?.ok_or_else(|| MissingSourceAdapter.into())
 }
 fn inspect_source_pin(index:u32)->Result<Option<super::native_owner::source::Pin>>{
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfTable2,FreeMibTable};
@@ -96,6 +105,20 @@ impl super::native_owner::source::ShutdownIo for RecoveredSource{
 /// Called only under the common source-owner lease. A record is not native
 /// absence: inventory/read errors and foreign/replaced adapters remain errors.
 pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native_owner::source::Pin,own:Ipv4Addr)->Result<super::native_owner::source::Pin>{
+    match recover_source_absence_once(profile, pin, own) {
+        Err(error) if error.is::<MissingSourceAdapter>() => {
+            // Restart from protected state after teardown interrupted a read.
+            recover_source_absence_once(profile, pin, own)
+        }
+        result => result,
+    }
+}
+
+fn recover_source_absence_once(
+    profile: &std::path::Path,
+    pin: &super::native_owner::source::Pin,
+    own: Ipv4Addr,
+) -> Result<super::native_owner::source::Pin> {
     use super::native_owner::source::Pin;
     pin.validate()?;
     let state=windows_state::state_path(profile,".wintun-ownership.json")?;
@@ -111,14 +134,26 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
         // Constructor recovery: the old source was cleared and the new record
         // checkpointed, but the process died before finishing native open.
         super::native_owner::inspect_rebound_source(profile,own,record.own,&record.guid)?;
-        let Some((name,_,index,_))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else{return Ok(pin.clone());};
+        let Some((name,_,index,_))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else {
+            ensure!(
+                !native_adapters.iter().any(|(name, _, _, _)| name.eq_ignore_ascii_case(expected_name)),
+                "different adapter occupies protected alias; preserved"
+            );
+            return Ok(pin.clone());
+        };
         ensure!(name==expected_name,"rebound adapter was renamed; preserved");
         let before=native_source_pin(*index)?;
         ensure!(!getifaddrs::getifaddrs()?.any(|row|row.index==Some(*index)&&row.address.ip_addr()==Some(IpAddr::V4(own))),"old source reappeared after fresh assignment intent");
         ensure!(native_source_pin(*index)?==before,"adapter changed during source absence recovery");return Ok(before);
     }
     if let Pin::Windows{guid,..}=pin{ensure!(guid==&record.guid,"retired adapter GUID no longer matches protected record");}
-    let Some((name,_,index,mtu))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else{return Ok(pin.clone());};
+    let Some((name,_,index,mtu))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else {
+            ensure!(
+                !native_adapters.iter().any(|(name, _, _, _)| name.eq_ignore_ascii_case(expected_name)),
+                "different adapter occupies protected alias; preserved"
+            );
+            return Ok(pin.clone());
+        };
     ensure!(name==expected_name,"retired adapter was renamed; preserved");
     let Some(current) = inspect_source_pin(*index)? else {
         // Wintun can finish removing the adapter after the first inventory.
