@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "hosts": {
+    "nitin-mbp": {
+      "platform": "posix",
+      "destination": "nitin@192.168.0.40",
+      "target": "aarch64-apple-darwin",
+      "python": "/usr/bin/python3",
+      "ssh_options": ["-oHostKeyAlias=nitin-mbp.phub"],
+      "scp_options": ["-oHostKeyAlias=nitin-mbp.phub"]
+    },
+    "aero": {
+      "platform": "windows",
+      "destination": "nitin@192.168.0.169",
+      "target": "x86_64-pc-windows-msvc",
+      "ssh_options": [],
+      "scp_options": []
+    }
+  }
+}
