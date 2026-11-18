@@ -103,6 +103,9 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 mod tests {
     use super::*;
 
+    // Includes cold Windows PowerShell startup while the full native suite runs.
+    const POWERSHELL_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+
     #[tokio::test]
     async fn native_cim_cmdlets_import_uses_trusted_module_under_hostile_search_path() -> Result<()>
     {
@@ -189,7 +192,7 @@ $one=Trusted 'Get-CimInstance';$two=Trusted 'Invoke-CimMethod'
                 );
                 Ok::<_, anyhow::Error>(())
             };
-            tokio::time::timeout(Duration::from_secs(10), run)
+            tokio::time::timeout(POWERSHELL_TEST_TIMEOUT, run)
                 .await
                 .with_context(|| {
                     format!("Trusted CIM module metadata timed out; imported={expected_present}")
@@ -291,7 +294,7 @@ $one=Trusted 'Get-CimInstance';$two=Trusted 'Invoke-CimMethod'
                 }
                 Ok::<_, anyhow::Error>(())
             };
-            let result = tokio::time::timeout(Duration::from_secs(10), run).await;
+            let result = tokio::time::timeout(POWERSHELL_TEST_TIMEOUT, run).await;
             // Report only known constant stages, never arbitrary stderr/source.
             let output = captured.lock().unwrap();
             let text = String::from_utf8_lossy(&output);
