@@ -166,9 +166,10 @@ recipe_version=1
             pass
         def capture(command, **kwargs):
             self.assertEqual(kwargs['env']['PORTHUB_VERSION'], '1.11.0')
+            self.assertEqual(kwargs['env']['PORTHUB_SOURCE_REVISION'], 'a' * 40)
             self.assertNotIn('PORTHUB_COMPONENT_VERSION', kwargs['env'])
             raise CapturedBuild()
-        with mock.patch.dict(os.environ, {'PORTHUB_VERSION':'1.11.2', 'PORTHUB_COMPONENT_VERSION':'9.9.9'}), mock.patch.object(buildplan,'require_clean_source'), mock.patch.object(buildplan.subprocess,'run',side_effect=capture):
+        with mock.patch.dict(os.environ, {'PORTHUB_VERSION':'1.11.2', 'PORTHUB_COMPONENT_VERSION':'9.9.9', 'PORTHUB_SOURCE_REVISION':'b' * 40}), mock.patch.object(buildplan,'require_clean_source'), mock.patch.object(buildplan.subprocess,'run',side_effect=capture):
             with self.assertRaises(CapturedBuild):
                 buildplan.build_and_record(self.root,'core',TARGET,'a'*40)
 

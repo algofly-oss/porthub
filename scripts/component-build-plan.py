@@ -526,6 +526,7 @@ def build_and_record(root, tool, target, revision, version=None, binary_output=N
         # CI also builds the gateway and sets its carrier version globally.
         # Core has an independent package version; never inherit that override.
         environment['PORTHUB_VERSION'] = version
+        environment['PORTHUB_SOURCE_REVISION'] = revision
     result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
     sys.stderr.write(result.stderr)
     outputs = set()
