@@ -31,15 +31,23 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
     for row in rows {let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());found.push((String::from_utf16(&row.Alias[..end])?,guid_hex(&row.InterfaceGuid),row.InterfaceIndex,row.Mtu));}
     Ok(found)
 }
-fn native_source_pin(index:u32)->Result<super::native_owner::source::Pin>{
+fn native_source_pin(index: u32) -> Result<super::native_owner::source::Pin> {
+    inspect_source_pin(index)?.context("owned source adapter disappeared")
+}
+fn inspect_source_pin(index:u32)->Result<Option<super::native_owner::source::Pin>>{
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfTable2,FreeMibTable};
     let mut table=std::ptr::null_mut();ensure!(unsafe{GetIfTable2(&mut table)}==0&&!table.is_null(),"cannot inspect source adapter identity");
     struct Guard(*mut core::ffi::c_void);impl Drop for Guard{fn drop(&mut self){unsafe{FreeMibTable(self.0)}}}let _guard=Guard(table.cast());
     let count=unsafe{(*table).NumEntries}as usize;ensure!(count<=65536,"source identity inventory exceeds bound");
-    let row=unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),count)}.iter().find(|row|row.InterfaceIndex==index).context("owned source adapter disappeared")?;
+    let Some(row) = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) }
+        .iter()
+        .find(|row| row.InterfaceIndex == index)
+    else {
+        return Ok(None);
+    };
     let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());
     let pin=super::native_owner::source::Pin::Windows{name:String::from_utf16(&row.Alias[..end])?,index,guid:guid_hex(&row.InterfaceGuid),luid:unsafe{row.InterfaceLuid.Value}};
-    pin.validate()?;Ok(pin)
+    pin.validate()?;Ok(Some(pin))
 }
 fn delete_source(index:u32,luid:u64,own:Ipv4Addr)->Result<()>{
         use windows_sys::Win32::{NetworkManagement::IpHelper::{MIB_UNICASTIPADDRESS_ROW,InitializeUnicastIpAddressEntry,DeleteUnicastIpAddressEntry},Networking::WinSock::AF_INET};
@@ -112,7 +120,22 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
     if let Pin::Windows{guid,..}=pin{ensure!(guid==&record.guid,"retired adapter GUID no longer matches protected record");}
     let Some((name,_,index,mtu))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else{return Ok(pin.clone());};
     ensure!(name==expected_name,"retired adapter was renamed; preserved");
-    let current=native_source_pin(*index)?;
+    let Some(current) = inspect_source_pin(*index)? else {
+        // Wintun can finish removing the adapter after the first inventory.
+        // Confirm the protected GUID and alias are both gone before proceeding.
+        ensure!(
+            !adapters()?.iter().any(|(name, guid, _, _)| {
+                guid == &record.guid || name.eq_ignore_ascii_case(expected_name)
+            }),
+            "retired adapter changed during disappearance check; preserved"
+        );
+        return Ok(pin.clone());
+    };
+    ensure!(
+        matches!(&current, Pin::Windows { name, guid, .. }
+            if name == expected_name && guid == &record.guid),
+        "retired adapter identity changed during inventory; preserved"
+    );
     if &current!=pin {
         // A legitimate reboot/reopen may change LUID/index. Rebind ONLY after
         // the normal protected ownership/configuration/ledger checks, never by
