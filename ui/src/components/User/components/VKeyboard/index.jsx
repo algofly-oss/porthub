@@ -19,6 +19,7 @@ const names={en:'English',hi:'Hindi',hinglish:'Hinglish (Hindi in Latin letters)
 export default function VKeyboard({active=true}){
   const {user}=useAuth();const isAdmin=user?.role==='admin';
   const [targets,setTargets]=useState([]),[selected,setSelected]=useState(''),[connection,setConnection]=useState({state:'disconnected'}),[error,setError]=useState(''),[status,setStatus]=useState(null),[text,setText]=useState(''),[recording,setRecording]=useState(false),[processing,setProcessing]=useState(false),[level,setLevel]=useState(0),[language,setLanguage]=useState('en'),[translate,setTranslate]=useState(false),[live,setLive]=useState(true),[after,setAfter]=useState('space'),[failedAudio,setFailedAudio]=useState(null),[loading,setLoading]=useState(false);
+  const [dictationSession,setDictationSession]=useState(0);
   const [caption,setCaption]=useState({before:'',piece:'',text:'',revision:0,visible:false});
   const captionTimer=useRef(0);
   const clearCaption=useCallback(()=>{clearTimeout(captionTimer.current);setCaption(current=>({...current,text:'',visible:false}));captionTimer.current=setTimeout(()=>setCaption(current=>current.visible?current:{before:'',piece:'',text:'',revision:current.revision,visible:false}),300);},[]);
@@ -26,6 +27,8 @@ export default function VKeyboard({active=true}){
   latest.current={live,after,language,translate,active,connected:connection.state==='connected'};
   const refresh=useCallback(async()=>{setLoading(true);try{const {data}=await axios.get('/api/keyboard/targets');if(alive.current){setTargets(data.targets);setSelected(current=>current||data.targets.find(t=>t.online)?.id||data.targets[0]?.id||'');}}catch(e){if(alive.current)setError(e.response?.data?.detail||'Could not load keyboard clients');}finally{if(alive.current)setLoading(false);}},[]);
   const stop=useCallback(async()=>{const current=recorder.current;recorder.current=null;setRecording(false);await current?.stop();},[]);
+  // The main microphone must not depend on first opening the Settings drawer.
+  useEffect(()=>{if(!active)return;let current=true;axios.get('/api/keyboard/speech').then(({data})=>{if(current&&alive.current)setStatus(currentStatus=>currentStatus===status?data:currentStatus);}).catch(e=>{if(current&&alive.current)setError(e.response?.data?.detail||'Could not load dictation settings');});return()=>{current=false;};},[active]);
   const speechEnabled=status?.settings.enabled;
   useEffect(()=>{if(speechEnabled===false&&recorder.current){const current=recorder.current;recorder.current=null;setRecording(false);void current.stop(false);}},[speechEnabled]);
   const disconnect=useCallback(()=>{void stop();transport.current?.close();transport.current=null;setConnection({state:'disconnected'});},[stop]);
@@ -54,7 +57,7 @@ export default function VKeyboard({active=true}){
   const start=async()=>{
     setError('');clearCaption();if(!navigator.mediaDevices?.getUserMedia){setError('Microphone recording requires HTTPS or localhost.');return;}
     const next=new VoiceRecorder({segment,level:setLevel,failed:message=>{setError(message);setRecording(false);}});recorder.current=next;
-    try{await next.start();if(recorder.current===next)setRecording(true);}catch(e){setError(e.name==='NotAllowedError'?'Microphone permission was denied. Allow it in your browser settings.':e.message);recorder.current=null;setRecording(false);}
+    try{await next.start();if(recorder.current===next){setDictationSession(value=>value+1);setRecording(true);}}catch(e){setError(e.name==='NotAllowedError'?'Microphone permission was denied. Allow it in your browser settings.':e.message);recorder.current=null;setRecording(false);}
   };
   const model=status?.models?.find(m=>m.id===status.settings.model);
   const languages=useMemo(()=>model?[...(model.auto_language?['auto']:[]),...model.languages,...(model.languages.includes('hi')?['hinglish']:[])]:['en'],[model]);
@@ -84,8 +87,13 @@ export default function VKeyboard({active=true}){
         <button type="button" className={styles.captionText} aria-label={caption.piece?'Read recognized text':'Dictation status'} onClick={()=>openSheet(caption.piece?'text':!model?.installed?'models':'general')} title={caption.text||speechMessage}>
           {caption.piece?<span className={`${styles.captionViewport} ${!caption.visible?styles.captionEmpty:''}`} aria-live="polite" aria-label="Recognized text"><span className={styles.captionInner}>{caption.before}<span key={caption.revision} className={styles.captionNew}>{caption.piece}</span></span></span>:<span role="status">{speechMessage}</span>}
         </button>
+        <DictationTimer key={dictationSession} recording={recording} processing={processing}/>
         <DictationWave recording={recording} level={level}/>
-        <button type="button" aria-label={recording?'Stop recording':'Start dictation'} aria-pressed={recording} disabled={micDisabled} className={`${styles.mic} ${recording?styles.recording:''} ${processing&&!recording?styles.micBusy:''}`} onClick={()=>recording?stop():start()}>{recording?<IconPlayerStop size={20}/>:<IconMicrophone size={20}/>}</button>
+        <span className={`${styles.micPosition} ${recording?styles.micListening:''}`}>
+          <span className={styles.micHalo} aria-hidden="true" style={{transform:`scale(${1+Math.max(0,Math.min(1,level))*.18})`}}/>
+          <span className={styles.micPulse} aria-hidden="true"/><span className={`${styles.micPulse} ${styles.micPulseSecond}`} aria-hidden="true"/>
+          <button type="button" aria-label={recording?'Stop recording':'Start dictation'} aria-pressed={recording} disabled={micDisabled} className={`${styles.mic} ${recording?styles.recording:''} ${processing&&!recording?styles.micBusy:''}`} onClick={()=>recording?stop():start()}>{recording?<IconPlayerStop size={20}/>:<IconMicrophone size={20}/>}</button>
+        </span>
       </div>}/>
     {error&&<div role="alert" className={styles.alert}><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={()=>setError('')}><IconX size={20}/></button></div>}
     <WorkspaceDrawer opened={settingsOpen} onClose={()=>setSettingsOpen(false)} classNames={{title:"!min-w-0 !flex-1"}} title={<span className="flex w-full items-center justify-between gap-3"><span>VKeyboard</span><button type="button" className={styles.iconButton} aria-label="Close VKeyboard settings" onClick={()=>setSettingsOpen(false)}><IconX size={20}/></button></span>} size="lg" fixedHeight="min(88dvh, 760px)" withCloseButton={false}>
@@ -137,4 +145,18 @@ function DictationWave({recording,level}) {
   },[recording]);
   if(!recording)return null;
   return <span role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(level*100)} className={styles.wave}>{history.map((value,index)=><span key={index} style={{transform:`scaleY(${value*(1-Math.abs(index-14.5)/14.5*.45)})`}}/>)}</span>;
+}
+
+// Like the original portrait microphone: the clock starts only after recording
+// succeeds, freezes while its final segment transcribes, and resets next time.
+function DictationTimer({recording,processing}) {
+  const [elapsed,setElapsed]=useState(0);
+  useEffect(()=>{
+    if(!recording)return;
+    const started=performance.now();const update=()=>setElapsed(Math.max(0,Math.floor((performance.now()-started)/1000)));
+    setElapsed(0);const timer=setInterval(update,1000);
+    return()=>clearInterval(timer);
+  },[recording]);
+  const seconds=recording||processing?elapsed:0;
+  return <span role="timer" aria-label="Recording duration" aria-live="off" className={`${styles.dictationTimer} ${recording||processing?styles.timerVisible:''}`}>{Math.floor(seconds/60)}:{String(seconds%60).padStart(2,'0')}</span>;
 }

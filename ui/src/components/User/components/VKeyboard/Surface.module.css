@@ -146,3 +146,32 @@
 .keyboard :global(.mic-key.busy)::after{content:'';position:absolute;width:18px;height:18px;border:2px solid hsl(var(--muted-foreground)/.25);border-top-color:hsl(var(--foreground));border-radius:50%;animation:dictationSpin .8s linear infinite}
 
 @media(prefers-reduced-motion:reduce){.captionNew,.micBusy::after,.keyboard :global(.mic-key.busy)::after{animation:none}.captionViewport,.mic,.wave span{transition:none}}
+/* Original microphone-only portrait stage; compact touchpad/landscape rows
+   retain their existing microphone key and recognized-text layout. */
+.micPosition{display:var(--dictation-mic-display,contents);position:relative;place-items:center;width:var(--dictation-wrap,auto);height:var(--dictation-wrap,auto);flex:none;order:1}
+.dictationTimer{display:var(--dictation-timer-display,none);height:22px;flex:none;order:0;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;line-height:22px;color:hsl(var(--muted-foreground));opacity:0;transition:opacity .2s}
+.timerVisible{opacity:1}
+.micHalo,.micPulse{display:var(--dictation-timer-display,none);position:absolute;inset:20px;border-radius:50%;pointer-events:none;opacity:0}
+.micHalo{background:#dc2626;transition:opacity .3s,transform 80ms linear}
+.micPulse{border:2px solid #dc2626}
+.micListening .micHalo{opacity:.18}
+.micListening .micPulse{animation:dictationPulse 2s cubic-bezier(.2,.8,.2,1) infinite}
+.micListening .micPulseSecond{animation-delay:1s}
+@keyframes dictationPulse{from{transform:scale(1);opacity:.5}to{transform:scale(1.45);opacity:0}}
+.noPad .mic{position:relative;width:var(--dictation-mic-size,44px);height:var(--dictation-mic-size,44px);flex:none}
+.noPad .caption{width:100%;flex-wrap:nowrap}
+.noPad .captionText{order:3;flex:none;width:100%}
+.noPad .captionRecording .wave{order:2;flex:none;width:var(--dictation-wave-width,auto);max-width:100%}
+.portrait .noPad{--dictation-mic-display:grid;--dictation-timer-display:block;--dictation-wrap:168px;--dictation-mic-size:128px;--dictation-wave-width:220px;--dictation-icon-size:48px;--dictation-stop-size:40px;--dictation-spinner-size:56px}
+@media(orientation:portrait){.automatic .noPad{--dictation-mic-display:grid;--dictation-timer-display:block;--dictation-wrap:168px;--dictation-mic-size:128px;--dictation-wave-width:220px;--dictation-icon-size:48px;--dictation-stop-size:40px;--dictation-spinner-size:56px}}
+@media(prefers-reduced-motion:reduce){.micListening .micPulse{animation:none}.dictationTimer,.micHalo{transition:none}}
+
+.noPad .captionRecording.captionHasText .captionText{flex-basis:auto;order:3}
+.noPad .mic svg{width:var(--dictation-icon-size,20px);height:var(--dictation-icon-size,20px)}
+.noPad .mic.recording svg{width:var(--dictation-stop-size,20px);height:var(--dictation-stop-size,20px)}
+.noPad .micBusy::after{width:var(--dictation-spinner-size,22px);height:var(--dictation-spinner-size,22px)}
+/* A portrait preference must not reserve the large microphone stage when a
+   phone rotates into the compact landscape keyboard. */
+@media(orientation:landscape) and (max-height:599px){
+ .portrait .noPad,.automatic .noPad{--dictation-mic-display:contents;--dictation-timer-display:none;--dictation-wrap:auto;--dictation-mic-size:44px;--dictation-wave-width:auto;--dictation-icon-size:20px;--dictation-stop-size:20px;--dictation-spinner-size:22px}
+}

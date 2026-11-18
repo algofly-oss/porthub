@@ -74,13 +74,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends cmake g++
       - uses: Swatinem/rust-cache@v2
         with:
-          key: terminal-measurements
+          key: terminal-measurements-portable-cpu-v1
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Pin explicit portable speech CPU policy for cached native builds
+        run: echo "TRANSCRIBE_CMAKE_ARGS=$(sh scripts/speech-cpu-policy.sh x86_64-unknown-linux-gnu)" >> "$GITHUB_ENV"
       - name: Verify strict reports and real standalone MongoDB rollups
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
         run: |
+          python3 scripts/test_speech_cpu_policy.py
+          cargo test --locked -p porthub-api --test speech_portability speech_backend_devices_enumerate_without_model_or_application -- --ignored --exact --nocapture
           cargo test --locked -p porthub-terminal --lib
           cargo test --locked -p porthub-runtime --lib web_activity::tests
           cargo test --locked -p porthub-runtime --test upstreams
@@ -287,9 +291,14 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: server-${{ matrix.target }}
+          key: server-${{ matrix.target }}-portable-cpu-v1
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Install baseline x86 CPU emulator
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
       - name: Build server roles without rebuilding agents
         run: |
           target='${{ matrix.target }}'
@@ -313,11 +322,10 @@ jobs:
           path: server-artifacts/
           if-no-files-found: error
           retention-days: 3
-      - name: Upload isolated ARM speech probe (not a release asset)
-        if: matrix.arch == 'arm64'
+      - name: Upload isolated native speech probe (not a release asset)
         uses: actions/upload-artifact@v4
         with:
-          name: porthub-server-speech-probe-arm64
+          name: porthub-server-speech-probe-${{ matrix.arch }}
           path: server-speech-probe/
           if-no-files-found: error
           retention-days: 3
