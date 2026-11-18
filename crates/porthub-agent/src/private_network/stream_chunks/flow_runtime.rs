@@ -1,5 +1,7 @@
 //! Experimental autonomous source/cold-receiver flow actors. Not advertised.
 use super::*;
+use anyhow::Context;
+use std::time::Duration;
 use super::{
     carrier::{Frame, Key, Role},
     dispatch::{Dispatcher, EndpointSlot, Outcome},
@@ -497,9 +499,35 @@ impl Runtime {
         )
     }
 }
+// Flow failures retire only their exact actor, but must remain diagnosable.
+// Report fixed vocabulary and a bounded hash, never arbitrary remote error text,
+// addresses, credentials, native bytes, or flow nonces.
+#[derive(Debug)]
+struct FlowFailureSummary { stage: &'static str, reason: &'static str, fingerprint: String, suppressed: u64 }
+#[derive(Default)]
+struct FlowFailureReporter { next: Option<std::time::Instant>, suppressed: u64 }
+impl FlowFailureReporter {
+    fn completed(&mut self, result: std::result::Result<Result<()>,tokio::task::JoinError>, now: std::time::Instant) -> Result<Option<FlowFailureSummary>> {
+        let Err(error)=result? else {return Ok(None)};
+        if self.next.is_some_and(|next|now<next) {self.suppressed=self.suppressed.saturating_add(1);return Ok(None);}
+        self.next=Some(now+Duration::from_secs(30));
+        let stages=["source-connect","source-open","source-native-prepare","source-native-established","source-response-accept","source-response-open","source-duplex","target-accept","target-open","target-native-prepare","target-native-established","target-response-connect","target-response-open","target-duplex"];
+        let mut stage="unclassified";let mut reason="other";let mut hash=Sha256::new();let mut left=4096;
+        for cause in error.chain().take(16) {
+            let text=cause.to_string();
+            if let Some(known)=stages.iter().find(|known|text==**known) {if stage=="unclassified"{stage=*known;}}
+            if cause.is::<tokio::time::error::Elapsed>() {reason="timeout";}
+            else if cause.is::<std::io::Error>() {reason="native-io";}
+            else if ["source flow authority unavailable","response authority unavailable","target authority unavailable","carrier original request authority expired","native SYN current pair/epoch changed while queued","source flow owner retired","target flow owner retired"].contains(&text.as_str()) {reason="authority";}
+            let bytes=text.as_bytes();let count=bytes.len().min(left);hash.update(&bytes[..count]);left-=count;if left==0{break;}
+        }
+        Ok(Some(FlowFailureSummary{stage,reason,fingerprint:format!("{:x}",hash.finalize()),suppressed:std::mem::take(&mut self.suppressed)}))
+    }
+}
 impl Background {
     pub(crate) async fn run(mut self) -> Result<()> {
         let mut flows = tokio::task::JoinSet::new();
+        let mut failure_reporter=FlowFailureReporter::default();
         let mut native = tokio::task::JoinSet::new();
         let stop = self.runtime.0.cancel.clone();
         let _owner_guard = stop.clone().drop_guard();
@@ -508,7 +536,7 @@ impl Background {
    _=stop.cancelled()=>break,
    command=self.commands.recv()=>{let Some(command)=command else{break};let runtime=self.runtime.clone();flows.spawn(async move{let(record,result)=match command{Command::Source{record,syn}=>{let result=run_source(&runtime,&record,syn).await;(record,result)},Command::Target{record,key,receiver}=>{let result=run_target(&runtime,&record,key,receiver).await;(record,result)}};record.phase.send_replace(if result.is_ok(){Phase::Retired}else{Phase::Failed});runtime.remove(&record);Runtime::reap_output(&record).await;result});},
    packet=self.packets.recv()=>{let Some(packet)=packet else{if stop.is_cancelled(){break;}anyhow::bail!("native output stack stopped")};let Some(flow)=tcp_stream::Flow::from_packet(packet.bytes())else{continue};let record={let state=self.runtime.0.state.lock().unwrap_or_else(|p|p.into_inner());state.kernel.get(&flow.reverse()).and_then(|id|state.records.get(id)).cloned()};if let Some(record)=record{let _=record.output.try_send(packet);}},
-   finished=flows.join_next(),if !flows.is_empty()=>{if let Some(Err(error))=finished{return Err(error.into());}},
+   finished=flows.join_next(),if !flows.is_empty()=>{if let Some(finished)=finished{if let Some(summary)=failure_reporter.completed(finished,std::time::Instant::now())?{tracing::warn!(stage=summary.stage,reason=summary.reason,error_fingerprint=summary.fingerprint,suppressed=summary.suppressed,"guarded native TCP flow failed");}}},
    finished=native.join_next()=>match finished{Some(Ok(Ok(()))) if stop.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("native runner stopped")},
   }}Ok::<_,anyhow::Error>(())}.await;
         stop.cancel();
@@ -625,17 +653,17 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
         let local =
             current().ok_or_else(|| anyhow::anyhow!("source flow authority unavailable"))?;
         let peer = local.channel_identity().peer().clone();
-        let client = source.endpoint().connect_source(&peer).await?;
-        let opened = flow_open::initiate_native(&client, &source.gate(), &local, &syn).await?;
-        let opening = opened.prepare_source(&runtime.0.native, syn).await?;
+        let client = source.endpoint().connect_source(&peer).await.context("source-connect")?;
+        let opened = flow_open::initiate_native(&client, &source.gate(), &local, &syn).await.context("source-open")?;
+        let opening = opened.prepare_source(&runtime.0.native, syn).await.context("source-native-prepare")?;
         record
             .ingress
             .send_replace(Some(opening.ingress(current.clone())?));
-        let native = opening.established().await?;
+        let native = opening.established().await.context("source-native-established")?;
         record
             .ingress
             .send_replace(Some(native.ingress(current.clone())?));
-        let mut accepted = receiver.endpoint().accept_credited().await?;
+        let mut accepted = receiver.endpoint().accept_credited().await.context("source-response-accept")?;
         let local = current().ok_or_else(|| anyhow::anyhow!("response authority unavailable"))?;
         flow_open::accept_response(
             &mut accepted,
@@ -644,7 +672,7 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
             &opened,
             opened.receiver_key(),
         )
-        .await?;
+        .await.context("source-response-open")?;
         run_duplex(
             runtime,
             record,
@@ -657,7 +685,7 @@ async fn run_source(runtime: &Runtime, record: &Arc<Record>, syn: PendingSyn) ->
             receiver.gate(),
             &mut tasks,
         )
-        .await
+        .await.context("source-duplex")
     };
     let result = tokio::select! {_=record.cancel.cancelled()=>Err(anyhow::anyhow!("source flow owner retired")),result=result=>result};
     record.cancel.cancel();
@@ -686,11 +714,11 @@ async fn run_target(
             runtime.0.events.clone(),
             record.cancel.clone(),
         ));
-        let mut accepted = receiver.endpoint().accept_credited().await?;
+        let mut accepted = receiver.endpoint().accept_credited().await.context("target-accept")?;
         let current = runtime.current(&record.peer);
         let local = current().ok_or_else(|| anyhow::anyhow!("target authority unavailable"))?;
         let opened =
-            flow_open::accept_request(&mut accepted, &receiver.gate(), &local, key).await?;
+            flow_open::accept_request(&mut accepted, &receiver.gate(), &local, key).await.context("target-open")?;
         runtime.bind_kernel(
             record,
             opened
@@ -698,19 +726,19 @@ async fn run_target(
                 .source_native_tuple(Side::Acceptor)
                 .reverse(),
         )?;
-        let opening = opened.prepare_destination(&runtime.0.native).await?;
+        let opening = opened.prepare_destination(&runtime.0.native).await.context("target-native-prepare")?;
         record
             .ingress
             .send_replace(Some(opening.ingress(current.clone())?));
-        let native = opening.established().await?;
+        let native = opening.established().await.context("target-native-established")?;
         record
             .ingress
             .send_replace(Some(native.ingress(current.clone())?));
         let source = attach(runtime, record, opened.source_key(), &mut tasks).await?;
         let peer = local.channel_identity().peer().clone();
-        let client = source.endpoint().connect_source(&peer).await?;
+        let client = source.endpoint().connect_source(&peer).await.context("target-response-connect")?;
         let local = current().ok_or_else(|| anyhow::anyhow!("response authority unavailable"))?;
-        flow_open::initiate_response(&client, &source.gate(), &local, &opened).await?;
+        flow_open::initiate_response(&client, &source.gate(), &local, &opened).await.context("target-response-open")?;
         run_duplex(
             runtime,
             record,
@@ -723,7 +751,7 @@ async fn run_target(
             receiver.gate(),
             &mut tasks,
         )
-        .await
+        .await.context("target-duplex")
     };
     let result = tokio::select! {_=record.cancel.cancelled()=>Err(anyhow::anyhow!("target flow owner retired")),result=result=>result};
     record.cancel.cancel();

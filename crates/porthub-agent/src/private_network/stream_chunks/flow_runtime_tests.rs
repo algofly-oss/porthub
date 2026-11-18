@@ -311,3 +311,25 @@ async fn retired_queued_carrier_is_not_dispatched_and_live_carrier_errors_remain
     ensure!(other.counts()==(0,0),"retired frame allocated ownership");
     Ok(())
 }
+
+#[tokio::test]
+async fn real_failed_flow_completion_reports_bounded_metadata_without_restarting_owner() -> Result<()> {
+    let mut tasks=tokio::task::JoinSet::new();
+    tasks.spawn(async{Err::<(),_>(anyhow::anyhow!("untrusted-private-token-and-payload").context("source-open"))});
+    let mut reporter=FlowFailureReporter::default();
+    let summary=reporter.completed(tasks.join_next().await.unwrap(),std::time::Instant::now())?.unwrap();
+    assert_eq!(summary.stage,"source-open");assert_eq!(summary.reason,"other");assert_eq!(summary.fingerprint.len(),64);
+    assert!(!format!("{summary:?}").contains("untrusted-private-token-and-payload"));
+    tasks.spawn(async{Ok::<_,anyhow::Error>(())});
+    assert!(reporter.completed(tasks.join_next().await.unwrap(),std::time::Instant::now())?.is_none());
+    Ok(())
+}
+#[test]
+fn flow_failure_reports_rate_limit_and_account_for_suppressed_errors() -> Result<()> {
+    let now=std::time::Instant::now();let mut reporter=FlowFailureReporter::default();
+    let fail=||Ok(Err(anyhow::anyhow!("source flow authority unavailable")));
+    assert_eq!(reporter.completed(fail(),now)?.unwrap().reason,"authority");
+    for _ in 0..100 {assert!(reporter.completed(fail(),now+Duration::from_secs(1))?.is_none());}
+    let next=reporter.completed(fail(),now+Duration::from_secs(30))?.unwrap();assert_eq!(next.suppressed,100);
+    assert_eq!(reporter.completed(fail(),now+Duration::from_secs(60))?.unwrap().suppressed,0);Ok(())
+}
