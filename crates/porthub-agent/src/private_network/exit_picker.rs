@@ -16,7 +16,7 @@ const CAPACITY: usize = 256;
 const IDLE: Duration = Duration::from_secs(120);
 const RETRY: Duration = Duration::from_secs(3);
 #[derive(Clone, Default)]
-pub(crate) struct Handle(Arc<Mutex<State>>);
+pub(crate) struct Handle(Arc<Mutex<State>>, Arc<tokio::sync::Notify>);
 #[derive(Default)]
 struct State {
     scope: Option<(String, String, Ipv4Addr, String, String, String, String)>,
@@ -34,6 +34,30 @@ struct Entry {
     choice: Option<(ExitChoice, Authority<()>)>,
 }
 impl Handle {
+    fn due(state: &State, now: Instant) -> bool {
+        if state.scope.is_none() { return false; }
+        if let Some(key) = &state.active {
+            if let Some(entry) = state.entries.get(key) {
+                return entry.choice.is_none() && entry.retry <= now;
+            }
+        }
+        state.entries.values().any(|entry| entry.choice.is_none() && entry.retry <= now)
+    }
+    fn notify_due(&self, state: &State) {
+        if Self::due(state, Instant::now()) { self.1.notify_one(); }
+    }
+    /// Checking state before parking plus Notify's stored permit closes the
+    /// request/registration race. Repeated packet polls never create demand.
+    pub(crate) fn has_due(&self) -> bool {
+        Self::due(&self.0.lock().unwrap(), Instant::now())
+    }
+    pub(crate) async fn demand(&self) {
+        loop {
+            if self.has_due() { return; }
+            self.1.notified().await;
+        }
+    }
+
     pub(crate) fn observe(&self, base: &Snapshot) {
         let mut state = self.0.lock().unwrap();
         let scope = base
@@ -124,6 +148,7 @@ impl Handle {
                 entry.started = false;
                 entry.request.cursor = None;
                 entry.retry = now;
+                self.notify_due(&state);
             }
             return None;
         }
@@ -160,6 +185,7 @@ impl Handle {
                 choice: None,
             },
         );
+        self.notify_due(&state);
         None
     }
     /// One control RPC per sync. Carrier availability is fixed throughout a
@@ -271,6 +297,7 @@ impl Handle {
         if response.status != ExitPickStatus::Pending {
             state.active = None;
         }
+        self.notify_due(&state);
         Ok(())
     }
     /// A definitive cursor rejection discards only this fold; unrelated
@@ -297,6 +324,7 @@ impl Handle {
         if state.active.as_ref() == Some(&key) {
             state.active = None;
         }
+        self.notify_due(&state);
     }
 }
 
@@ -368,6 +396,29 @@ mod tests {
             lease: None,
             cursor: (status == ExitPickStatus::Pending).then(|| "cursor-1".into()),
         }
+    }
+    #[tokio::test]
+    async fn demand_covers_before_and_after_wait_registration_without_packet_poll_wakes() {
+        let handle = Handle::default();
+        handle.observe(&base());
+        let dst = "1.1.1.1".parse().unwrap();
+        let first = "a".repeat(64);
+        handle.request("route", &first, dst, false);
+        tokio::time::timeout(Duration::from_millis(100),handle.demand()).await.unwrap();
+        let sent = handle.next(true,None).unwrap();
+        for _ in 0..1000 { handle.request("route", &first, dst, false); }
+        assert!(tokio::time::timeout(Duration::from_millis(10),handle.demand()).await.is_err());
+        handle.accept(&sent,reply(&sent,ExitPickStatus::Pending),authority(Arc::new(Clock(AtomicU64::new(0))))).unwrap();
+        tokio::time::timeout(Duration::from_millis(100),handle.demand()).await.unwrap();
+        let sent = handle.next(true,None).unwrap();
+        handle.accept(&sent,reply(&sent,ExitPickStatus::Ready),authority(Arc::new(Clock(AtomicU64::new(0))))).unwrap();
+        let parked=handle.clone();
+        let waiter=tokio::spawn(async move{parked.demand().await});
+        tokio::task::yield_now().await;
+        handle.request("route", &"b".repeat(64), dst, false);
+        tokio::time::timeout(Duration::from_millis(100),waiter).await.unwrap().unwrap();
+        handle.revoke();
+        assert!(tokio::time::timeout(Duration::from_millis(10),handle.demand()).await.is_err());
     }
     #[test]
     fn tcp_tuple_reuse_has_distinct_correlation_and_stale_carriers_are_not_ready() {

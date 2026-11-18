@@ -436,6 +436,7 @@ pub(crate) async fn run_watched_sparse_owned(
             },
             Err(_) => {}
         }
+        let successful_sync = reply.is_some();
         if let Some(mut reply) = reply {
             stream_offer.observe_reply(&reply.snapshot,&reply.stream_protocols);
             let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
@@ -720,16 +721,101 @@ pub(crate) async fn run_watched_sparse_owned(
         } else {
             1
         };
-        tokio::select! {
-            _=cancel.cancelled()=>return Ok(()),
-            changed=interfaces.changed(), if interface_changes_open=>{
-                if changed.is_err() { interface_changes_open=false; }
+        let picker = sparse.as_ref().map(|resolver|resolver.handle().exit_picker());
+        let ordinary = async {
+            tokio::select! {
+                changed=interfaces.changed(), if interface_changes_open=>{
+                    if changed.is_err() { interface_changes_open=false; }
+                },
+                _=async{if let Some(resolver)=&sparse{resolver.demand().await}else{std::future::pending::<()>().await}}=>{},
+            }
+        };
+        if !wait_cycle(cycle_started,sparse.is_some(),successful_sync,Duration::from_secs(interval),&cancel,picker,ordinary).await { return Ok(()); }
+
+    }
+}
+
+/// One shared wait path for production and paused-time scheduling regressions.
+async fn wait_cycle(
+    start: tokio::time::Instant,
+    sparse: bool,
+    successful: bool,
+    interval: Duration,
+    cancel: &CancellationToken,
+    picker: Option<super::exit_picker::Handle>,
+    ordinary: impl std::future::Future<Output=()>,
+) -> bool {
+    tokio::select! {
+        _=cancel.cancelled()=>return false,
+        _=tokio::time::sleep(interval)=>{},
+        _=ordinary=>{},
+        _=async{if let Some(picker)=&picker{picker.demand().await}else{std::future::pending::<()>().await}}, if successful=>{},
+    }
+    // Due state is the final truth, even if another wake wins the select.
+    let fast=successful && picker.as_ref().is_some_and(|picker|picker.has_due());
+    if sparse {
+        tokio::select!{
+            _=cancel.cancelled()=>return false,
+            _=tokio::time::sleep_until(sync_deadline(start,fast))=>{},
+            _=async{if let Some(picker)=&picker{picker.demand().await}else{std::future::pending::<()>().await}}, if successful && !fast=>{
+                if picker.as_ref().is_some_and(|picker|picker.has_due()) {
+                    tokio::select!{_=cancel.cancelled()=>return false,_=tokio::time::sleep_until(sync_deadline(start,true))=>{}}
+                }
             },
-            _=tokio::time::sleep(Duration::from_secs(interval))=>{},_=async{if let Some(resolver)=&sparse{resolver.demand().await}else{std::future::pending::<()>().await}}=>{}
         }
-        // Miss notifications coalesce; a local packet flood cannot turn lookup into an
-        // unbounded HTTP loop or starve ordinary lease renewal/other registrations.
-        if sparse.is_some(){tokio::select!{_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep_until(cycle_started+Duration::from_secs(1))=>{}}}
+    }
+    true
+}
+
+fn sync_deadline(start: tokio::time::Instant, picker_demand: bool) -> tokio::time::Instant {
+    start + if picker_demand { Duration::from_millis(100) } else { Duration::from_secs(1) }
+}
+
+#[cfg(test)]
+mod picker_schedule_tests {
+    use super::*;
+    fn picker() -> super::super::exit_picker::Handle {
+        let handle=super::super::exit_picker::Handle::default();
+        let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),
+            "sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64),"selection_epoch":"c".repeat(64),"exit_intents":[{"id":"route","name":"Exit","role":"client","selection":"sticky","traffic_mode":"internet_only","allow_direct_fallback":false,"tor_enabled":true,"tor_circuit_groups":4}]},
+            "peers":[{"id":"a","ip":"10.234.0.1","fingerprint":"fp-a","instance":"a-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+        handle.observe(&base); handle
+    }
+    #[tokio::test(start_paused=true)]
+    async fn actual_wait_bounds_active_cycles_and_retains_failed_sync_floor() {
+        let picker=picker(); let cancel=CancellationToken::new();
+        picker.request("route",&"a".repeat(64),"1.1.1.1".parse().unwrap(),false);
+        let start=tokio::time::Instant::now();
+        for n in 0..10 {
+            let cycle=tokio::time::Instant::now();
+            assert!(wait_cycle(cycle,true,true,Duration::from_secs(5),&cancel,Some(picker.clone()),std::future::pending()).await);
+            assert_eq!(tokio::time::Instant::now()-start,Duration::from_millis((n+1)*100));
+        }
+        let cycle=tokio::time::Instant::now();
+        assert!(wait_cycle(cycle,true,false,Duration::from_millis(1),&cancel,Some(picker),std::future::pending()).await);
+        assert_eq!(tokio::time::Instant::now()-cycle,Duration::from_secs(1));
+    }
+    #[tokio::test(start_paused=true)]
+    async fn new_picker_demand_interrupts_an_already_waiting_normal_floor() {
+        let picker=picker();let cancel=CancellationToken::new();
+        let producer=picker.clone();
+        tokio::spawn(async move{
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            producer.request("route",&"a".repeat(64),"1.1.1.1".parse().unwrap(),false);
+        });
+        let start=tokio::time::Instant::now();
+        assert!(wait_cycle(start,true,true,Duration::from_secs(5),&cancel,Some(picker),async{}).await);
+        assert_eq!(tokio::time::Instant::now()-start,Duration::from_millis(100));
+    }
+    #[tokio::test(start_paused=true)]
+    async fn actual_idle_wait_stays_parked_and_cancellation_is_prompt() {
+        let picker=picker(); let cancel=CancellationToken::new();
+        let cycle=tokio::time::Instant::now();
+        assert!(wait_cycle(cycle,true,true,Duration::from_secs(5),&cancel,Some(picker.clone()),std::future::pending()).await);
+        assert_eq!(tokio::time::Instant::now()-cycle,Duration::from_secs(5));
+        let task=tokio::spawn({let cancel=cancel.clone();async move{wait_cycle(tokio::time::Instant::now(),true,true,Duration::from_secs(5),&cancel,Some(picker),std::future::pending()).await}});
+        tokio::task::yield_now().await; cancel.cancel();
+        assert!(!task.await.unwrap());
     }
 }
 
