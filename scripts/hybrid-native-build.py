@@ -354,8 +354,11 @@ def worker(root, source, output, tools=None, timeout=840):
                 '--root', str(root), '--source-revision', source, '--output', str(builds), '--execute']
         for tool in tools or []:
             argv += ['--tool', tool]
+        environment = os.environ.copy()
+        environment['CARGO_TARGET_DIR'] = str(temporary/'target')
+        environment['PORTHUB_TERMINAL_HELPER_CACHE_ROOT'] = str(temporary/'terminal-cache')
         with (temporary/'build.log').open('wb') as log:
-            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            process = subprocess.Popen(argv, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=os.name != 'nt', creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
             try:
                 status = process.wait(timeout=min(1700,max(1,timeout)))

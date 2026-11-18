@@ -171,13 +171,17 @@ class HybridTests(unittest.TestCase):
     def test_worker_timeout_reaps_only_owned_build_tree(self):
         process = Mock(pid=123456)
         process.wait.side_effect = [subprocess.TimeoutExpired(['owned'],1),0]
-        with tempfile.TemporaryDirectory() as temporary, patch.object(h,'load') as loader, patch.object(h.subprocess,'Popen',return_value=process), patch.object(h.os,'killpg') as kill:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(h,'load') as loader, patch.object(h.subprocess,'Popen',return_value=process) as launch, patch.object(h.os,'killpg') as kill:
             loader.return_value.native_target.return_value = TARGET
             output=Path(temporary)/'artifact.zip'
             with self.assertRaises(subprocess.TimeoutExpired):
                 h.worker(Path(temporary),SOURCE,output,timeout=1)
             self.assertFalse(output.exists())
             if h.os.name != 'nt': kill.assert_called_once_with(123456,h.signal.SIGKILL)
+            for variable in ('CARGO_TARGET_DIR', 'PORTHUB_TERMINAL_HELPER_CACHE_ROOT'):
+                cache = Path(launch.call_args.kwargs['env'][variable])
+                self.assertEqual(cache.parent.parent, output.parent)
+                self.assertFalse(cache.parent.exists())
             self.assertEqual(process.wait.call_count,2)
 
     def test_urls_disallow_credentials_and_plain_http(self):
