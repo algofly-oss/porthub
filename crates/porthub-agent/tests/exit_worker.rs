@@ -304,6 +304,96 @@ async fn paired_native_tcp(role:&str)->Result<()> {
     Ok(())
 }
 
+// Application-side observation only: the normal unified runtime owns every
+// private address, report, grant and reopen. No policy/native ACK is injected.
+async fn renumber_control(command:&str)->Result<String>{
+    let (mut stream,_)=open(&std::env::var("PORTHUB_TEST_CONTROL_TARGET")?).await?;
+    stream.get_mut().write_all(format!("{command}\n").as_bytes()).await?;
+    let mut line=String::new();tokio::time::timeout(Duration::from_secs(3),stream.read_line(&mut line)).await??;
+    ensure!(line.len()<=4096,"owned renumber control response exceeds bound");Ok(line.trim().to_owned())
+}
+async fn renumber_state()->Result<serde_json::Value>{Ok(serde_json::from_str(&renumber_control("renumber:state").await?)?)}
+async fn renumber_tcp(target:std::net::Ipv4Addr,payload:&[u8])->Result<()>{
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(3),async{
+        let mut stream=TcpStream::connect((target,443)).await?;
+        stream.write_all(&(payload.len()as u16).to_be_bytes()).await?;stream.write_all(payload).await?;stream.shutdown().await?;
+        let mut got=vec![0;payload.len()];stream.read_exact(&mut got).await?;ensure!(got==payload,"new private TCP payload mismatch");
+        let mut end=[0];ensure!(stream.read(&mut end).await?==0,"private TCP FIN not received");Ok::<(),anyhow::Error>(())
+    }).await.context("owned renumber TCP DATA/FIN deadline")?
+}
+async fn renumber_provider()->Result<()>{
+    use tokio::io::AsyncReadExt;
+    let tcp=tokio::net::TcpListener::bind("0.0.0.0:443").await?;let udp=tokio::net::UdpSocket::bind("0.0.0.0:443").await?;
+    let mut tick=tokio::time::interval(Duration::from_millis(100));let mut bytes=[0;256];let mut tcp_transactions=0usize;let mut udp_transactions=0usize;
+    tokio::time::timeout(Duration::from_secs(180),async{loop{tokio::select!{
+        accepted=tcp.accept()=>{let(mut stream,_)=accepted?;tokio::time::timeout(Duration::from_secs(3),async{
+            let mut size=[0;2];stream.read_exact(&mut size).await?;let n=usize::from(u16::from_be_bytes(size));ensure!(n>0&&n<=256,"owned app payload bound");
+            let mut value=vec![0;n];stream.read_exact(&mut value).await?;let mut end=[0];ensure!(stream.read(&mut end).await?==0,"owned app request FIN absent");stream.write_all(&value).await?;stream.shutdown().await?;Ok::<(),anyhow::Error>(())
+        }).await??;tcp_transactions+=1;},
+        received=udp.recv_from(&mut bytes)=>{let(n,peer)=received?;udp.send_to(&bytes[..n],peer).await?;udp_transactions+=1;},
+        _=tick.tick()=>{if renumber_control("native:consumer-done?").await?=="ready"{break;}}
+    }}ensure!(tcp_transactions==2&&udp_transactions==1,"owned provider saw unexpected pre/post-renumber delivery");println!("native_auto_renumber provider_tcp_transactions=2 provider_udp_transactions=1");Ok::<(),anyhow::Error>(())}).await.context("owned renumber provider deadline")?
+}
+async fn renumber_udp_seen(tun:&porthub_agent::private_network::device::Tun,source:std::net::Ipv4Addr,target:std::net::Ipv4Addr)->Result<bool>{
+    match tokio::time::timeout(Duration::from_millis(250),async{
+        let mut packet=[0;2048];for _ in 0..32{let n=tun.read(&mut packet).await?;if n>=28&&packet[0]>>4==4&&packet[9]==17&&packet[12..16]==source.octets()&&packet[16..20]==target.octets(){return Ok::<bool,anyhow::Error>(true)}}
+        anyhow::bail!("unexpected packet volume on exact owned foreign sentinel")
+    }).await{Ok(result)=>result,Err(_)=>Ok(false)}
+}
+async fn renumber_consumer(profile:&porthub_agent::private_profile::Profile,path:&std::path::Path)->Result<()>{
+    use std::net::Ipv4Addr;
+    use nlink::netlink::{Connection,Route,route::Ipv4Route,types::route::RouteScope};
+    use sha2::{Digest,Sha256};
+    let nonce=std::env::var("PORTHUB_TEST_FIXTURE_NONCE")?;ensure!(nonce.starts_with("porthub-exit-test-")&&nonce.len()<80,"owned renumber nonce missing");
+    let payload=format!("private-renumber-{nonce}").into_bytes();let connection=Connection::<Route>::new()?;
+    let initial=tokio::time::timeout(Duration::from_secs(60),async{loop{let state=renumber_state().await?;if state["ready"]==true{return Ok::<_,anyhow::Error>(state)}tokio::time::sleep(Duration::from_millis(100)).await;}}).await.context("initial native renumber peers not ready")??;
+    let old:Ipv4Addr=initial["source"].as_str().context("old source missing")?.parse()?;let old_peer:Ipv4Addr=initial["target"].as_str().context("old target missing")?.parse()?;
+    ensure!(old==Ipv4Addr::new(10,234,240,10)&&old_peer==Ipv4Addr::new(10,234,240,11),"initial native assignments differ");
+    renumber_tcp(old_peer,&payload).await?;
+    let old_socket=tokio::net::UdpSocket::bind((old,0)).await?;old_socket.connect((old_peer,443)).await?;old_socket.send(&payload).await?;
+    let mut response=[0;256];let n=tokio::time::timeout(Duration::from_secs(3),old_socket.recv(&mut response)).await??;ensure!(&response[..n]==payload,"initial owned UDP failed");
+    println!("native_auto_renumber phase=initial_private_tcp_udp_ready");
+    let foreign_name=format!("rf{:x}",Sha256::digest(nonce.as_bytes()));let foreign_name=&foreign_name[..10];
+    ensure!(connection.get_link_by_name(foreign_name).await?.is_none(),"foreign sentinel name occupied");
+    let foreign=porthub_agent::private_network::device::Tun::open(foreign_name,Ipv4Addr::new(10,254,252,1),&[]).await?;
+    let result=tokio::time::timeout(Duration::from_secs(120),async{
+        let destination=Ipv4Addr::new(10,234,240,0);
+        connection.add_route(Ipv4Route::new(destination,24).dev_index(foreign.index).scope(RouteScope::Link).metric(7)).await?;
+        let read_sentinel=||async{let rows=connection.get_routes().await?;let rows:Vec<_>=rows.iter().filter(|r|r.destination()==Some(&IpAddr::V4(destination))&&r.dst_len()==24&&r.oif()==Some(foreign.index)&&r.priority()==Some(7)).collect();ensure!(rows.len()==1,"owned sentinel route missing/ambiguous");Ok::<_,anyhow::Error>(format!("{:?}",rows[0]))};
+        let stamp=read_sentinel().await?;
+        let tun_name=format!("ph{}",&format!("{:x}",Sha256::digest(profile.peer_id.as_bytes()))[..8]);
+        let quarantine=porthub_agent::profile::sibling(path,".native-quarantine.json");
+        let mut old_absent=false;let mut quarantined=false;let mut report_observed=false;let mut applying=false;
+        let next=loop{
+            if !old_absent&&connection.get_link_by_name(&tun_name).await?.is_none(){
+                let _old_send=old_socket.send(&payload).await;
+                ensure!(!renumber_udp_seen(&foreign,old,old_peer).await?,"old connected socket escaped during source retirement");old_absent=true;
+            }
+            if let Ok(bytes)=porthub_agent::profile::read_private(&quarantine){ensure!(bytes.len()<=262144,"owned quarantine record bound");let value:serde_json::Value=serde_json::from_slice(&bytes)?;quarantined|=value["retired"].as_array().is_some_and(|a|a.iter().any(|v|v.as_str()==Some(old.to_string().as_str())));}
+            let state=renumber_state().await?;report_observed|=state["report_observed"]==true;applying|=state["generation"].as_u64().unwrap_or(0)>0&&state["stable"]!=true;
+            if state["stable"]==true&&state["generation"].as_u64().unwrap_or(0)>0&&state["ready"]==true&&state["retained"]==true&&state["source_instance"]!=initial["source_instance"]&&state["target_instance"]!=initial["target_instance"]{break state;}
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        ensure!(old_absent&&quarantined&&report_observed&&applying,"missing actual retire/report/worker phase witness");
+        let new_own:Ipv4Addr=next["source"].as_str().context("new source missing")?.parse()?;let new_peer:Ipv4Addr=next["target"].as_str().context("new target missing")?.parse()?;
+        ensure!(new_own!=old&&new_peer!=old_peer&&new_own.is_private()&&new_peer.is_private(),"API did not replace both private assignments");
+        let link=connection.get_link_by_name(&tun_name).await?.context("new native owner missing")?;
+        let addresses=connection.get_addresses_by_index(link.ifindex()).await?;ensure!(addresses.iter().any(|a|a.local()==Some(&IpAddr::V4(new_own))||a.address()==Some(&IpAddr::V4(new_own))),"new API assignment not installed natively");
+        let _old_send=old_socket.send(&payload).await;ensure!(!renumber_udp_seen(&foreign,old,old_peer).await?,"old connected socket escaped foreign route before new traffic");
+        renumber_tcp(new_peer,&payload).await?;
+        let _old_send=old_socket.send(&payload).await;ensure!(!renumber_udp_seen(&foreign,old,old_peer).await?,"old connected socket escaped after reallocation");
+        ensure!(read_sentinel().await?==stamp,"foreign sentinel route changed");
+        ensure!(renumber_control("native:consumer-complete").await?=="updated","consumer completion not acknowledged");
+        println!("native_auto_renumber new_ip_payload=true old_source_no_escape=true foreign_route_preserved=true");
+        println!("native_auto_renumber real_report=true real_worker=true identity_rebound=true os_dns_combined=false");Ok::<(),anyhow::Error>(())
+    }).await.context("actual native auto-renumber deadline").and_then(|r|r);
+    drop(foreign);
+    let cleanup=tokio::time::timeout(Duration::from_secs(2),async{while connection.get_link_by_name(foreign_name).await?.is_some(){tokio::time::sleep(Duration::from_millis(20)).await;}Ok::<(),anyhow::Error>(())}).await;
+    if !matches!(cleanup,Ok(Ok(()))){return Err(result.err().unwrap_or_else(||anyhow::anyhow!("owned foreign sentinel cleanup failed")).context("foreign sentinel cleanup failed"));}
+    result
+}
+
 #[tokio::test]
 #[ignore = "worker for verify-exit-network.py; disposable owned namespace only"]
 async fn isolated_exit_worker() -> Result<()> {
@@ -317,7 +407,7 @@ async fn isolated_exit_worker() -> Result<()> {
     let path = std::path::PathBuf::from(format!("/state/{id}.json"));
     porthub_agent::profile::write_private(&path, profile.as_bytes(), false)?;
     let role = std::env::var("PORTHUB_TEST_ROLE")?;
-    if role.starts_with("private-")||role.starts_with("relay-origin-") {
+    if role.starts_with("private-")||role.starts_with("relay-origin-")||role.starts_with("renumber-") {
         porthub_agent::private_network::strategy::save(&path,porthub_agent::private_network::strategy::Mode::PreferGateway)?;
     }
     let cancel = CancellationToken::new();
@@ -368,7 +458,12 @@ async fn isolated_exit_worker() -> Result<()> {
     if role=="relay-origin-provider"||role=="relay-origin-consumer" {
         tokio::select!{result=relay_private_bootstrap()=>result?,result=&mut runtime=>anyhow::bail!("agent stopped during ordinary private bootstrap: {result:?}")}
     }
-    let result = if role=="private-provider"||role=="private-consumer" {
+    let result = if role=="renumber-consumer"||role=="renumber-provider" {
+        tokio::select!{
+            result=async{if role=="renumber-consumer"{renumber_consumer(&private,&path).await}else{renumber_provider().await}}=>result,
+            result=&mut runtime=>anyhow::bail!("agent stopped during actual renumber: {result:?}"),
+        }
+    } else if role=="private-provider"||role=="private-consumer" {
         tokio::select! {
             result=paired_native_tcp(&role)=>result,
             result=&mut runtime=>anyhow::bail!("agent stopped during native paired test: {result:?}"),

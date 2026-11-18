@@ -25,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sparse', action='store_true')
     parser.add_argument('--worker-profile', choices=['test', 'agent-dev'], default='test', help='explicit worker-only profile; host API fixture remains test profile')
-    parser.add_argument('--scenario', choices=['exits', 'peers', 'relay-origin'], default='exits')
+    parser.add_argument('--scenario', choices=['exits', 'peers', 'relay-origin', 'renumber'], default='exits')
     parser.add_argument('--source', required=True, help='exact immutable source SHA')
     parser.add_argument('--image', required=True, help='existing local sha256 image ID; no pull/build')
     parser.add_argument('--receipt', required=True)
@@ -131,7 +131,7 @@ def main():
                    PORTHUB_TEST_WORKER_BINARY=artifacts['exit_worker'], PORTHUB_TEST_WORKER_IMAGE=args.image,
                    PORTHUB_TEST_FIXTURE_NONCE=prefix, PORTHUB_TEST_SPARSE='1' if args.sparse else '0',
                    PORTHUB_TEST_RUNTIME_ROOT=str(runtime_root), PORTHUB_TEST_RUNTIME_LOADER=pathlib.Path(loader).name)
-        test = {'exits': 'native_agents_use_two_exits_and_preserve_established_tcp', 'peers': 'native_agents_negotiate_quic3_and_transfer_owned_tcp', 'relay-origin': 'native_relay_exit_first_udp_waits_for_pair_and_native_ack'}[args.scenario]
+        test = {'exits': 'native_agents_use_two_exits_and_preserve_established_tcp', 'peers': 'native_agents_negotiate_quic3_and_transfer_owned_tcp', 'relay-origin': 'native_relay_exit_first_udp_waits_for_pair_and_native_ack', 'renumber': 'native_agents_report_collision_renumber_and_reopen_allowed_private_ip'}[args.scenario]
         proof['test'] = test
         proof['native_executed'] = True
         run([artifacts['exit_network'], '--ignored', '--exact', test, '--nocapture'], cwd=ROOT, env=env, timeout=300)

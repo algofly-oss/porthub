@@ -24,18 +24,24 @@ fn args(values: &[&str]) -> Vec<String> { values.iter().map(|value| (*value).to_
 #[tokio::test]
 #[ignore = "run through scripts/verify-exit-network.py with isolated Docker networks"]
 async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()> {
-    run_network_fixture(false,false).await
+    run_network_fixture(false,false,false).await
 }
 #[tokio::test]
 #[ignore = "run through scripts/verify-exit-network.py --sparse --scenario peers"]
 async fn native_agents_negotiate_quic3_and_transfer_owned_tcp() -> Result<()> {
     ensure!(cfg!(feature="private-sparse"),"paired quic3 fixture requires sparse build");
-    run_network_fixture(true,false).await
+    run_network_fixture(true,false,false).await
 }
 #[tokio::test]
 #[ignore="owned fault-injected relay first-packet gate; use reviewed netns wrapper"]
-async fn native_relay_exit_first_udp_waits_for_pair_and_native_ack()->Result<()>{run_network_fixture(false,true).await}
-async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
+async fn native_relay_exit_first_udp_waits_for_pair_and_native_ack()->Result<()>{run_network_fixture(false,true,false).await}
+#[tokio::test]
+#[ignore="actual collision/API worker/native reopen; reviewed existing Docker wrapper only"]
+async fn native_agents_report_collision_renumber_and_reopen_allowed_private_ip()->Result<()>{
+    ensure!(cfg!(feature="private-sparse"),"native renumber requires sparse build");
+    run_network_fixture(true,false,true).await
+}
+async fn run_network_fixture(paired:bool,gated:bool,renumber:bool)->Result<()> {
     let network = std::env::var("PORTHUB_TEST_CONTROL_NETWORK")?;
     let external = std::env::var("PORTHUB_TEST_EXTERNAL_NETWORK")?;
     ensure!(network.starts_with("porthub-exit-test-") && external.starts_with("porthub-exit-test-"), "requires owned test networks");
@@ -63,8 +69,29 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
     let owner=match case.user("exit-network@example.invalid", "user").await {
         Ok((owner,_))=>owner,Err(error)=>{case.db.drop().await?;return Err(error);}
     };
-    let api = tokio::spawn(axum::serve(listener, case.router.clone()).into_future());
+    let ids:Vec<_>=(0..if paired{2}else{3}).map(|_|ObjectId::new()).collect();
+    let repair_seen=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router=if renumber {
+        let observed=repair_seen.clone();let report_source=format!("{owner}:{}",ids[0]);
+        case.router.clone().layer(axum::middleware::from_fn(move |request:axum::http::Request<axum::body::Body>,next:axum::middleware::Next|{
+            let observed=observed.clone();let report_source=report_source.clone();async move {
+                if request.method()!=axum::http::Method::POST||request.uri().path()!="/api/access/private/sync"{return Ok::<_,axum::http::StatusCode>(next.run(request).await);}
+                let(parts,body)=request.into_parts();let bytes=axum::body::to_bytes(body,65536).await.map_err(|_|axum::http::StatusCode::PAYLOAD_TOO_LARGE)?;
+                let value=serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                let report=value.as_ref().filter(|v|v["peer_id"].as_str()==Some(report_source.as_str())).and_then(|v|serde_json::from_value::<porthub_network::native_repair::Request>(v["native_repair"].clone()).ok());
+                let matched=report.is_some_and(|r|r.validate().is_ok()&&r.source==std::net::Ipv4Addr::new(10,234,240,10)&&r.blocked.iter().any(|p|p.to_string()=="10.234.224.0/19"));
+                let response=next.run(axum::http::Request::from_parts(parts,axum::body::Body::from(bytes))).await;
+                // Observe only a genuine network request accepted by the real
+                // authenticated route. No test report/queue/ACK is published.
+                if matched&&response.status().is_success(){observed.store(true,std::sync::atomic::Ordering::SeqCst);}
+                Ok::<_,axum::http::StatusCode>(response)
+            }
+        }))
+    }else{case.router.clone()};
+    let api = tokio::spawn(axum::serve(listener, router).into_future());
     let cancel = CancellationToken::new();
+    let (recovery_stop,recovery_stopping)=tokio::sync::watch::channel(false);
+    let recovery=renumber.then(||tokio::spawn(porthub_api::private_renumber::worker::run(case.app.clone(),recovery_stopping)));
     let mut containers: Vec<String> = Vec::new();
     let udp_cancel = cancel.clone();
     let udp_received=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let udp_count=udp_received.clone();let expected_udp=format!("relay-origin-first-{nonce}");
@@ -81,7 +108,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     });
-    let ids:Vec<_>=(0..if paired{2}else{3}).map(|_|ObjectId::new()).collect();
+    let control_ids=ids.clone();
     let exit_id = ObjectId::new();
     let app = case.app.clone();
     let stopped = cancel.clone();
@@ -91,7 +118,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
         let mut connections=tokio::task::JoinSet::new();
         loop {
             let (mut stream, peer) = tokio::select! { _ = stopped.cancelled() => break, value = target_listener.accept() => value?, value = control_listener.accept() => value? };
-            let app = app.clone(); let stopped = stopped.clone(); let test_network = test_network.clone();let peer_complete=peer_complete.clone();
+            let app = app.clone(); let stopped = stopped.clone(); let test_network = test_network.clone();let peer_complete=peer_complete.clone();let control_ids=control_ids.clone();let repair_seen=repair_seen.clone();
             connections.spawn(async move {
                 stream.write_all(format!("{}\n", peer.ip()).as_bytes()).await?;
                 let mut stream = BufReader::new(stream);
@@ -105,7 +132,14 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
                         stream.get_mut().shutdown().await?;
                         break;
                     }
-                    let response = if line.trim()=="native:consumer-complete" {
+                    let response = if renumber&&line.trim()=="renumber:state" {
+                        let own_id=format!("{owner}:{}",control_ids[0]);let target_id=format!("{owner}:{}",control_ids[1]);
+                        let own=app.collection("private_peers").find_one(doc!{"_id":&own_id}).await?.context("owned renumber source missing")?;
+                        let target=app.collection("private_peers").find_one(doc!{"_id":&target_id}).await?.context("owned renumber target missing")?;
+                        let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?;
+                        let retained=app.collection("private_retired_sources").count_documents(doc!{"workspace":owner.to_hex(),"activated":true}).await?>0;
+                        format!("{}\n",json!({"source":own.get_str("ip")?,"target":target.get_str("ip")?,"source_instance":own.get_str("instance").unwrap_or(""),"target_instance":target.get_str("instance").unwrap_or(""),"ready":own.get_str("stream_transport").ok()==Some("quic3-credit")&&target.get_str("stream_transport").ok()==Some("quic3-credit"),"generation":head.as_ref().and_then(|h|h.get_i64("generation").ok()).unwrap_or(0),"stable":head.as_ref().is_some_and(|h|h.get_str("state").ok()==Some("stable")),"report_observed":repair_seen.load(std::sync::atomic::Ordering::SeqCst),"retained":retained}))
+                    } else if line.trim()=="native:consumer-complete" {
                         peer_complete.store(true,std::sync::atomic::Ordering::SeqCst);"updated\n".to_owned()
                     } else if line.trim()=="native:consumer-done?" {
                         if peer_complete.load(std::sync::atomic::Ordering::SeqCst){"ready\n".to_owned()}else{"waiting\n".to_owned()}
@@ -147,9 +181,11 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"name":format!("exit-test-{i}"),"token":"unified-public-fixture-token"}).await?;
             case.app.collection("private_peers").insert_one(doc! {"_id":format!("{owner}:{machine}"),"workspace_id":owner,"machine_id":machine,"owner_id":owner,
                 "ip":format!("10.234.240.{}",i+10),"enabled":true,"credential_hash":token_digest(token)}).await?;
+            if renumber{case.app.collection("private_peers").update_one(doc!{"_id":format!("{owner}:{machine}")},doc!{"$set":{"enrollment_generation":"owned-native-renumber-v1","custom_hostname":format!("stable-{i}.phub")}}).await?;}
         }
         if cfg!(feature="private-sparse") {
             case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.234.224.0/19","dns_suffix":"phub"}).await?;
+            if renumber{case.app.collection("private_networks").update_one(doc!{"_id":owner.to_hex()},doc!{"$set":{"native_fixture_preference":"preserved"}}).await?;}
         }
         if gated {
             let group=ObjectId::new();let book=ObjectId::new();
@@ -162,9 +198,13 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
             case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,
                 "rules":[{"id":"native443","name":"Owned paired native stream","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"tcp","ports":"443","bidirectional":true,"enabled":true}]}).await?;
+            if renumber{case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$push":{"rules":{"id":"native-udp443","name":"Owned renumber UDP","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"udp","ports":"443","bidirectional":true,"enabled":true}}}).await?;}
         } else {case.app.collection("private_exit_nodes").insert_one(doc! {"_id":exit_id,"workspace_id":owner,"name":"Two exits","enabled":true,"selection":"round_robin",
             "routing_selectors":ids.iter().skip(1).take(if gated{1}else{2}).map(|id|doc!{"kind":"machine","id":id.to_hex()}).collect::<Vec<_>>(),
             "distribution_selectors":[{"kind":"machine","id":ids[0].to_hex()}]}).await?;}
+        let identity_projection=doc!{"_id":1,"workspace_id":1,"machine_id":1,"owner_id":1,"enabled":1,"credential_hash":1,"enrollment_generation":1,"custom_hostname":1};
+        let mut identity_before=Vec::new();if renumber{for id in &ids{identity_before.push(case.app.collection("private_peers").find_one(doc!{"_id":format!("{owner}:{id}")}).projection(identity_projection.clone()).await?.context("fixture identity missing")?);}}
+        let rules_before=if renumber{case.app.collection("access_rulebooks").find_one(doc!{"user_id":owner}).await?}else{None};
         let order:Vec<usize>=if gated{vec![2,1,0]}else if paired{vec![1,0]}else{vec![1,2,0]};
         for i in order {
             let name = format!("{network}-node-{i}");
@@ -175,7 +215,7 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             let runtime_mount=format!("type=bind,src={runtime_root},dst=/fixture-runtime,readonly");
             let entrypoint=format!("/fixture-runtime/{runtime_loader}");
             let env_profile = format!("PORTHUB_TEST_PROFILE={profile}");
-            let env_role = format!("PORTHUB_TEST_ROLE={}", if gated{if i==0{"relay-origin-consumer"}else if i==1{"relay-origin-provider"}else{"relay-origin-bootstrap"}}else if paired{if i==0{"private-consumer"}else{"private-provider"}}else if i==0{"consumer"}else{"exit"});
+            let env_role = format!("PORTHUB_TEST_ROLE={}", if renumber{if i==0{"renumber-consumer"}else{"renumber-provider"}}else if gated{if i==0{"relay-origin-consumer"}else if i==1{"relay-origin-provider"}else{"relay-origin-bootstrap"}}else if paired{if i==0{"private-consumer"}else{"private-provider"}}else if i==0{"consumer"}else{"exit"});
             let env_gate=format!("PORTHUB_TEST_PROVIDER_GATE={}",if gated&&i==1{"1"}else{"0"});
             let env_bootstrap_source=format!("PORTHUB_TEST_RELAY_BOOTSTRAP_SOURCE=10.234.240.{}",i+10);
             let env_peer_target="PORTHUB_TEST_PEER_TARGET=10.234.240.11:443";
@@ -229,6 +269,14 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
             println!("{logs}");println!("fault_injected_relay payload=true negotiated_origin=true single_udp=true native_write_after_ack=true");
         }
 
+        if renumber {
+            ensure!(logs.contains("native_auto_renumber new_ip_payload=true old_source_no_escape=true foreign_route_preserved=true"),"native renumber consumer witness missing");
+            for (id,before) in ids.iter().zip(&identity_before){ensure!(case.app.collection("private_peers").find_one(doc!{"_id":format!("{owner}:{id}")}).projection(identity_projection.clone()).await?.as_ref()==Some(before),"renumber changed enrollment identity/credentials");}
+            ensure!(case.app.collection("access_rulebooks").find_one(doc!{"user_id":owner}).await?==rules_before,"renumber changed rules");
+            let prefs=case.app.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.context("renumber preferences missing")?;
+            ensure!(prefs.get_str("dns_suffix")?=="phub"&&prefs.get_str("native_fixture_preference")?=="preserved","renumber changed DNS/preference identity");
+            println!("actual_gateway_worker_renumber identity_credentials_rules_dns_preserved=true os_dns_combined=false");
+        }
         if paired {
             let provider=containers.first().context("native provider absent")?;
             let status=tokio::time::timeout(Duration::from_secs(10),docker(args(&["wait",provider]))).await.context("native provider did not finish after consumer verification")??;
@@ -267,8 +315,14 @@ async fn run_network_fixture(paired:bool,gated:bool)->Result<()> {
     if !api_join.is_err_and(|error|error.is_cancelled()){cleanup_errors.push("api-reap");}
     if !matches!(server.await,Ok(Ok(()))){cleanup_errors.push("fixture-server-reap");}
     if !matches!(udp_server.await,Ok(Ok(()))){cleanup_errors.push("fixture-udp-reap");}
+    if let Some(mut recovery)=recovery{
+        let _=recovery_stop.send(true);
+        if !matches!(tokio::time::timeout(Duration::from_secs(5),&mut recovery).await,Ok(Ok(()))){
+            recovery.abort();let _=recovery.await;cleanup_errors.push("renumber-worker-reap");
+        }
+    }
     if case.db.drop().await.is_err(){cleanup_errors.push("case-db-drop");}
-    println!("owned_native_fixture_cleanup={} scenario={}",cleanup_errors.is_empty(),if paired{"peers"}else{"exits"});
+    println!("owned_native_fixture_cleanup={} scenario={}",cleanup_errors.is_empty(),if renumber{"renumber"}else if paired{"peers"}else{"exits"});
     if !cleanup_errors.is_empty(){return Err(result.err().unwrap_or_else(||anyhow::anyhow!("native fixture cleanup failed")).context(format!("fixture cleanup categories: {cleanup_errors:?}")));}
     result
 }
