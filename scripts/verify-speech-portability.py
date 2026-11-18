@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Verify the exact ARM native build and stage its isolated, static FFI probe."""
-import hashlib, json, pathlib, re, shutil, subprocess
+"""Verify the exact portable native build and stage its isolated, static FFI probe."""
+import hashlib, json, pathlib, re, shutil, subprocess, sys
 root = pathlib.Path(__file__).resolve().parents[1]
-target = 'aarch64-unknown-linux-musl'
+target = sys.argv[1] if len(sys.argv)>1 else 'aarch64-unknown-linux-musl'
+assert target in ('aarch64-unknown-linux-musl','x86_64-unknown-linux-musl')
+arch = 'arm64' if target.startswith('aarch64-') else 'x86_64'
 release = root / 'target' / target / 'release'
 rows = [json.loads(line) for line in (release / 'speech-probe-build.jsonl').read_text().splitlines() if line.startswith('{')]
 def local(path):
@@ -20,14 +22,23 @@ build = local(builds[0]['out_dir']) / 'build'
 cache = build / 'CMakeCache.txt'
 values = dict(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*):[^=\r\n]+=([^\r\n]*)$', cache.read_text(), re.M))
 assert values.get('GGML_NATIVE') == 'OFF'
-assert values.get('GGML_CPU_ARM_ARCH') == 'armv8-a'
 flags = list(build.rglob('ggml-cpu.dir/flags.make'))
 assert len(flags) == 1
 text = flags[0].read_text()
 isa = sorted(set(re.findall(r'-(?:march|mcpu|mtune)=[^\s]+', text)))
-assert '-march=armv8-a' in isa
-assert all(flag in ('-march=armv8-a',) for flag in isa), 'unexpected CPU architecture tuning'
-assert not re.search(r'\+(?:sve|sme|i8mm|bf16)', text)
+if arch == 'arm64':
+    assert values.get('GGML_CPU_ARM_ARCH') == 'armv8-a'
+    assert '-march=armv8-a' in isa
+    assert all(flag == '-march=armv8-a' for flag in isa), 'unexpected CPU architecture tuning'
+    assert not re.search(r'\+(?:sve|sme|i8mm|bf16)', text)
+else:
+    policy = subprocess.check_output(['sh',str(root/'scripts/speech-cpu-policy.sh'),target],text=True).split()
+    for option in policy:
+        key,value=option.removeprefix('-D').split('=',1)
+        assert values.get(key)==value, ('native CMake policy mismatch',key)
+    assert not isa, 'unexpected x86 CPU architecture tuning'
+    switches=set(re.findall(r'(?<!\S)-m[^\s]+',text))
+    assert switches <= {'-m64','-msse2','-mfpmath=sse'}, ('unexpected x86 ISA switches',sorted(switches))
 assert exe.is_file() and not exe.is_symlink() and exe.stat().st_size < 150_000_000
 program_headers = subprocess.check_output(['readelf', '-l', str(exe)], text=True)
 dynamic = subprocess.check_output(['readelf', '-d', str(exe)], text=True)
@@ -37,13 +48,21 @@ result = subprocess.run([str(exe), '--ignored', '--exact', 'speech_backend_devic
 assert len(result.stdout) + len(result.stderr) < 16384
 assert result.returncode == 0, 'native enumeration probe failed'
 assert b'SPEECH_NATIVE_DEVICE_PROBE cpu_present=true' in result.stdout
+baseline_emulation = False
+if arch == 'x86_64':
+    # qemu64 exposes the baseline SSE2 CPU, without AVX/AVX2/AVX512. This is
+    # additional emulated-CPU coverage, distinct from native runner execution.
+    emulated = subprocess.run(['qemu-x86_64','-cpu','qemu64',str(exe),'--ignored','--exact','speech_backend_devices_enumerate_without_model_or_application','--nocapture'],capture_output=True,timeout=30)
+    assert len(emulated.stdout)+len(emulated.stderr)<16384
+    assert emulated.returncode==0 and b'SPEECH_NATIVE_DEVICE_PROBE cpu_present=true' in emulated.stdout, 'baseline emulated enumeration failed'
+    baseline_emulation = True
 out = root / 'server-speech-probe'
 out.mkdir(exist_ok=False)
-shutil.copyfile(exe, out / 'porthub-speech-probe-arm64')
-(out / 'porthub-speech-probe-arm64').chmod(0o755)
+shutil.copyfile(exe, out / ('porthub-speech-probe-'+arch))
+(out / ('porthub-speech-probe-'+arch)).chmod(0o755)
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
-proof = dict(source_revision=revision, target=target, ggml_native=values['GGML_NATIVE'], ggml_cpu_arm_arch=values['GGML_CPU_ARM_ARCH'], cpu_isa_flags=isa, cmake_cache_sha256=sha(cache), cpu_flags_sha256=sha(flags[0]), executable_sha256=sha(exe), executable_size=exe.stat().st_size, enumeration_passed=True, model_loaded=False, app_created=False, inference_test_requires_explicit_pinned_fixtures=True)
+proof = dict(source_revision=revision, target=target, ggml_native=values['GGML_NATIVE'], ggml_cpu_arm_arch=values.get('GGML_CPU_ARM_ARCH'), baseline_qemu64_enumeration=baseline_emulation, cpu_isa_flags=isa, cmake_cache_sha256=sha(cache), cpu_flags_sha256=sha(flags[0]), executable_sha256=sha(exe), executable_size=exe.stat().st_size, enumeration_passed=True, model_loaded=False, app_created=False, inference_test_requires_explicit_pinned_fixtures=True)
 (out / 'proof.json').write_text(json.dumps(proof, indent=2) + '\n')
 (out / 'source-revision').write_text(revision + '\n')
 (out / 'SHA256SUMS').write_text(''.join(sha(p) + '  ' + p.name + '\n' for p in sorted(out.iterdir()) if p.is_file()))
