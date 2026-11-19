@@ -24,6 +24,7 @@ impl std::fmt::Display for Failure {
 }
 impl std::error::Error for Failure {}
 pub struct Reply {
+    pub authenticated_tls: bool,
     pub status: StatusCode,
     pub headers: reqwest::header::HeaderMap,
     pub bytes: Vec<u8>,
@@ -380,6 +381,7 @@ impl Control {
             *self.preferred.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((base, Instant::now() + Duration::from_secs(30)));
             return Ok(Reply {
+                authenticated_tls: response.url().scheme() == "https",
                 status,
                 headers,
                 bytes,

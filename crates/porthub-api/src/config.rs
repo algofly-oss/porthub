@@ -30,6 +30,7 @@ pub struct Config {
     pub client_release_repository: Option<String>,
     pub gateway_public_ip: Option<String>,
     pub gateway_advertised_url: Option<String>,
+    pub private_relay_tls_origin: Option<String>,
     pub gateway_ip_sources: Vec<String>,
     pub gateway_config_path: Option<std::path::PathBuf>,
     pub edge_socket: Option<std::path::PathBuf>,
@@ -74,6 +75,7 @@ impl Default for Config {
             client_release_repository: None,
             gateway_public_ip: None,
             gateway_advertised_url: None,
+            private_relay_tls_origin: None,
             gateway_config_path: None,
             edge_socket: None,
             web_routes_config_path: None,
@@ -167,6 +169,14 @@ impl Config {
                 "UI upstream must be an HTTP origin without a path or credentials"
             );
         }
+        let private_relay_tls_origin = std::env::var("PORTHUB_PRIVATE_RELAY_TLS_ORIGIN").ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| -> anyhow::Result<String> {
+                let url = crate::gateway_origin::advertised_url(&value)?;
+                anyhow::ensure!(url.scheme() == "https", "private relay origin requires HTTPS");
+                Ok(url.to_string())
+            })
+            .transpose().context("invalid PORTHUB_PRIVATE_RELAY_TLS_ORIGIN")?;
         let gateway_advertised_url=std::env::var("PORTHUB_GATEWAY_ADVERTISED_URL").ok()
             .filter(|value|!value.trim().is_empty())
             .map(|value|crate::gateway_origin::advertised_url(&value).map(|url|url.to_string().trim_end_matches('/').to_owned()))
@@ -315,6 +325,7 @@ impl Config {
             edge_socket,
             gateway_public_ip,
             gateway_advertised_url,
+            private_relay_tls_origin,
             gateway_ip_sources,
             listen: env("PORTHUB_API_LISTEN", "127.0.0.1:47080"),
             ui_upstream,
