@@ -314,12 +314,7 @@ async fn cross_pool_growth_keeps_legacy_sync_identity_acl_and_peer_ips() -> Resu
 #[tokio::test]
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_actionably()->Result<()> {
-    let directory = tempfile::tempdir()?;
-    let key = "AB".repeat(32);
-    std::fs::write(directory.path().join("origin.json"),json!({"tls_port":443,"spki_sha256":key}).to_string())?;
-    let case=Case::new(Config {gateway_advertised_url: Some("http://192.0.2.1:8345".into()),
-        private_relay_tls_origin: Some("https://192.0.2.1:18446/".into()), edge_socket: Some(directory.path().join("edge.sock")),
-        ..Config::default()}).await?;
+    let case=Case::new(Config {gateway_advertised_url: Some("http://192.0.2.1:8345".into()), ..Config::default()}).await?;
     let result=async {
         let (owner,cookie)=case.user("sparse-owner@test.invalid","user").await?;
         let token="fixture-token-0123456789abcdef0123456789";
@@ -339,8 +334,6 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         let make=|id:&str,instance:&str,sequence:u64|{let fp=if id=="sparse-0"{"AB"}else if id=="sparse-4096"{"CD"}else{"EF"};let mut body=sync(id,&fingerprint(fp),instance);body["sparse"]=json!({"protocol":1,"sequence":sequence,"wanted":[]});body};
         let mut a=make("sparse-0","instance-00000000",1);let b=make("sparse-4096","instance-11111111",1);
         let (_,_,first)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
-        ensure!(first.get("pinned_relay").is_none());
-        a["pinned_relay"] = json!(true);
         ensure!(first["snapshot"]["peers"].as_array().is_some_and(|p|p.len()==1),"sparse base was not bounded");
         ensure!(first["snapshot"]["dns_suffixes"].as_array().is_some_and(|s|s.iter().any(|v|v=="custom.internal")),"cold peer's custom namespace was not protected before pair discovery");
         let cold=case.app.collection("private_peers").find_one(doc!{"_id":"sparse-4096"}).await?.unwrap().get_object_id("machine_id")?;
@@ -364,7 +357,6 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         println!("sparse4097_broad_cost={broad_cost}");
         ensure!(reply["pair_responses"][0]["status"]=="allowed","sparse pair was not allowed");
         assert_eq!(reply["stream_protocols"], json!([]), "finite-stream WAN regression must leave new flows on the packet transport");
-        assert_eq!(reply["pinned_relay"],json!({"url":"https://192.0.2.1:18446/","spki_sha256":key}));
         assert!(reply["direct_relay_url"].is_null(), "sparse packet fallback exposed a plaintext carrier");
         let base:porthub_agent::private_network::policy::Snapshot=serde_json::from_value(reply["snapshot"].clone())?;
         let pair:porthub_network::policy::PairLease=serde_json::from_value(reply["pair_responses"][0]["lease"].clone())?;
@@ -664,4 +656,49 @@ async fn participating_exit_4097_uses_exact_bounded_picker_and_reciprocal_author
 
   Ok::<_,anyhow::Error>(())
  }.await;case.db.drop().await?;result
+}
+
+#[cfg(feature = "private-sparse")]
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn pinned_relay_is_offered_only_in_negotiated_authenticated_sparse_sync() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let key = "AB".repeat(32);
+    let metadata = directory.path().join("origin.json");
+    std::fs::write(&metadata, json!({"tls_port":443,"spki_sha256":key}).to_string())?;
+    let case = Case::new(Config {
+        gateway_advertised_url: Some("http://192.0.2.1:8345".into()),
+        private_relay_tls_origin: Some("https://192.0.2.1:18446/".into()),
+        edge_socket: Some(directory.path().join("edge.sock")),
+        ..Config::default()
+    }).await?;
+    let result = async {
+        let (owner, _) = case.user("pinned-relay@test.invalid", "user").await?;
+        let machine = ObjectId::new();
+        let mut body = sync("pinned-peer", &fingerprint("AB"), "instance-00000000");
+        case.db.collection("machines").insert_one(doc!{"_id":machine, "user_id":owner, "name":"fixture"}).await?;
+        case.db.collection("private_peers").insert_one(doc!{
+            "_id":"pinned-peer", "workspace_id":owner,"machine_id":machine,"owner_id":owner,
+            "ip":"10.203.0.1","enabled":true,"credential_hash":token_digest(body["token"].as_str().unwrap()),
+        }).await?;
+        case.db.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.203.0.0/24","dns_suffix":"phub"}).await?;
+        body["sparse"] = json!({"protocol":1,"sequence":1,"wanted":[]});
+        let path = "/api/access/private/sync";
+        let previous = case.status("POST",path,"",body.clone(),StatusCode::OK).await?;
+        assert!(previous.get("pinned_relay").is_none());
+        body["pinned_relay"] = json!(true);
+        let mut denied = body.clone();
+        denied["token"] = json!("wrong-enrollment-token-0123456789");
+        let (status, _, denied) = case.call("POST",path,"",denied,&[]).await?;
+        assert!(status.is_client_error() && denied.get("pinned_relay").is_none());
+        let reply = case.status("POST",path,"",body.clone(),StatusCode::OK).await?;
+        assert_eq!(reply["pinned_relay"], json!({"url":"https://192.0.2.1:18446/","spki_sha256":key}));
+        assert!(reply["direct_relay_url"].is_null());
+        std::fs::remove_file(metadata)?;
+        let absent = case.status("POST",path,"",body,StatusCode::OK).await?;
+        assert!(absent.get("pinned_relay").is_none());
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;
+    result
 }
