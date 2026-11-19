@@ -356,6 +356,7 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         ensure!(broad_cost["docs_examined"].as_i64().unwrap_or(i64::MAX)<128,"broad sparse lookup scanned registration population: {broad_cost}");
         println!("sparse4097_broad_cost={broad_cost}");
         ensure!(reply["pair_responses"][0]["status"]=="allowed","sparse pair was not allowed");
+        assert_eq!(reply["stream_protocols"], json!([]), "finite-stream WAN regression must leave new flows on the packet transport");
         let base:porthub_agent::private_network::policy::Snapshot=serde_json::from_value(reply["snapshot"].clone())?;
         let pair:porthub_network::policy::PairLease=serde_json::from_value(reply["pair_responses"][0]["lease"].clone())?;
         let mut engine=porthub_network::policy::Engine::default();engine.apply(base)?;engine.install_pair(pair)?;

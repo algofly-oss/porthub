@@ -742,7 +742,12 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         reply.validate_for(request,&exit_epoch).map_err(|_|ApiError::bad_request("Invalid exit picker publication"))?;
         response["exit_pick"]=serde_json::to_value(reply).expect("typed picker response");
     }
-    if cfg!(feature="private-sparse")&&epoch.is_some(){response["stream_protocols"]=json!(["quic3-credit"]);}
+    // The finite-stream sender waits for a delivery receipt for each 8 KiB.
+    // On WAN links this stalls native TCP until its original admission expires.
+    // Let sparse clients use the authorized packet transport for new flows.
+    if cfg!(feature = "private-sparse") && epoch.is_some() {
+        response["stream_protocols"] = json!([]);
+    }
     if epoch.is_none() {
         response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");
         let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");
