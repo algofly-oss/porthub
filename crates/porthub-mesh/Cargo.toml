@@ -9,6 +9,7 @@ publish.workspace = true
 streams = ["dep:quinn", "dep:rustls"]
 
 [dependencies]
+porthub-io = { path = "../porthub-io" }
 anyhow.workspace = true
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }

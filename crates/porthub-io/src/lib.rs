@@ -17,6 +17,21 @@ use tokio::{
     time::Instant,
 };
 
+/// Prefer Linux BBR where available, retaining the kernel default otherwise.
+/// The optional override affects only PortHub sockets, never host defaults.
+pub fn configure_tcp(stream: &tokio::net::TcpStream) {
+    #[cfg(target_os = "linux")]
+    {
+        let algorithm = std::env::var("PORTHUB_TCP_CONGESTION").unwrap_or_else(|_| "bbr".into());
+        if matches!(algorithm.as_str(), "bbr" | "cubic") {
+            // Unsupported kernels retain their existing congestion control.
+            let _ = socket2::SockRef::from(stream).set_tcp_congestion(algorithm.as_bytes());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = stream;
+}
+
 pub fn half_close_idle_timeout() -> Duration {
     static TIMEOUT: OnceLock<Duration> = OnceLock::new();
     *TIMEOUT.get_or_init(|| {

@@ -11,6 +11,7 @@ notifications = ["dep:notify"]
 sync = ["notifications"]
 
 [dependencies]
+porthub-io = { path = "../porthub-io" }
 anyhow.workspace = true
 axum.workspace = true
 tokio.workspace = true

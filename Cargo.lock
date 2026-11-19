@@ -5589,6 +5589,7 @@ dependencies = [
 name = "porthub-io"
 version = "0.1.0"
 dependencies = [
+ "socket2 0.6.5",
  "tokio",
  "tracing",
 ]
@@ -5615,6 +5616,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "getifaddrs",
+ "porthub-io",
  "quinn",
  "rtc-crypto",
  "rtc-dtls",
@@ -5818,6 +5820,7 @@ dependencies = [
  "httpdate",
  "notify 8.2.1",
  "percent-encoding",
+ "porthub-io",
  "rand 0.8.8",
  "reqwest",
  "rustix",

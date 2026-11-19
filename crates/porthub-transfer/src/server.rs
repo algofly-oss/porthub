@@ -431,6 +431,7 @@ pub async fn serve_ready(options: Options, shutdown: CancellationToken, ready: O
             shutdown: shutdown.clone(),
         });
     let data = data.tap_io(|stream| {
+        porthub_io::configure_tcp(stream);
         let _ = stream.set_nodelay(true);
     });
     #[cfg(unix)]
