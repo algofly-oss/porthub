@@ -86,6 +86,11 @@ impl Tun {
         )?
         .ok_or_else(|| anyhow::anyhow!("private TUN unavailable"))?;
         let index = link.ifindex();
+        // Allow bursts of locally segmented TCP packets to reach the TUN reader.
+        // A full Linux TUN transmit ring discards packets before userspace sees them.
+        if let Err(error) = netlink.set_link_txqlen_by_index(index, 4096).await {
+            tracing::debug!(%error, "retaining native TUN transmit queue length");
+        }
         safe(
             netlink
                 .add_address_by_index(index, IpAddr::V4(own), 32)
