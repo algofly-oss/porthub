@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { IconCopy, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
+import { IconCopy, IconExternalLink, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import HistoryPanel from "./HistoryPanel";
 import useTerminalManagement from "./useTerminalManagement";
@@ -110,6 +110,12 @@ export default function SharedTerminal() {
     }).catch(() => { if (alive) setError("The terminal could not load. Reload this page to try again."); });
     return () => { alive = false; cancelAnimationFrame(resizeFrame); observer?.disconnect(); wheelSurface?.removeEventListener("wheel",wheelListener,true); clearTimeout(history.current.timer); terminal.current = null; instance?.dispose(); };
   }, []);
+
+  useEffect(() => {
+    if (ready && new URLSearchParams(window.location.search).get("connect") === "1") {
+      setAttempt(current => current || 1);
+    }
+  }, [ready]);
 
   useEffect(() => {
     if (!ready || !attempt) return;
@@ -258,7 +264,15 @@ export default function SharedTerminal() {
   return <main className="flex h-[100dvh] min-h-0 flex-col bg-background text-foreground" aria-label="Shared terminal">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
       <div className="flex min-w-0 items-center gap-3"><IconTerminal2 size={23} className="shrink-0 text-primary" /><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{session?.name || "PortHub shared terminal"}</h1><p role="status" className="mt-0.5 text-xs text-muted-foreground">{status}{session ? ` · ${session.read_only ? "Read-only" : "Interactive"}` : " · Join with an invitation"}</p></div></div>
-      <div className="flex flex-wrap items-center gap-2"><Button variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        {connected && recovery.current?.invitation && !management.invitationsRevoked && (
+          <Button asChild variant="secondary" size="sm">
+            <a href={`/terminal?connect=1#${recovery.current.invitation}`} target="_blank" rel="noopener noreferrer">
+              <IconExternalLink size={15} aria-hidden="true" />Open in new tab
+            </a>
+          </Button>
+        )}
+        <Button variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
     </header>
     {error && <p role="alert" className="shrink-0 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">

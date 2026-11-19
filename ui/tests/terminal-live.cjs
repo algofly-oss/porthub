@@ -17,6 +17,28 @@ await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{na
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
+// Opening the same workspace creates an independent viewer; closing it
+// leaves the original connection and shell alive.
+const newTabPromise = owner.waitForEvent('page');
+await host.getByRole('link', {name: 'Open in new tab'}).click();
+const additionalTab = await newTabPromise;
+await output(additionalTab, 'porthub-test$');
+assert.equal(await additionalTab.evaluate(() => window.opener === null), true);
+const ownIdentity = page => page.getByText(/Guest .*\(you\)/).innerText();
+assert.notEqual(await ownIdentity(additionalTab), await ownIdentity(host));
+await type(additionalTab, "FROM_TAB=shared; printf 'DEDICATED%s\\n' 'TAB'");
+await output(host, 'DEDICATEDTAB');
+await additionalTab.close();
+await type(host, 'printf "PERSISTED-%s\\n" "$FROM_TAB"');
+await output(host, 'PERSISTED-shared');
+const readerTabPromise = guest.waitForEvent('page');
+await watcher.getByRole('link', {name: 'Open in new tab'}).click();
+const readerTab = await readerTabPromise;
+await readerTab.getByText('Connected · Read-only', {exact:true}).waitFor();
+await readerTab.setViewportSize({width:402,height:874});
+assert(await readerTab.getByRole('link', {name:'Open in new tab'}).isVisible());
+assert(await readerTab.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+await readerTab.close();
 // The second tab must see terminal echo before the writer submits the line.
 await host.bringToFront();
 await host.locator('.xterm-helper-textarea').focus();
