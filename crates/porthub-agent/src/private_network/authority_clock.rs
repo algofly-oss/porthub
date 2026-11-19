@@ -9,6 +9,17 @@ use std::{
 
 pub(crate) const REQUEST_VALIDITY: Duration = Duration::from_secs(15);
 
+/// The machine slept through an entire authority window while this request was live.
+#[derive(Debug)]
+pub(crate) struct ExpiredDuringSuspend;
+
+impl std::fmt::Display for ExpiredDuringSuspend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("logical authority request expired during system sleep")
+    }
+}
+impl std::error::Error for ExpiredDuringSuspend {}
+
 pub(crate) trait SuspendClock: Send + Sync {
     fn elapsed_since_boot(&self) -> Result<Duration>;
 }
@@ -135,12 +146,16 @@ impl RequestWindow {
             .elapsed_since_boot()?
             .checked_sub(self.boot_start)
             .ok_or_else(|| anyhow::anyhow!("authority clock regressed"))?;
+        let awake_elapsed = self.awake_start.elapsed();
+        if awake_elapsed < limit && elapsed.saturating_sub(awake_elapsed) >= REQUEST_VALIDITY {
+            return Err(ExpiredDuringSuspend.into());
+        }
         let boot = limit
             .checked_sub(elapsed)
             .filter(|n| !n.is_zero())
             .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
         let awake = limit
-            .checked_sub(self.awake_start.elapsed())
+            .checked_sub(awake_elapsed)
             .filter(|n| !n.is_zero())
             .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
         Ok(boot.min(awake))
@@ -207,6 +222,33 @@ mod tests {
         // Re-emitting cached authority or cloning it cannot refresh the start.
         assert!(window.clone().check(expiry()).is_err());
     }
+    #[tokio::test]
+    async fn supervisor_reacquires_after_sleep_and_backs_off_on_ordinary_failure() {
+        let (_config, receiver) = tokio::sync::watch::channel(Some(std::path::PathBuf::from("fixture")));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (events, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let mut first = true;
+        let task = tokio::spawn(crate::unified::supervise(receiver, cancel.clone(), move |_, _| {
+            let resumed = std::mem::take(&mut first);
+            let events = events.clone();
+            async move {
+                events.send(()).unwrap();
+                let clock = Arc::new(Clock(AtomicU64::new(0)));
+                let window = RequestWindow::start(clock.clone())?;
+                if resumed {
+                    clock.0.store(60_000, Ordering::SeqCst);
+                    return window.check(expiry());
+                }
+                window.check(SystemTime::UNIX_EPOCH)
+            }
+        }));
+        attempts.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), attempts.recv()).await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(80), attempts.recv()).await.is_err());
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
     #[test]
     fn regression_failure_and_utc_expiry_fail_closed() {
         let clock = Arc::new(Clock(AtomicU64::new(100)));

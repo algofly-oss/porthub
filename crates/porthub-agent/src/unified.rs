@@ -338,6 +338,12 @@ pub(crate) async fn supervise<F, Fut>(
                     // Panics and unexpected clean exits receive the same
                     // backoff; neither escapes into the public runtime.
                     worker.stop.cancel();
+                    #[cfg(feature = "private-sparse")]
+                    if matches!(&result, Ok(Err(error)) if error.is::<crate::private_network::ExpiredDuringSuspend>()) {
+                        tracing::info!("private lease expired during sleep; requesting a fresh lease");
+                        retry = Duration::from_secs(5);
+                        break;
+                    }
                     let reason = match &result {
                         Ok(Err(error)) => private_failure_reason(error),
                         Ok(Ok(())) => "private worker exited unexpectedly",

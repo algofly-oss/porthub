@@ -101,6 +101,8 @@ mod dns_windows;
 
 #[cfg(feature = "private-sparse")]
 mod authority_clock;
+#[cfg(feature = "private-sparse")]
+pub(crate) use authority_clock::ExpiredDuringSuspend;
 
 mod authority_event;
 #[cfg(any(target_os="macos",test))]
