@@ -314,7 +314,7 @@ async fn cross_pool_growth_keeps_legacy_sync_identity_acl_and_peer_ips() -> Resu
 #[tokio::test]
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_actionably()->Result<()> {
-    let case=Case::new(Config::default()).await?;
+    let case=Case::new(Config {gateway_advertised_url: Some("http://192.0.2.1:8345".into()), ..Config::default()}).await?;
     let result=async {
         let (owner,cookie)=case.user("sparse-owner@test.invalid","user").await?;
         let token="fixture-token-0123456789abcdef0123456789";
@@ -357,6 +357,7 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         println!("sparse4097_broad_cost={broad_cost}");
         ensure!(reply["pair_responses"][0]["status"]=="allowed","sparse pair was not allowed");
         assert_eq!(reply["stream_protocols"], json!([]), "finite-stream WAN regression must leave new flows on the packet transport");
+        assert!(reply["direct_relay_url"].is_null(), "sparse packet fallback exposed a plaintext carrier");
         let base:porthub_agent::private_network::policy::Snapshot=serde_json::from_value(reply["snapshot"].clone())?;
         let pair:porthub_network::policy::PairLease=serde_json::from_value(reply["pair_responses"][0]["lease"].clone())?;
         let mut engine=porthub_network::policy::Engine::default();engine.apply(base)?;engine.install_pair(pair)?;

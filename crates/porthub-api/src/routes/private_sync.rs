@@ -700,12 +700,13 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     // This origin is configured by the gateway operator and returned only to
     // authenticated private clients. HTTP origins are supported by operator
     // choice; their bearer headers and raw fallback packets are not encrypted.
-    // Stream payloads retain their independent peer encryption.
+    // Sparse packet fallback uses the secure profile endpoint when the configured
+    // direct origin has no TLS. Legacy negotiation retains its operator override.
     let direct_relay_url = app
         .config
         .gateway_advertised_url
         .as_deref()
-        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+        .filter(|url| url.starts_with("https://") || (epoch.is_none() && url.starts_with("http://")))
         .map(|url| url.trim_end_matches('/').to_owned());
     let dns_document = app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":current.get("machine_id")}).await?;
     let dns_rules = dns_document.as_ref().map(|value|crate::routes::dns_rules::blocking_rules(store::field(value,"rules"))).unwrap_or_else(||json!([]));
