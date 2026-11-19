@@ -90,3 +90,55 @@ the MacBook each loaded all ten referenced assets. Checks took 1.78–2.63
 seconds on Luna and 1.82–1.95 seconds on the MacBook.
 
 The [hosted verification run](https://github.com/algofly-oss/porthub/actions/runs/44495981744) passed on Linux x86-64, Linux ARM64 and Apple Silicon.
+
+## Direct LAN follow-up
+
+Luna served a 1 GiB file over Ethernet. Miro downloaded it into a fresh
+directory using `porthub get --sha256`. With one connection, alternating
+the order of direct LAN IP and private DNS downloads produced these results.
+
+| Receiver measurement | Direct LAN IP | Private DNS |
+| --- | ---: | ---: |
+| Application throughput (MiB/s) | 92.20, 103.56 | 82.81, 83.75 |
+| Ethernet receive bytes per download (GB, decimal) | 1.123 | 1.183 |
+
+Interface counters include other host traffic. The application data was
+identical. The receiver counted approximately 5.3% more Ethernet bytes on
+the private path. In a separate ten-second sample, the agents averaged 1.05
+CPU cores on Luna and 1.47 on Miro during a private transfer. A single
+aggregate CPU sample cannot identify which thread limits throughput.
+
+### Loss and socket buffers
+
+At a 500-packet tunnel queue length, the sender reported 177 tunnel transmit
+drops during one private transfer. At 4,096 packets, both hosts reported zero
+tunnel drops in the repeat. With the larger tunnel queues, a separate run
+still recorded 1,819 drops on the receiving PortHub UDP socket and 2,984
+host-wide UDP send-buffer errors on Luna. Enlarging the sender's UDP send
+buffer and receiver's UDP receive buffer from 212,992 to 4,194,304 bytes
+(kernel-reported sizes) cleared those two counters' increments on the next
+run. The reverse direction still lost 310 datagrams at Luna. Private
+throughput moved from 83.59 to 73.15 MiB/s while the direct comparison moved
+from 103.89 to 93.80 MiB/s. Both endpoints returned to their original UDP
+buffer settings after the experiment.
+
+### Candidate changes
+
+Each trial used the same PortHub HTTP transfer and verified the full file.
+A sender-side change deferred a timer registration for immediately ready UDP
+writes. Across two runs per mode, one connection delivered 78.88–83.73 MiB/s
+with the original build and 72.97–77.69 with the candidate. Eight connections
+delivered 87.30–90.39 and 86.56–90.39 MiB/s respectively.
+
+A receiver-side experiment enabled Linux TUN polling (`IFF_NAPI`) with a
+switch in the same binary. Two sequences with opposite test orders produced
+four measurements per cell. The table gives medians in MiB/s.
+
+| Connections | Polling off | Polling on |
+| ---: | ---: | ---: |
+| 1 | 73.51 | 77.84 |
+| 8 | 91.23 | 90.00 |
+
+The single-connection gain in the first sequence did not repeat when polling
+ran first. Both experiments ended with the installed agents restored. Neither
+candidate was included in the release.
