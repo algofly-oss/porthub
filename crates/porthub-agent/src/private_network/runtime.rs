@@ -1123,6 +1123,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
                 let relay_ready=relay_sender.is_ready();
                 let mode=*strategy.borrow();
+                if mode == super::strategy::Mode::Auto && parsed.opening_sequence().is_some()
+                    && direct.is_none_or(|session| session.is_relay())
+                    && sparse_handle.discovering_lan_peer(peer, &interfaces.borrow())
+                {
+                    continue;
+                }
                 let default_prefer_peer=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
                 let prefer_peer=if mode==super::strategy::Mode::Auto {
                     path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now())
