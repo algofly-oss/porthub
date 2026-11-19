@@ -450,10 +450,7 @@ async fn drive_history(
         }
     }
     history.sort_by_key(|point| point["at"].as_i64().unwrap_or_default());
-    // State-change storms are bounded independently of regular sample buckets.
-    if history.len() > 8192 {
-        history.drain(..history.len() - 8192);
-    }
+    let truncated = bound_drive_history(&mut history, rows.len(), limit as usize);
     let latest = app
         .collection("machine_metrics_latest")
         .find_one(doc! {"_id":id,"owner_id":owner})
@@ -464,8 +461,43 @@ async fn drive_history(
         .map(|sample| sample.drive_health)
         .unwrap_or_default();
     Ok(Json(
-        json!({"drives":drives,"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":rows.len()>=limit as usize}),
+        json!({"drives":drives,"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":truncated}),
     ))
+}
+
+// State-change storms are bounded independently of regular sample buckets.
+// Report either limit so the UI never presents a shortened window as complete.
+fn bound_drive_history(history: &mut Vec<Value>, scanned: usize, scan_limit: usize) -> bool {
+    let shortened = history.len() > 8192;
+    if shortened {
+        history.drain(..history.len() - 8192);
+    }
+    shortened || scanned >= scan_limit
+}
+
+#[cfg(test)]
+mod drive_history_tests {
+    use super::*;
+
+    #[test]
+    fn state_change_storm_keeps_newest_observations_and_reports_truncation() {
+        // Below the raw scan limit, every changing state survives aggregation.
+        let mut history: Vec<_> = (0..8193).map(|at| json!({"at": at})).collect();
+        assert!(bound_drive_history(&mut history, 8193, 32768));
+        assert_eq!(history.len(), 8192);
+        assert_eq!(history.first().unwrap()["at"], 1);
+        assert_eq!(history.last().unwrap()["at"], 8192);
+    }
+
+    #[test]
+    fn scan_limit_warns_even_when_aggregation_fits_and_exact_output_limit_is_complete() {
+        let mut history = vec![json!({"at": 1})];
+        assert!(bound_drive_history(&mut history, 8192, 8192));
+        assert_eq!(history, vec![json!({"at": 1})]);
+        let mut history = vec![Value::Null; 8192];
+        assert!(!bound_drive_history(&mut history, 8192, 32768));
+        assert_eq!(history.len(), 8192);
+    }
 }
 
 #[cfg(test)]
