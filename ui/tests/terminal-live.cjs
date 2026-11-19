@@ -17,6 +17,14 @@ await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{na
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
+// The second tab must see terminal echo before the writer submits the line.
+await host.bringToFront();
+await host.locator('.xterm-helper-textarea').focus();
+await host.keyboard.type('# shared line still being edited');
+await output(watcher,'# shared line still being edited');
+await host.bringToFront();
+await host.locator('.xterm-helper-textarea').focus();
+await host.keyboard.press('Control+c');
 await type(host,"OWNVAR=preserved; printf 'INITIAL%s\\n' 'SHARED'");await output(host,'INITIALSHARED');await output(watcher,'INITIALSHARED');
 if(process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked'){
  await host.waitForFunction(()=>window.__terminalDirect.opened===0);
