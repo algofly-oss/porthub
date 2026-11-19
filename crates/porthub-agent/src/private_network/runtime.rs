@@ -1436,6 +1436,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 private_status.dns_integration=Some(crate::private_prerequisites::dns_status().into());
                 private_status.dns_verified=Some(dns_health.borrow().unwrap_or(false));
             }
+            private_status.native_repair = if device.is_none() {
+                super::native_owner::repair_status(&path).ok().flatten()
+            } else {
+                None
+            };
             private_status.relay_ready = Some(relay_sender.is_ready());
             private_status.lease_valid = policy.valid_lease();
             if let Some(exit) = &mut private_status.exit {
@@ -1455,10 +1460,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     cold_datagrams.observe(None); // revoke retained payloads AND final carrier permits before teardown
     #[cfg(all(target_os="linux",feature="private-sparse"))]
     pending_provider.observe(None);
-    if installed_authority.as_ref().is_some_and(|authority|authority.check().is_err()) {
-        policy.revoke();sparse_handle.revoke_all();private_status.lease_valid=false;
+    private_status.native_repair = super::native_owner::repair_status(&path).ok().flatten();
+    let authority_expired = installed_authority.as_ref().is_some_and(|authority| authority.check().is_err());
+    if authority_expired {
+        policy.revoke();
+        sparse_handle.revoke_all();
+    }
+    if authority_expired || private_status.native_repair.is_some() {
+        private_status.lease_valid = false;
         let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
-        if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("expired private authority status update failed");}}
+        if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("private shutdown status update failed");}}
+        let _ = crate::service::readable::refresh(&path, &status);
     }
     authority_owner.revoke();
     work.cancel();

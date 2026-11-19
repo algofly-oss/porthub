@@ -50,6 +50,27 @@ fn read(profile:&Path)->Result<(PathBuf,Record)>{
     if let Some(retirement)=&record.retirement{retirement.pin.validate()?;ensure!(record.repair.as_ref().is_some_and(|request|request.nonce==retirement.nonce),"native retirement does not match repair generation");}
     Ok((path,record))
 }
+/// Read a display-only snapshot. Proving shutdown and publishing a request
+/// belong to the owner and controller, never to a status read.
+pub(super) fn repair_status(profile: &Path) -> Result<Option<crate::runtime::NativeRepairStatus>> {
+    use crate::runtime::NativeRepairStatus;
+    if !path(profile)?.try_exists()? {
+        return Ok(None);
+    }
+    let (_, record) = read(profile)?;
+    let Some((request, active)) = record.repair.as_ref().zip(record.active.as_ref()) else {
+        return Ok(None);
+    };
+    if request.source != active.own {
+        return Ok(None);
+    }
+    let status = match record.retirement.map(|r| r.state) {
+        Some(RetirementState::Completed) => NativeRepairStatus::AwaitingNewAssignment,
+        _ => NativeRepairStatus::AwaitingSourceShutdown,
+    };
+    Ok(Some(status))
+}
+
 fn save(path:&Path,record:&Record)->Result<()>{
     let bytes=serde_json::to_vec(record)?;ensure!(bytes.len()<=LIMIT,"native source history requires safe repair; refusing truncation");
     #[cfg(windows)]{super::windows_state::write_bytes_bounded(path,&bytes,LIMIT)}
@@ -259,6 +280,26 @@ mod tests {
         repair_under_owner(&path,|pin,_|Ok(pin.clone()))?; // injected OS absence, not native proof
         prepare(&path,"10.204.0.2".parse()?,&["10.204.0.0/24".parse()?])?;
         assert!(prepare(&path,own,&pools).is_err());assert!(read(&path)?.1.retired.contains(&own));Ok(())
+    }
+    #[test]
+    fn status_observes_only_the_current_quarantine_without_advancing_it() -> Result<()> {
+        use crate::runtime::NativeRepairStatus::*;
+        let (_root, path) = profile()?;
+        let own = "10.203.0.2".parse()?;
+        let pools = ["10.203.0.0/24".parse()?];
+        assert_eq!(repair_status(&path)?, None);
+        prepare(&path, own, &pools)?;
+        assert_eq!(repair_status(&path)?, None);
+        quarantine(&path, own)?;
+        let journal = super::path(&path)?;
+        let pending = std::fs::read(&journal)?;
+        assert_eq!(repair_status(&path)?, Some(AwaitingSourceShutdown));
+        assert_eq!(std::fs::read(&journal)?, pending);
+        repair_under_owner(&path, |pin, _| Ok(pin.clone()))?;
+        assert_eq!(repair_status(&path)?, Some(AwaitingNewAssignment));
+        prepare(&path, "10.204.0.2".parse()?, &["10.204.0.0/24".parse()?])?;
+        assert_eq!(repair_status(&path)?, None);
+        Ok(())
     }
     #[test]
     fn expansion_preserves_source_but_scope_retirement_needs_new_source()->Result<()> {
