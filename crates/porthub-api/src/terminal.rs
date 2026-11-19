@@ -115,6 +115,7 @@ fn advertised_host(app: &App) -> String {
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/terminal/host", get(host))
+        .route("/api/machines/{id}/terminal-sessions", get(machine_sessions))
         .route("/api/terminal/join", get(join))
         .route("/api/terminal/info", post(info))
         .route("/api/terminal/{id}/participants", get(management))
@@ -483,6 +484,34 @@ async fn info(
         serde_json::json!({"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
     ))
 }
+async fn machine_sessions(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let user = crate::auth::current_user(&app, &headers).await?;
+    let owner = user.get_object_id("_id").map_err(|_| ApiError::unauthenticated())?;
+    let machine = crate::domain::workspaces::object_id(&id, "Invalid machine id")?;
+    app.collection("machines")
+        .find_one(doc! {
+            "_id": machine, "user_id": owner,
+            "deletion_pending": {"$ne": true}, "native_deletion": {"$exists": false}
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Machine unavailable"))?;
+    let machine_id = machine.to_hex();
+    let mut sessions = app.terminals.sessions();
+    sessions.retain(|session| session.owner == machine_id
+        && session.options.access != Access::Ssh && !session.stop.is_cancelled());
+    sessions.sort_by(|a, b| a.options.name.cmp(&b.options.name).then(a.id.cmp(&b.id)));
+    let rows: Vec<_> = sessions.iter().map(|session| serde_json::json!({
+        "id": session.id, "name": session.options.name, "read_only": session.options.read_only
+    })).collect();
+    Ok(([(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        axum::Json(serde_json::json!({"sessions": rows}))))
+}
+
 async fn management_record(
     app: &App,
     headers: &HeaderMap,

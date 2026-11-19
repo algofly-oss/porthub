@@ -68,6 +68,13 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         .app
         .terminals
         .attach(&hello.write_token, 80, 24, "xterm-256color")?;
+    let list = format!("/api/machines/{machine}/terminal-sessions");
+    let rows = case.status("GET", &list, &owner_cookie, json!(null), StatusCode::OK).await?;
+    ensure!(rows == json!({"sessions": [{"id": hello.id, "name": "amberotter", "read_only": false}]}));
+    for cookie in ["", &foreign_cookie, &member_cookie] {
+        let (status, _, _) = case.call("GET", &list, cookie, json!(null), &[]).await?;
+        ensure!(!status.is_success(), "foreign shell sessions must not be listed");
+    }
     let endpoint = format!("/api/terminal/{}/participants", hello.id);
     let kick = format!("/api/terminal/{}/kick", hello.id);
     let revoke = format!("/api/terminal/{}/invitations/revoke", hello.id);
