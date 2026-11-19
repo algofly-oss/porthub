@@ -139,6 +139,9 @@ fn interface_absence(
     ensure!(name_index.is_none()&&!original_index_present,"native interface/index remains or was renamed/reused; absence not proven (original index {original})");
     Ok(())
 }
+#[cfg(target_os = "macos")]
+#[path = "retired_utun.rs"]
+mod retired_utun;
 #[cfg(unix)]
 pub(crate) fn verify_absent(pin: &Pin, own: Ipv4Addr) -> Result<Pin> {
     use std::ffi::CString;
@@ -175,6 +178,13 @@ pub(crate) fn verify_absent(pin: &Pin, own: Ipv4Addr) -> Result<Pin> {
                     matches!(error.raw_os_error(), Some(libc::ENXIO) | Some(libc::ENODEV)),
                     "native index absence inventory failed: {error}"
                 );
+            }
+            #[cfg(target_os = "macos")]
+            if present {
+                // Darwin can recycle the ifindex for a different utun. Require
+                // an exclusive reservation of the original kernel control unit.
+                retired_utun::prove_unused(&name, own)?;
+                return Ok(pin.clone());
             }
             interface_absence(None, *original, present)?;
         }
