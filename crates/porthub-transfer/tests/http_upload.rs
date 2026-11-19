@@ -208,3 +208,111 @@ async fn incremental_selection_does_not_scan_or_request_untouched_files() -> Res
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn corrupt_batched_tail_retains_verified_checkpoint_for_legacy_resume() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir()?;
+    let receiver = http(upload::routes(directory.path().to_owned())?).await?;
+    let client = reqwest::Client::new();
+    let id = format!("{:064x}", rand::random::<u128>());
+    let api = format!("{}/.porthub/uploads/{id}", receiver.url);
+    let first = vec![42u8; 8 * 1024 * 1024];
+    let tail = b"last";
+    client
+        .put(&api)
+        .json(&serde_json::json!({
+            "name":"batch.bin","size":first.len()+tail.len(),"chunk_size":first.len(),"chunks":2
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let first_hash = format!("{:x}", Sha256::digest(&first));
+    let tail_hash = format!("{:x}", Sha256::digest(tail));
+    let mut contents = first;
+    contents.extend_from_slice(b"oops");
+    let rejected = client
+        .put(format!("{api}/chunks/0"))
+        .header(
+            "x-porthub-chunk-sha256",
+            format!("{first_hash},{tail_hash}"),
+        )
+        .body(contents.clone())
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let status = client.get(&api).send().await?.error_for_status()?;
+    assert_eq!(status.headers()["x-porthub-chunk-batch"], "4");
+    assert_eq!(
+        status.json::<serde_json::Value>().await?["missing"],
+        serde_json::json!([1])
+    );
+    client
+        .put(format!("{api}/chunks/1"))
+        .header("x-porthub-chunk-sha256", tail_hash)
+        .body(tail.as_slice())
+        .send()
+        .await?
+        .error_for_status()?;
+    let last = contents.len() - tail.len();
+    contents[last..].copy_from_slice(tail);
+    let result = client
+        .post(format!("{api}/commit"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    assert_eq!(result, format!("{:x}", Sha256::digest(&contents)));
+    assert_eq!(
+        tokio::fs::read(directory.path().join("batch.bin")).await?,
+        contents
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn single_connection_groups_checkpoints_only_when_receiver_advertises_support() -> Result<()>
+{
+    use axum::{
+        extract::Request,
+        middleware::{self, Next},
+    };
+    use std::sync::{Arc, Mutex};
+    const CHUNK: usize = 8 * 1024 * 1024;
+    let input = tempfile::tempdir()?;
+    let file = input.path().join("three-parts.bin");
+    let contents = vec![77; 2 * CHUNK + 100];
+    std::fs::write(&file, &contents)?;
+    for (advertise, expected) in [(true, vec![3]), (false, vec![1, 1, 1])] {
+        let directory = tempfile::tempdir()?;
+        let counts = Arc::new(Mutex::new(Vec::new()));
+        let capture = counts.clone();
+        let router = upload::routes(directory.path().to_owned())?.layer(middleware::from_fn(
+            move |req: Request, next: Next| {
+                let capture = capture.clone();
+                async move {
+                    if let Some(value) = req.headers().get("x-porthub-chunk-sha256") {
+                        capture
+                            .lock()
+                            .unwrap()
+                            .push(value.to_str().unwrap().split(',').count());
+                    }
+                    let mut response = next.run(req).await;
+                    if !advertise {
+                        response.headers_mut().remove("x-porthub-chunk-batch");
+                    }
+                    response
+                }
+            },
+        ));
+        let receiver = http(router).await?;
+        upload::put_path(file.clone(), receiver.url.clone(), 1, false, true).await?;
+        assert_eq!(*counts.lock().unwrap(), expected);
+        assert_eq!(
+            std::fs::read(directory.path().join("three-parts.bin"))?,
+            contents
+        );
+    }
+    Ok(())
+}

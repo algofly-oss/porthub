@@ -20,6 +20,8 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHUNK: u64 = 8 * 1024 * 1024;
+const BATCH_LIMIT: usize = 4;
+const BATCH_HEADER: &str = "x-porthub-chunk-batch";
 
 #[derive(Clone)]
 struct ReceiveState {
@@ -227,7 +229,7 @@ async fn status(
     }
     .await;
     match result {
-        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Ok(value) => ([(BATCH_HEADER, "4")], Json(value)).into_response(),
         Err(error) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
     }
 }
@@ -251,33 +253,64 @@ async fn chunk(
         let dir = session_dir(&state, &id)?;
         let manifest: Manifest =
             serde_json::from_slice(&tokio::fs::read(dir.join("manifest.json")).await?)?;
-        ensure!(index < manifest.chunks, "chunk index out of range");
-        let expected = (manifest.size - index * manifest.chunk_size).min(manifest.chunk_size);
+        let hashes = request
+            .headers()
+            .get("x-porthub-chunk-sha256")
+            .context("missing chunk integrity hash")?
+            .to_str()?
+            .to_owned();
+        let hashes: Vec<_> = hashes.split(',').take(BATCH_LIMIT + 1).collect();
+        let valid = hashes.len() <= BATCH_LIMIT
+            && hashes
+                .iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        ensure!(valid, "invalid chunk integrity hash");
+        let end = index
+            .checked_add(hashes.len() as u64)
+            .context("chunk range overflow")?;
+        ensure!(end <= manifest.chunks, "chunk index out of range");
+        let expected = manifest.size.min(end * CHUNK) - index * CHUNK;
         if let Some(length) = request.headers().get(header::CONTENT_LENGTH) {
             ensure!(
                 length.to_str()?.parse::<u64>()? == expected,
                 "chunk length mismatch"
             );
         }
-        let expected_hash = request
-            .headers()
-            .get("x-porthub-chunk-sha256")
-            .context("missing chunk integrity hash")?
-            .to_str()?
-            .to_owned();
-        ensure!(
-            expected_hash.len() == 64 && expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "invalid chunk integrity hash"
-        );
-        let temporary = dir.join(format!("{index}.part"));
-        let count = write_body(request.into_body(), &temporary, Some(expected)).await?;
-        ensure!(count == expected, "chunk length mismatch");
-        let received = tokio::fs::read(&temporary).await?;
-        ensure!(
-            format!("{:x}", Sha256::digest(received)) == expected_hash,
-            "chunk integrity check failed"
-        );
-        tokio::fs::rename(temporary, dir.join(format!("{index}.chunk"))).await?;
+        let stream = request
+            .into_body()
+            .into_data_stream()
+            .map(|part| part.map_err(std::io::Error::other));
+        let mut input = tokio_util::io::StreamReader::new(stream);
+        let mut buffer = vec![0; 128 * 1024];
+        for (offset, hash) in hashes.iter().enumerate() {
+            let position = index + offset as u64;
+            let mut left = CHUNK.min(manifest.size - position * CHUNK);
+            let part = tempfile::NamedTempFile::new_in(&dir)?;
+            let (file, temporary) = part.into_parts();
+            let mut file = tokio::fs::File::from_std(file);
+            let mut digest = Sha256::new();
+            while left != 0 {
+                let n = left.min(buffer.len() as u64) as usize;
+                input.read_exact(&mut buffer[..n]).await?;
+                digest.update(&buffer[..n]);
+                file.write_all(&buffer[..n]).await?;
+                left -= n as u64;
+            }
+            ensure!(
+                format!("{:x}", digest.finalize()).eq_ignore_ascii_case(hash),
+                "chunk integrity check failed"
+            );
+            if position + 1 == end {
+                ensure!(
+                    input.read(&mut buffer[..1]).await? == 0,
+                    "chunk length mismatch"
+                );
+            }
+            file.sync_all().await?;
+            drop(file);
+            let target = dir.join(format!("{position}.chunk"));
+            tokio::task::spawn_blocking(move || temporary.persist(target)).await??;
+        }
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -427,6 +460,18 @@ pub async fn put_file(
     semaphore: Arc<tokio::sync::Semaphore>,
     client: reqwest::Client,
 ) -> Result<String> {
+    put_file_with_batch(file, url, relative_name, force, semaphore, client, false).await
+}
+
+async fn put_file_with_batch(
+    file: PathBuf,
+    url: String,
+    relative_name: String,
+    force: bool,
+    semaphore: Arc<tokio::sync::Semaphore>,
+    client: reqwest::Client,
+    single_connection: bool,
+) -> Result<String> {
     let metadata = tokio::fs::metadata(&file)
         .await
         .context("source file is unavailable")?;
@@ -544,15 +589,33 @@ pub async fn put_file(
     struct Missing {
         missing: Vec<u64>,
     }
-    let status: Missing = client
-        .get(api.clone())
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let response = client.get(api.clone()).send().await?.error_for_status()?;
+    let batch_limit = if single_connection
+        && response
+            .headers()
+            .get(BATCH_HEADER)
+            .is_some_and(|value| value.as_bytes() == b"4")
+    {
+        BATCH_LIMIT
+    } else {
+        1
+    };
+    let mut status: Missing = response.json().await?;
+    ensure!(
+        status.missing.iter().all(|index| *index < manifest.chunks),
+        "invalid missing chunk index"
+    );
+    status.missing.sort_unstable();
+    status.missing.dedup();
     let mut tasks = tokio::task::JoinSet::new();
-    for index in status.missing {
+    // Each request contains consecutive, independently verified resume checkpoints.
+    let groups = status
+        .missing
+        .chunk_by(|a, b| *a + 1 == *b)
+        .flat_map(|run| run.chunks(batch_limit));
+    for group in groups {
+        let index = group[0];
+        let count = group.len() as u64;
         let semaphore = semaphore.clone();
         let client = client.clone();
         let url = append_path(&endpoint, &format!(".porthub/uploads/{id}/chunks/{index}"))?;
@@ -564,13 +627,17 @@ pub async fn put_file(
                 .await?
                 .checked_sub(start)
                 .context("source file shrank during transfer")?
-                .min(CHUNK);
+                .min(count * CHUNK);
             let mut input = tokio::fs::File::open(file).await?;
             use tokio::io::{AsyncReadExt, AsyncSeekExt};
             input.seek(std::io::SeekFrom::Start(start)).await?;
             let mut data = vec![0u8; len as usize];
             input.read_exact(&mut data).await?;
-            let chunk_hash = format!("{:x}", Sha256::digest(&data));
+            let chunk_hash = data
+                .chunks(CHUNK as usize)
+                .map(|chunk| format!("{:x}", Sha256::digest(chunk)))
+                .collect::<Vec<_>>()
+                .join(",");
             let response = client
                 .put(url)
                 .header("x-porthub-chunk-sha256", chunk_hash)
@@ -649,13 +716,14 @@ async fn put_selection(
             .context("source has no file name")?
             .to_string_lossy()
             .into_owned();
-        return put_file(
+        return put_file_with_batch(
             path,
             url,
             name,
             force,
             Arc::new(tokio::sync::Semaphore::new(connections.clamp(1, 32))),
             client,
+            connections.max(1) == 1,
         )
         .await;
     }
