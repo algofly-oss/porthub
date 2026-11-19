@@ -107,18 +107,19 @@ The control loop polls once per second during negotiation and backs off to
 five seconds when its discovered peers are ready (or there are no online peers).
 Further fleet-wide scheduling validation is still required.
 
-### Linux TCP send buffers
+### Linux TCP buffer autotuning
 
-When the native Linux agent opens a private tunnel, it allows the kernel to
-grow TCP send buffers to 32 MiB on demand if the active minimum, initial and
-maximum sizes match the standard 4 KiB, 16 KiB and 4 MiB settings. This
-affects TCP senders throughout the agent's network namespace, including
-ordinary applications using the private route. Each connection starts with
-the same initial buffer. Linux controls growth and memory pressure.
+When the native Linux agent opens a private tunnel, it can raise the TCP send
+and receive autotuning ceilings to 32 MiB. It checks each setting independently.
+For `tcp_wmem`, the active minimum, initial and maximum must be 4 KiB, 16 KiB
+and 4 MiB. For `tcp_rmem`, they must be 4 KiB, 128 KiB and 6 MiB. Each
+connection starts with the same initial buffer. Linux controls growth and
+memory pressure. The settings apply to TCP throughout the agent's network
+namespace, including applications using either the private or public route.
 
-The agent respects explicit tcp_wmem settings in sysctl.conf and sysctl.d,
-including matching glob rules. A read-only namespace retains its current
-settings. Set PORTHUB_PRIVATE_TCP_AUTOTUNE=0 in the service environment to
-disable this adjustment. Administrators can apply their own tcp_wmem setting
-at any time. The agent writes the live kernel setting only when opening the
-tunnel and leaves persistent system configuration to the administrator.
+The agent honors explicit settings in sysctl.conf and sysctl.d, including
+matching glob rules. Read-only namespaces retain their current settings.
+Set `PORTHUB_PRIVATE_TCP_AUTOTUNE=0` in the service environment to disable
+both adjustments. Administrators can apply their own settings at any time.
+The agent writes live kernel settings when opening the tunnel. Administrators
+manage persistent system configuration.
