@@ -4,7 +4,9 @@ Luna and Condor used separate WANs and full-duplex Ethernet links at 1 and
 2.5 Gbit/s respectively. PortHub selected its encrypted relay for this WAN
 pair. Luna and Miro selected the local UDP path when addressed through PortHub
 DNS. The 32 MiB transfers in both directions produced 36.8–37.1 MB of UDP
-traffic between their LAN addresses on Luna's wired interface.
+traffic between their LAN addresses on Luna's wired interface. On repeat
+Luna-to-Miro tests, private DNS delivered 73.33–77.37 MiB/s and direct LAN
+HTTP delivered 99.33–101.89 MiB/s with one or eight connections.
 
 ## What limited Linux throughput
 
@@ -81,6 +83,10 @@ source. The release 1.8.2 qualification used the opposite transfer direction.
 | Connections | Private MiB/s | Public TCP MiB/s | Private / public |
 | ---: | ---: | ---: | ---: |
 | 1 | 33.15 | 33.28 | 99.6% |
+| 16 | 33.07 | 34.57 | 95.7% |
 
-During sustained testing, all six Jupyter login-page checks loaded the ten
-referenced assets, taking 1.78–2.63 seconds per check.
+During sustained testing, six Jupyter login-page checks on Luna and six on
+the MacBook each loaded all ten referenced assets. Checks took 1.78–2.63
+seconds on Luna and 1.82–1.95 seconds on the MacBook.
+
+The [hosted verification run](https://github.com/algofly-oss/porthub/actions/runs/44495981744) passed on Linux x86-64, Linux ARM64 and Apple Silicon.
