@@ -9,16 +9,27 @@ export default function HostShellSessions({ machineId }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    setError("");
-    setSessions(null);
-    axios.get(`/api/machines/${encodeURIComponent(machineId)}/terminal-sessions`, {
-      signal: controller.signal,
-    }).then(({ data }) => {
-      if (!controller.signal.aborted) setSessions(data.sessions);
-    }).catch(() => {
-      if (!controller.signal.aborted) setError("Could not load shell sessions for this machine.");
-    });
-    return () => controller.abort();
+    let timer;
+    async function refresh() {
+      try {
+        const { data } = await axios.get(`/api/machines/${encodeURIComponent(machineId)}/terminal-sessions`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setSessions(data.sessions);
+        setError("");
+      } catch {
+        if (controller.signal.aborted) return;
+        setSessions(null);
+        setError("Could not load shell sessions for this machine.");
+      }
+      timer = window.setTimeout(refresh, 5000);
+    }
+    refresh();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
   }, [machineId, revision]);
 
   return (
