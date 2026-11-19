@@ -29,6 +29,8 @@ pub mod service;
 pub mod service_health;
 pub mod stats;
 pub mod update;
+#[cfg(target_os = "macos")]
+mod macos_kqueue;
 mod unified;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod upgrade;

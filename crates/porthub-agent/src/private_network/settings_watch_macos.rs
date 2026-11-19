@@ -1,18 +1,13 @@
 //! One directory descriptor and one kqueue, irrespective of sibling files.
+use crate::macos_kqueue;
 use notify::{Config, Event, EventKind, RecursiveMode};
 use std::{
     fs::OpenOptions,
     io,
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::fs::OpenOptionsExt,
-    },
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
 };
-use tokio::{
-    io::{unix::AsyncFd, Interest},
-    task::JoinHandle,
-};
+use tokio::task::JoinHandle;
 
 type Handler = Box<dyn FnMut(notify::Result<Event>) + Send>;
 
@@ -49,16 +44,6 @@ impl DirectoryWatcher {
                 "preference parent is not a directory",
             ));
         }
-        // SAFETY: successful kqueue returns a uniquely owned descriptor.
-        let raw = unsafe { libc::kqueue() };
-        if raw < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let queue = unsafe { OwnedFd::from_raw_fd(raw) };
-        // macOS kqueue has no atomic CLOEXEC creation flag.
-        if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
         let event = libc::kevent {
             ident: parent.as_raw_fd() as usize,
             filter: libc::EVFILT_VNODE,
@@ -72,21 +57,7 @@ impl DirectoryWatcher {
             data: 0,
             udata: std::ptr::null_mut(),
         };
-        // Register only this directory. Never enumerate or watch its children.
-        if unsafe {
-            libc::kevent(
-                queue.as_raw_fd(),
-                &event,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let queue = AsyncFd::with_interest(queue, Interest::READABLE)?;
+        let queue = macos_kqueue::register(event)?;
         let path = path.to_owned();
         let mut handler = self
             .handler
@@ -96,44 +67,8 @@ impl DirectoryWatcher {
             // Retain the registered directory vnode for the task's lifetime.
             let _parent = parent;
             loop {
-                let result = async {
-                    let mut ready = queue.readable().await?;
-                    match ready.try_io(|queue| {
-                        // SAFETY: output is initialized by kevent when it returns 1.
-                        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-                        let timeout = libc::timespec {
-                            tv_sec: 0,
-                            tv_nsec: 0,
-                        };
-                        let count = unsafe {
-                            libc::kevent(
-                                queue.as_raw_fd(),
-                                std::ptr::null(),
-                                0,
-                                &mut event,
-                                1,
-                                &timeout,
-                            )
-                        };
-                        if count < 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                        if count == 0 {
-                            return Err(io::ErrorKind::WouldBlock.into());
-                        }
-                        if event.flags & libc::EV_ERROR != 0 {
-                            return Err(io::Error::from_raw_os_error(event.data as i32));
-                        }
-                        Ok(event.fflags)
-                    }) {
-                        Ok(result) => result.map(Some),
-                        Err(_) => Ok(None),
-                    }
-                }
-                .await;
-                match result {
-                    Ok(None) => continue,
-                    Ok(Some(flags))
+                match macos_kqueue::next_flags(&queue).await {
+                    Ok(flags)
                         if flags & (libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE)
                             == 0 =>
                     {
