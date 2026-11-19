@@ -811,7 +811,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 #[cfg(feature="private-sparse")]
                 if !direct&&origin.as_ref().is_some_and(|origin|origin.relay_origin.as_deref().is_none_or(|stamp|stamp.len()!=32||!stamp.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))){continue;}
-                if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||sparse_handle.by_id(&peer).is_none()){
+                if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||!sparse_handle.touch_peer(&peer)){
                     sparse_handle.request_peer_once(&peer);
                     #[cfg(all(target_os="linux",feature="private-sparse"))]
                     if let (Some(origin),Some(base),Some(envelope))=(origin.as_ref(),installed_authority.as_ref(),porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,bytes.clone())) {
@@ -950,7 +950,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if installed_authority.as_ref().is_none_or(|a|a.check().is_err()) {
                     policy.revoke();anyhow::bail!("guarded native request-start authority expired");
                 }
-                if !sparse_handle.enabled()||!packet.valid()||sparse_handle.by_id(&peer).is_none(){continue;}
+                if !sparse_handle.enabled()||!packet.valid()||!sparse_handle.touch_peer(&peer){continue;}
                 if !policy.check(packet.bytes(),&peer,true){continue;}
                 if let Some(tun)=&device {
                     let cancelled=&work;let authority=installed_authority.as_ref();let handles=&sparse_handle;let remote=&peer;
@@ -968,7 +968,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             Some(Event::StreamLocal {peer,bytes,scope})=>{
                 if !scope.valid(){continue;}
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
-                if sparse_handle.enabled()&&sparse_handle.by_id(&peer).is_none(){continue;}
+                if sparse_handle.enabled()&&!sparse_handle.touch_peer(&peer){continue;}
                 let parsed=Packet::parse(&bytes);
                 let reset=parsed.is_some_and(|packet|packet.is_reset() && peer_ips.get(&profile.peer_id)==Some(&packet.destination()));
                 if policy.check(&bytes,&peer,true) || reset {
@@ -992,7 +992,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
                 }
                 let (Some(peer),Some(source))=(by_ip.get(&destination),peer_ips.get(&profile.peer_id)) else {sparse_handle.request_ip(destination);continue;};
-                if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(destination);continue;}
+                if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||!sparse_handle.touch_peer(peer)){sparse_handle.request_ip(destination);continue;}
                 let packet=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::STREAM,*source,destination,&payload)?;
                 let peers=sessions.read().await;
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
@@ -1116,7 +1116,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if sparse_exit_intent.is_some() && !overlay_destination && exit_traffic_mode.permits(parsed.destination())
                 && peer_ips.get(&profile.peer_id)==Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {continue;}
             let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
-            if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(parsed.destination());continue;}
+            if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||!sparse_handle.touch_peer(peer)){sparse_handle.request_ip(parsed.destination());continue;}
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
@@ -1290,7 +1290,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
             }
             if sparse_handle.enabled(){
-                let expired:Vec<_>=policy.pair_snapshots().into_iter().filter_map(|(snapshot,_)| snapshot.peers.into_iter().find(|p|p.id!=profile.peer_id)).filter(|p|sparse_handle.by_id(&p.id).is_none()).map(|p|p.id).collect();
+                let expired:Vec<_>=policy.pair_snapshots().into_iter().filter_map(|(snapshot,_)| snapshot.peers.into_iter().find(|p|p.id!=profile.peer_id)).filter(|p|!sparse_handle.peer_is_live(&p.id)).map(|p|p.id).collect();
                 let removed=!expired.is_empty();
                 for id in expired {policy.revoke_pair(&id);sparse_handle.retire(&id);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                 if removed {if let Some(tun)=&device {tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await?;}}

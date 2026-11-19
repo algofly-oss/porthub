@@ -298,7 +298,27 @@ impl Handle {
         self.peer(|p| p.ip == ip)
     }
     pub fn by_id(&self, id: &str) -> Option<PeerInfo> {
-        self.peer(|p| p.id == id)
+        self.with_live_peer(id, |cached, now| {
+            cached.last_used = now;
+            cached.lease.peer.clone()
+        })
+    }
+
+    /// Maintenance observes authority without making an idle lease eligible for renewal.
+    pub(super) fn peer_is_live(&self, id: &str) -> bool {
+        self.with_live_peer(id, |_, _| ()).is_some()
+    }
+
+    fn with_live_peer<T>(&self, id: &str, read: impl FnOnce(&mut Cached, Instant) -> T) -> Option<T> {
+        let mut state = self.state.lock().ok()?;
+        let now = Instant::now();
+        if self.revoked() || state.epoch.is_none() || state.deadline.is_none_or(|d| d <= now)
+            || state.authority.as_ref().is_some_and(|a| a.check().is_err())
+        {
+            return None;
+        }
+        let cached = state.cache.get_mut(id).filter(|c| c.valid(now))?;
+        Some(read(cached, now))
     }
     /// Allow time for ICE before pinning a cold TCP flow to the gateway.
     /// Only timing metadata is retained. TCP retries the SYN under current policy.
@@ -353,18 +373,7 @@ impl Handle {
     }
     /// Usage affects renewal eligibility only, never locally extends authority.
     pub fn touch_peer(&self, id: &str) -> bool {
-        let Ok(mut state) = self.state.try_lock() else {
-            return false;
-        };
-        let now = Instant::now();
-        if self.revoked() || state.deadline.is_none_or(|d| d <= now) || state.authority.as_ref().is_some_and(|a|a.check().is_err()) {
-            return false;
-        }
-        let Some(cached) = state.cache.get_mut(id).filter(|c| c.valid(now)) else {
-            return false;
-        };
-        cached.last_used = now;
-        true
+        self.with_live_peer(id, |cached, now| cached.last_used = now).is_some()
     }
     pub fn request_ip(&self, ip: Ipv4Addr) -> bool {
         ip.is_private()
@@ -882,6 +891,33 @@ mod tests {
         assert!(h.by_id("b").is_none());
         assert!(h.dns_ttl("10.203.1.2".parse().unwrap()).is_none());
     }
+    #[test]
+    fn route_sweep_waits_for_live_peer_and_preserves_idle_time() {
+        let epoch = "a".repeat(64);
+        let (handle, _) = channel();
+        handle.update_base(&base(&epoch));
+        handle.installed(&Lookup { kind: "peer".into(), value: "b".into() }, lease(&epoch));
+        let idle_since = Instant::now() - Duration::from_secs(10);
+        let peer = handle.clone();
+        let (held, acquired) = std::sync::mpsc::sync_channel(0);
+        let holder = std::thread::spawn(move || {
+            let mut state = peer.state.lock().unwrap();
+            state.cache.get_mut("b").unwrap().last_used = idle_since;
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+        });
+        acquired.recv().unwrap();
+        assert!(handle.peer_is_live("b"));
+        holder.join().unwrap();
+        assert_eq!(handle.state.lock().unwrap().cache["b"].last_used, idle_since);
+        assert!(handle.touch_peer("b"));
+        assert!(handle.state.lock().unwrap().cache["b"].last_used > idle_since);
+        handle.state.lock().unwrap().cache.get_mut("b").unwrap().deadline = Instant::now();
+        assert!(!handle.peer_is_live("b"));
+        assert!(!handle.touch_peer("b"));
+        assert!(handle.by_id("b").is_none());
+    }
+
     #[tokio::test]
     async fn cached_dns_name_and_ttl_survive_brief_packet_cache_contention() {
         let epoch = "a".repeat(64);
