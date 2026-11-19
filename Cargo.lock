@@ -5330,7 +5330,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.11.49"
+version = "1.11.50"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5406,7 +5406,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "1.11.72"
+version = "1.11.73"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5502,7 +5502,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "1.11.72"
+version = "1.11.73"
 dependencies = [
  "anyhow",
  "axum",
@@ -5552,7 +5552,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.11.72"
+version = "1.11.73"
 dependencies = [
  "anyhow",
  "axum",
@@ -5657,7 +5657,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "1.11.72"
+version = "1.11.73"
 dependencies = [
  "anyhow",
  "axum",
