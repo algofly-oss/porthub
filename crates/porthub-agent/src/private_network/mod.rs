@@ -3,6 +3,8 @@ mod route_debounce;
 pub mod controller;
 #[cfg(target_os = "linux")]
 pub mod device;
+#[cfg(target_os = "linux")]
+mod linux_tcp;
 #[cfg(target_os = "macos")]
 #[path = "device_macos.rs"]
 pub mod device;
