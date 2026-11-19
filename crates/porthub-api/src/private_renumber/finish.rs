@@ -219,7 +219,7 @@ mod tests {
             app.collection("access_rulebooks").insert_one(policy.clone()).await?;
             app.collection("private_name_directory_state").insert_one(doc!{"_id":&key,"ready":true,"generation":"old-directory"}).await?;
             let guard=fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            journal::prepare(&guard,job,&[row.clone()],&["10.204.0.0/16".into()]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+            journal::prepare(&guard,job,&[row.clone()],&["10.204.0.0/16".into()],None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
             super::super::apply::run(&app,owner,job,super::super::apply::Fault::None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             assert!(run(&app,owner,job,Fault::AfterPreferences).await.is_err());
             let head=app.collection("private_renumber_heads").find_one(doc!{"_id":&key}).await?.unwrap();assert_eq!(head.get_str("state")?,"committing");

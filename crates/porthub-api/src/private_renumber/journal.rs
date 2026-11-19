@@ -101,14 +101,16 @@ pub(super) async fn prepare(
     job: &str,
     rows: &[Assignment],
     target_cidrs: &[String],
+    reporting_peer: Option<&str>,
 ) -> ApiResult<()> {
-    prepare_with_fault(guard, job, rows, target_cidrs, Fault::None).await
+    prepare_with_fault(guard, job, rows, target_cidrs, reporting_peer, Fault::None).await
 }
 async fn prepare_with_fault(
     guard: &super::fence::Exclusive<'_>,
     job: &str,
     rows: &[Assignment],
     target_cidrs: &[String],
+    reporting_peer: Option<&str>,
     fault: Fault,
 ) -> ApiResult<()> {
     if job.len() != 32
@@ -267,6 +269,11 @@ async fn prepare_with_fault(
         immutable.insert("_id", &id);
         immutable.insert("job", job);
         immutable.insert("index", index as i64);
+        if reporting_peer == Some(row.peer.as_str()) {
+            // The queue is consumed after activation. Keep the authenticated
+            // reporter on its existing immutable peer/old-address record.
+            immutable.insert("reported_native_collision", true);
+        }
         assignments
             .update_one(doc! {"_id":&id}, doc! {"$setOnInsert":&immutable})
             .upsert(true)
@@ -378,15 +385,15 @@ mod tests {
             let before=app.collection("private_peers").find_one(doc!{"_id":&row.peer}).await?.unwrap();
             let pools=vec!["10.204.0.0/16".to_owned()];
             let guard=super::super::fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            prepare(&guard,job,&[row.clone()],&pools).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            prepare(&guard,job,&[row.clone()],&pools,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             drop(guard);drop(app);
             // New App has no process-local fence or Hub state. Durable Applying
             // still refuses ordinary private publication after restart.
             let reopened=App::new(crate::config::Config::default(),db.clone());
             assert!(super::super::fence::stable(&reopened,owner).await.is_err());
             let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            prepare(&guard,job,&[row.clone()],&pools).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            assert!(prepare(&guard,"1123456789abcdef0123456789abcdef",&[row.clone()],&pools).await.is_err());
+            prepare(&guard,job,&[row.clone()],&pools,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert!(prepare(&guard,"1123456789abcdef0123456789abcdef",&[row.clone()],&pools,None).await.is_err());
             drop(guard);
             let other=mongodb::bson::oid::ObjectId::new().to_hex();
             let conflict=crate::domain::private_networks::validate_migration_targets_locked(&reopened,&other,&[crate::domain::enrollment::Network::parse("10.204.0.0/16").unwrap()]).await;
@@ -395,7 +402,7 @@ mod tests {
             let assignments=reopened.collection("private_renumber_assignments");
             assignments.update_one(doc!{"job":job},doc!{"$set":{"new":"10.204.5.99"}}).await?;
             let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            assert!(prepare(&guard,job,&[row],&pools).await.is_err(),"changed immutable row adopted");
+            assert!(prepare(&guard,job,&[row],&pools,None).await.is_err(),"changed immutable row adopted");
             Ok::<_,anyhow::Error>(())
         }.await;
         db.drop().await?;
@@ -417,7 +424,7 @@ mod tests {
             for i in 0..2 {let machine=mongodb::bson::oid::ObjectId::new();let mut value=row(i);value.machine=machine.to_hex();value.workspace=owner.to_hex();app.collection("private_peers").insert_one(doc!{"_id":&value.peer,"workspace_id":owner,"machine_id":machine,"ip":value.old.to_string(),"enrollment_generation":&value.credential_generation}).await?;rows.push(value);}
             let pools=vec!["10.204.0.0/16".to_owned()];
             let guard=super::super::fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            assert!(prepare_with_fault(&guard,job,&rows,&pools,Fault::AfterStagedRow(1)).await.is_err());drop(guard);drop(app);
+            assert!(prepare_with_fault(&guard,job,&rows,&pools,None,Fault::AfterStagedRow(1)).await.is_err());drop(guard);drop(app);
             let reopened=App::new(crate::config::Config::default(),db.clone());
             let head=reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(head.get_str("state")?,"stable");assert_eq!(head.get_i64("generation")?,0);assert!(!head.contains_key("job"));
             assert!(super::super::fence::stable(&reopened,owner).await.is_ok(),"incomplete inert rows fenced a workspace after restart");
@@ -426,11 +433,11 @@ mod tests {
             assert!(crate::domain::private_networks::validate_migration_targets_locked(&reopened,&other,&[target]).await.is_ok(),"inert staging incorrectly reserved an address pool");
             reopened.collection("private_networks").insert_one(doc!{"_id":&other,"cidr":&pools[0],"dns_suffix":"other.private"}).await?;
             let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            assert!(prepare(&guard,job,&rows,&pools).await.is_err(),"restart ignored newly acquired foreign reservation");drop(guard);
+            assert!(prepare(&guard,job,&rows,&pools,None).await.is_err(),"restart ignored newly acquired foreign reservation");drop(guard);
             assert_eq!(reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap().get_str("state")?,"stable");
             reopened.collection("private_networks").delete_one(doc!{"_id":&other,"cidr":&pools[0]}).await?;
             let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            prepare(&guard,job,&rows,&pools).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+            prepare(&guard,job,&rows,&pools,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
             let head=reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(head.get_str("state")?,"applying");assert_eq!(head.get_i64("plan_version")?,2);
             assert_eq!(super::super::apply::verify(&reopened,owner,job,&head).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?.len(),2);
             for row in rows {assert_eq!(reopened.collection("private_peers").find_one(doc!{"_id":&row.peer}).await?.unwrap().get_str("ip")?,row.old.to_string());}
