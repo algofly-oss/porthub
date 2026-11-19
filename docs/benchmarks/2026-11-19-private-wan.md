@@ -73,6 +73,23 @@ The public HTTPS path used fresh URLs on a temporary web mapping. These
 | MacBook receiver | 1 | 16.09 | 23.91 |
 | MacBook receiver | 8 | 21.88 | 26.53 |
 
+## Sustained MacBook downloads
+
+Condor served the same 2 GiB file for four eight-connection downloads. The
+MacBook ran the installed 1.11.50 agent and verified the SHA-256 with
+`porthub get` in a fresh directory each time. The public comparison used a
+temporary TCP mapping. The trials ran in the order shown.
+
+| Run | Route | Seconds | MiB/s |
+| ---: | --- | ---: | ---: |
+| 1 | Private DNS | 115.198 | 17.78 |
+| 2 | Public TCP | 90.897 | 22.53 |
+| 3 | Public TCP | 89.978 | 22.76 |
+| 4 | Private DNS | 113.711 | 18.01 |
+
+Average private throughput was 79.0% of the public average on this path.
+The wired Condor-to-Luna results below were measured separately.
+
 ## Sustained wired transfers
 
 Condor served a 10 GiB file to Luna over a private PortHub hostname and a
