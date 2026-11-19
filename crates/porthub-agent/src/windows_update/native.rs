@@ -199,10 +199,13 @@ impl Record {
         pinned_release(layout, &self.candidate, &self.release.sha256)?;
         Ok(())
     }
-    fn load(layout: &Layout, path: &Path) -> Result<Self> {
+    fn read(path: &Path) -> Result<Self> {
         let bytes = profile::read_private(path)?;
         ensure!(bytes.len() <= 65536, "Update journal exceeds limit");
-        let r: Self = serde_json::from_slice(&bytes)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+    fn load(layout: &Layout, path: &Path) -> Result<Self> {
+        let r = Self::read(path)?;
         r.validate(layout, path)?;
         Ok(r)
     }
@@ -883,20 +886,29 @@ async fn prepare(native: &Native, request: &Request, cancel: &CancellationToken)
     let path = record_path(&native.source);
     let mut attempts = 0;
     if path.try_exists()? {
-        let old = Record::load(&native.layout, &path)?;
-        if !old.phase.terminal() {
-            drop(_lease);
-            return spawn_worker(&old, &path).await;
-        }
-        if old.request == *request && old.phase == Phase::Committed {
-            return Ok(());
-        }
-        if old.request == *request {
-            ensure!(
-                now().saturating_sub(old.updated) >= transaction::retry_seconds(old.attempts),
-                "Previous automatic attempt is cooling down"
-            );
-            attempts = old.attempts.saturating_add(1);
+        let old = Record::read(&path)?;
+        // A completed receipt can predate an administrator's newer service/CLI
+        // install. Its historical hashes cannot authorize work on today's files.
+        let superseded = old.previous.identity == native.spec.identity
+            && old.previous.profile == native.source
+            && old.request != *request
+            && transaction::superseded_receipt(old.phase, &old.release.version, crate::VERSION);
+        if !superseded {
+            old.validate(&native.layout, &path)?;
+            if !old.phase.terminal() {
+                drop(_lease);
+                return spawn_worker(&old, &path).await;
+            }
+            if old.request == *request && old.phase == Phase::Committed {
+                return Ok(());
+            }
+            if old.request == *request {
+                ensure!(
+                    now().saturating_sub(old.updated) >= transaction::retry_seconds(old.attempts),
+                    "Previous automatic attempt is cooling down"
+                );
+                attempts = old.attempts.saturating_add(1);
+            }
         }
     }
     let control = Control::new(native.public.clone())?;

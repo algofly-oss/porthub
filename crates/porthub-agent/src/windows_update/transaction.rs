@@ -61,6 +61,25 @@ pub(super) fn can_ack(
         && receipt.source.len() == 40
         && receipt.source == running.source
 }
+pub(super) fn superseded_receipt(phase: Phase, receipt: &str, running: &str) -> bool {
+    phase == Phase::Committed && request_state(running, receipt, false) == RequestState::Superseded
+}
+#[cfg(test)]
+#[test]
+fn only_completed_older_receipts_can_be_superseded() {
+    assert!(superseded_receipt(Phase::Committed, "1.11.48", "1.11.50"));
+    for phase in [
+        Phase::Applying,
+        Phase::RecoveryRequired,
+        Phase::RollingBack,
+        Phase::RolledBack,
+    ] {
+        assert!(!superseded_receipt(phase, "1.11.48", "1.11.50"));
+    }
+    for version in ["1.11.50", "1.11.51", "unknown"] {
+        assert!(!superseded_receipt(Phase::Committed, version, "1.11.50"));
+    }
+}
 pub(super) fn retry_seconds(attempt: u8) -> u64 {
     30u64
         .saturating_mul(1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX))
