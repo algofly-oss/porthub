@@ -25,7 +25,10 @@ const {launchBrowser}=require('./browser.cjs');
   const panel=page.getByRole('region',{name:'Private network traffic',exact:true});
   await panel.getByText('Account A atlas-prod-01',{exact:true}).first().waitFor();
   await panel.locator('button[aria-pressed]').first().click();
-  await panel.getByRole('group',{name:/Selected machine pair traffic history/}).waitFor();
+  const history=panel.getByRole('group',{name:/Selected machine pair traffic history/});
+  // The group mounts while the selection request is still in flight. A visibility
+  // refresh can start once the selected pair's measurements have rendered.
+  await history.getByText(/peak per interval/).waitFor();
   holdOld=true;await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
   await Promise.race([oldSeen,new Promise((_,reject)=>setTimeout(()=>reject(Error('old account refresh not started')),5000))]);
   account='B';await page.evaluate(()=>window.dispatchEvent(new Event('pageshow')));
