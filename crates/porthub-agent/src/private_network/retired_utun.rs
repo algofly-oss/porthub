@@ -77,6 +77,15 @@ mod tests {
             Some(libc::EBUSY)
         );
         drop(first);
+        let loopback = unsafe { libc::if_nametoindex(c"lo0".as_ptr()) };
+        ensure!(loopback != 0, "loopback interface missing");
+        let old = super::super::Pin::Interface {
+            name: name.to_str()?.to_owned(),
+            index: loopback,
+        };
+        // Use a live, unrelated index to exercise the production recovery path.
+        super::super::verify_absent(&old, "192.0.2.254".parse()?)?;
+        assert!(super::super::verify_absent(&old, Ipv4Addr::LOCALHOST).is_err());
         let _again = reserve(number)?;
         Ok(())
     }
