@@ -484,6 +484,7 @@ jobs:
           test_executable="$(python3 -c 'import json; rows=[json.loads(line) for line in open("/tmp/porthub-native-preparation-tests.jsonl")]; print(next(row["executable"] for row in reversed(rows) if row.get("reason")=="compiler-artifact" and row.get("executable") and row["target"]["name"]=="porthub_agent"))')"
           sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted "$test_executable" --ignored --exact private_prerequisites::native_ci_tests::privileged_enrollment_preparation_is_idempotent_and_preserves_system_dns
       - name: Test packaged terminal runtime and ordinary SSH participation
+        timeout-minutes: 15
         if: runner.os != 'Windows'
         shell: bash
         run: cargo test --locked -p porthub-terminal --features ssh --target ${{ matrix.target }} -- --include-ignored
