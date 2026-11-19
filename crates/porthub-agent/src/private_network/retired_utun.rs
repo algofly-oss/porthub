@@ -25,6 +25,9 @@ fn reserve(unit: u32) -> Result<OwnedFd> {
     }
     let socket = unsafe { OwnedFd::from_raw_fd(raw) };
     let fd = socket.as_raw_fd();
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
     let mut info: libc::ctl_info = unsafe { std::mem::zeroed() };
     for (out, byte) in info.ctl_name.iter_mut().zip(b"com.apple.net.utun_control") {
         *out = *byte as libc::c_char;
@@ -67,6 +70,11 @@ mod tests {
     fn binding_does_not_attach_and_excludes_a_second_owner() -> Result<()> {
         let number = 30001;
         let first = reserve(number)?;
+        let flags = unsafe { libc::fcntl(first.as_raw_fd(), libc::F_GETFD) };
+        ensure!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "inheritable control socket"
+        );
         let name = c"utun30000";
         assert_eq!(unsafe { libc::if_nametoindex(name.as_ptr()) }, 0);
         let error = reserve(number).unwrap_err();
