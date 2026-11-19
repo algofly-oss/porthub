@@ -280,6 +280,20 @@ impl Drop for Worker {
     }
 }
 
+async fn private_retry_delay(delay: Duration) {
+    #[cfg(target_os = "macos")]
+    if let Ok(queue) = crate::macos_kqueue::continuous_timer(delay) {
+        // A failed worker should retry on the first wake after its deadline.
+        // The Tokio deadline also covers an unavailable or failed kernel timer.
+        tokio::select! {
+            Ok(_) = crate::macos_kqueue::next_flags(&queue) => {},
+            _ = tokio::time::sleep(delay) => {},
+        }
+        return;
+    }
+    tokio::time::sleep(delay).await;
+}
+
 /// Watch-based supervision: no idle polling, one worker at a time, bounded
 /// retry on failure, and graceful cleanup before replacing a private runtime.
 pub(crate) async fn supervise<F, Fut>(
@@ -338,7 +352,7 @@ pub(crate) async fn supervise<F, Fut>(
                             if changed.is_err() { return; }
                             retry = Duration::from_secs(5);
                         },
-                        _ = tokio::time::sleep(retry) => retry = (retry * 2).min(Duration::from_secs(60)),
+                        _ = private_retry_delay(retry) => retry = (retry * 2).min(Duration::from_secs(60)),
                     }
                     break;
                 },
