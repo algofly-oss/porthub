@@ -106,3 +106,19 @@ platform lifecycle support, native update application and production rollout.
 The control loop polls once per second during negotiation and backs off to
 five seconds when its discovered peers are ready (or there are no online peers).
 Further fleet-wide scheduling validation is still required.
+
+### Linux TCP send buffers
+
+When the native Linux agent opens a private tunnel, it allows the kernel to
+grow TCP send buffers to 32 MiB on demand if the active minimum, initial and
+maximum sizes match the standard 4 KiB, 16 KiB and 4 MiB settings. This
+affects TCP senders throughout the agent's network namespace, including
+ordinary applications using the private route. Each connection starts with
+the same initial buffer. Linux controls growth and memory pressure.
+
+The agent respects explicit tcp_wmem settings in sysctl.conf and sysctl.d,
+including matching glob rules. A read-only namespace retains its current
+settings. Set PORTHUB_PRIVATE_TCP_AUTOTUNE=0 in the service environment to
+disable this adjustment. Administrators can apply their own tcp_wmem setting
+at any time. The agent writes the live kernel setting only when opening the
+tunnel and leaves persistent system configuration to the administrator.

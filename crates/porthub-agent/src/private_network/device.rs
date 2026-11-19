@@ -119,6 +119,7 @@ impl Tun {
             _source_lease: Default::default(),
         };
         tun.update_routes(peers).await?;
+        super::linux_tcp::configure_send_autotuning();
         Ok(tun)
     }
     /// Reconcile only prefixes validated against the current native route inventory.
