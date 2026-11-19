@@ -65,7 +65,7 @@ struct Connection {
     generation: u64,
     output: mpsc::Sender<QueuedPacket>,
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct ForwardReceipt {
     source:String,target:String,source_hash:String,target_hash:String,
     source_instance:String,target_instance:String,source_generation:u64,target_generation:u64,exit:bool,owner:Option<u64>,expires:Instant,
@@ -90,6 +90,15 @@ struct Forward<'a> {
     expires: Instant,
     receipt: ForwardReceipt,
     origin: Option<Arc<porthub_mesh::relay_origin::Origin>>,
+}
+impl Forward<'_> {
+    fn enqueue(self, source: &str, permit: mpsc::OwnedPermit<QueuedPacket>, budget: OwnedSemaphorePermit) {
+        let mut bytes = Vec::with_capacity(1 + source.len() + self.packet.len());
+        bytes.push(source.len() as u8);
+        bytes.extend_from_slice(source.as_bytes());
+        bytes.extend_from_slice(self.packet);
+        permit.send(QueuedPacket { bytes, origin: self.origin, receipt: Some(self.receipt), _budget: budget });
+    }
 }
 struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
 #[derive(Default)]
@@ -506,10 +515,22 @@ impl Hub {
         for record in records {
             let route = {
                 let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
-                Self::route_record(&hub, source, hash, instance, lane, &record, Instant::now())
-            };
-            let Some(route) = route else {
-                continue;
+                let Some(route) = Self::route_record(&hub, source, hash, instance, lane, &record, Instant::now()) else {
+                    continue;
+                };
+                // While the routing lock is held the validated identities, scope and
+                // target lane cannot change. Revalidate after any capacity wait below.
+                if let Ok(permit) = route.output.clone().try_reserve_owned() {
+                    let Ok(budget) = self.1.clone().try_acquire_owned() else {
+                        hub.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    };
+                    if route.expires > Instant::now() {
+                        route.enqueue(source, permit, budget);
+                    }
+                    continue;
+                }
+                route
             };
             // Only this source reader waits. Other peers keep forwarding, and
             // queue capacity still enforces the existing global memory budget.
@@ -552,11 +573,8 @@ impl Hub {
             {
                 continue;
             }
-            let mut forwarded = Vec::with_capacity(1 + source.len() + current.packet.len());
-            forwarded.push(source.len() as u8);
-            forwarded.extend_from_slice(source.as_bytes());
-            forwarded.extend_from_slice(current.packet);
-            permit.send(QueuedPacket { bytes: forwarded, origin:route.origin, receipt:Some(route.receipt), _budget: budget });
+            // Retain the original admission and its deadline across the wait.
+            route.enqueue(source, permit, budget);
         }
     }
     async fn while_authorized<T>(&self,receipts:&[ForwardReceipt],operation:impl std::future::Future<Output=T>)->Option<T> {
@@ -860,8 +878,15 @@ async fn serve(
                         match packets.try_recv(){Ok(packet)=>{
                             let QueuedPacket{bytes,receipt,_budget,origin}=packet;
                             if let Some(receipt)=receipt {
-                                if !receipt.valid(&app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner()),Instant::now()){continue;}
-                                receipts.push(receipt);
+                                // A batch often consists of one peer pair at one exact
+                                // admission deadline. Its final write checks every distinct
+                                // receipt under the hub lock on each poll.
+                                if receipts.last() != Some(&receipt) {
+                                    if !receipt.valid(&app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner()), Instant::now()) {
+                                        continue;
+                                    }
+                                    receipts.push(receipt);
+                                }
                             }
                             budgets.push(_budget);records.push(bytes);origin_records.push(origin);
                         },Err(_)=>break}
