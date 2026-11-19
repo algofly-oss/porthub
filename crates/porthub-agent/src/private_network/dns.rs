@@ -32,7 +32,9 @@ impl Zone {
         let query=Message::from_vec(bytes).ok()?;
         if bytes.len()>1500||query.metadata.message_type!=MessageType::Query||query.metadata.op_code!=OpCode::Query||query.queries.len()!=1{return None;}
         let q = &query.queries[0];
-        if q.query_class() != DNSClass::IN || !matches!(q.query_type(), RecordType::A | RecordType::AAAA) {
+        // NXDOMAIN applies to the name across all record types. Resolve the
+        // authorized identity before deciding how to answer an IN question.
+        if q.query_class() != DNSClass::IN {
             return None;
         }
         let name=q.name().to_ascii().to_ascii_lowercase();
@@ -204,9 +206,17 @@ mod sparse_dns_tests {
         let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"dns_suffixes":["custom.internal"],"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;
         for name in ["unknown.phub.","cold.custom.internal."] {
         let(handle,mut control)=super::super::sparse::channel();handle.update_base(&snapshot);let mut zone=Zone::default();zone.set_sparse(handle);zone.update(&snapshot)?;zone.forward_all=true;
-        let mut ipv6 = Message::query();
-        ipv6.add_query(Query::query(Name::from_ascii(name)?, RecordType::AAAA));
-        assert_eq!(zone.missing_private(&ipv6.to_vec()?).as_deref(), Some(name));
+        for ty in [RecordType::AAAA, RecordType::HTTPS, RecordType::SVCB, RecordType::TXT, RecordType::ANY] {
+            let mut query = Message::query();
+            query.add_query(Query::query(Name::from_ascii(name)?, ty));
+            let bytes = query.to_vec()?;
+            assert_eq!(zone.missing_private(&bytes).as_deref(), Some(name));
+            let mut resolved = zone.clone();
+            resolved.records.insert(name.to_owned(), "10.203.0.3".parse()?);
+            let reply = Message::from_vec(&resolved.answer(&bytes).unwrap())?;
+            assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
+            assert!(reply.answers.is_empty());
+        }
         let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));let bytes=query.to_vec()?;
         assert!(!zone.needs_upstream(&bytes));assert_eq!(zone.missing_private(&bytes).as_deref(),Some(name));
         let zone=RwLock::new(zone);let response=answer_with_upstream(&zone,&Default::default(),&bytes,"127.0.0.1:0".parse()?,false).await.expect("private timeout must be an explicit local DNS error, never upstream/no response");
