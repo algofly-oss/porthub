@@ -382,6 +382,18 @@ fn close_resolver_files(registration:&mut Registration)->Result<()>{
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+async fn wait_for_resolver_publication(
+    registration: &mut Registration,
+    present: &[super::dns_convergence_macos::Endpoint],
+    removed: &[super::dns_convergence_macos::Endpoint],
+) -> Result<()> {
+    if let Some(session) = &mut registration.private_session {
+        session.wait_for_change().await?;
+    }
+    super::dns_convergence_macos::wait(present, removed).await
+}
+
 /// Finish owned OS DNS cleanup before the interface address can disappear.
 pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()> {
     #[cfg(windows)]
@@ -430,9 +442,10 @@ pub async fn replace_registration(current:&mut Option<Registration>,profile:&std
         *current=Some(next);
         let present=resolver_endpoints(current.as_ref().unwrap())?;
         let removed:Vec<_>=previous.into_iter().filter(|old|!present.contains(old)).collect();
-        current.as_mut().unwrap().withdraw_pending=removed.clone();
-        super::dns_convergence_macos::wait(&present,&removed).await?;
-        current.as_mut().unwrap().withdraw_pending.clear();
+        let registration=current.as_mut().unwrap();
+        registration.withdraw_pending=removed.clone();
+        wait_for_resolver_publication(registration,&present,&removed).await?;
+        registration.withdraw_pending.clear();
         let _=(index,own);
     }
     #[cfg(not(target_os="macos"))]
@@ -551,7 +564,7 @@ pub async fn register(
         registration.tor_default=Some(super::dns_default_macos::register(port).await?);
     }
     let present=resolver_endpoints(&registration)?;
-    if let Err(error)=super::dns_convergence_macos::wait(&present,&[]).await{
+    if let Err(error)=wait_for_resolver_publication(&mut registration,&present,&[]).await{
         close_resolver_files(&mut registration)?;
         if let Some(session)=registration.private_session.as_mut(){session.close().await?;}
         super::dns_convergence_macos::wait(&[],&present).await?;

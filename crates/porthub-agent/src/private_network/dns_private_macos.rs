@@ -6,12 +6,66 @@ use core_foundation::{array::CFArray, base::TCFType, dictionary::CFDictionary,
 use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 use super::dns_convergence_macos::Endpoint;
 
+// configd publishes the DNS-specific change after coordinating with its DNS
+// consumers. This notification is process-external and system-wide. Callers
+// must also verify the exact effective endpoints after observing it.
+struct DnsChange(i32);
+
+unsafe extern "C" {
+    fn notify_register_check(name: *const std::ffi::c_char, token: *mut i32) -> u32;
+    fn notify_check(token: i32, changed: *mut i32) -> u32;
+    fn notify_cancel(token: i32) -> u32;
+}
+
+impl DnsChange {
+    fn arm() -> Result<Self> {
+        let mut token = 0;
+        let key = c"com.apple.system.config.network_change.dns";
+        ensure!(unsafe { notify_register_check(key.as_ptr(), &mut token) } == 0,
+            "cannot observe macOS DNS change notifications");
+        let watch = Self(token);
+        watch.changed()?; // The first check reports the registration itself.
+        Ok(watch)
+    }
+
+    fn changed(&self) -> Result<bool> {
+        let mut changed = 0;
+        ensure!(unsafe { notify_check(self.0, &mut changed) } == 0,
+            "cannot check macOS DNS change notifications");
+        Ok(changed != 0)
+    }
+
+    async fn wait(&self) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while !self.changed()? {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Ok(())
+        }).await.context("macOS DNS change notification timed out")?
+    }
+}
+
+impl Drop for DnsChange {
+    fn drop(&mut self) {
+        unsafe { notify_cancel(self.0); }
+    }
+}
+
 pub(super) struct Session {
     pub endpoints: Vec<Endpoint>,
+    publication: Option<DnsChange>,
     stop: Option<std::sync::mpsc::Sender<()>>,
     finished: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 impl Session {
+    pub async fn wait_for_change(&mut self) -> Result<()> {
+        if let Some(change) = &self.publication {
+            change.wait().await?;
+            self.publication = None;
+        }
+        Ok(())
+    }
+
     pub async fn close(&mut self) -> Result<()> {
         self.stop.take();
         if let Some(finished) = self.finished.as_mut() {
@@ -37,6 +91,12 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
     }
     super::dns_convergence_macos::ensure_available(suffixes, allowed).await?;
     let endpoints: Vec<_> = suffixes.iter().map(|suffix| Endpoint { suffix: suffix.clone(), port }).collect();
+    // Equivalent endpoints may produce no system notification.
+    let publication = if endpoints.iter().any(|endpoint| !allowed.contains(endpoint)) {
+        Some(DnsChange::arm()?)
+    } else {
+        None
+    };
     let domains = suffixes.to_vec();
     let (stop, stopped) = std::sync::mpsc::channel();
     let (ready, result) = tokio::sync::oneshot::channel();
@@ -71,7 +131,7 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
         }
         let _ = finished.send(());
     });
-    let mut session=Session { endpoints, stop: Some(stop), finished: Some(completion) };
+    let mut session=Session { endpoints, publication, stop: Some(stop), finished: Some(completion) };
     let readiness=async {
         tokio::time::timeout(std::time::Duration::from_secs(2),result).await
             .context("private DNS session publication timed out")?
