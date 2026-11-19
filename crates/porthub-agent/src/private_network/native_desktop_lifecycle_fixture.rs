@@ -319,6 +319,56 @@ async fn production_local_tcp_udp(tun: &Tun, own: Ipv4Addr) -> Result<()> {
     Ok(())
 }
 
+// Observe configd's trailing DNS-change notification in the disposable runner.
+// The notification is system-wide. The first OS lookup below remains the test
+// of whether this particular suffix was published to the system resolver.
+#[cfg(target_os = "macos")]
+mod change_notification {
+    use anyhow::{ensure, Context, Result};
+    use std::ffi::{c_char, c_int};
+    use std::time::Duration;
+    unsafe extern "C" {
+        fn notify_register_check(name: *const c_char, token: *mut c_int) -> u32;
+        fn notify_check(token: c_int, changed: *mut c_int) -> u32;
+        fn notify_cancel(token: c_int) -> u32;
+    }
+
+    pub(super) struct Watch(c_int);
+    impl Watch {
+        pub(super) fn arm() -> Result<Self> {
+            let mut token = 0;
+            let name = c"com.apple.system.config.network_change.dns";
+            ensure!(unsafe { notify_register_check(name.as_ptr(), &mut token) } == 0,
+                "cannot observe configd DNS changes");
+            let watch = Self(token);
+            watch.changed()?; // consume the initial registration event
+            Ok(watch)
+        }
+
+        fn changed(&self) -> Result<bool> {
+            let mut changed = 0;
+            ensure!(unsafe { notify_check(self.0, &mut changed) } == 0,
+                "cannot read configd DNS change notification");
+            Ok(changed != 0)
+        }
+
+        pub(super) async fn wait(&self) -> Result<()> {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while !self.changed()? {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(())
+            }).await.context("configd DNS change notification timed out")?
+        }
+    }
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            unsafe { notify_cancel(self.0); }
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "actual native adapter/routes/resolver; ONLY reviewed disposable hosted runner outer"]
 async fn native_interface_resolver_collision_connected_owner_and_drop() -> Result<()> {
@@ -368,9 +418,11 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             let start=std::time::Instant::now();let result=direct_dns_witness(port,&format!("peer.{suffix}."),&observer,remote).await;
             println!("native_owned_dns_direct success={} elapsed_ms={}",result.is_ok(),start.elapsed().as_millis());std::io::stdout().flush()?;result
         };
+        #[cfg(target_os="macos")]let dns_change=change_notification::Watch::arm()?;
         #[cfg(target_os="macos")]tcp_phase("dns_initial_publication_start")?;
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[suffix.clone()]).await?;
         #[cfg(target_os="macos")]tcp_phase("dns_initial_publication_effective_ready")?;
+        #[cfg(target_os="macos")]{dns_change.wait().await?;tcp_phase("dns_configd_notification_observed")?;}
         #[cfg(target_os="macos")]
         {if super::dns_convergence_macos::fixture_owned_projection(&super::dns_convergence_macos::Endpoint{suffix:suffix.clone(),port},"before_initial_lookup").await.is_err(){let _=tcp_phase("dns_initial_config_observation_unavailable");}let _=dns_counts("before_initial_lookup",&observer);}
         #[cfg(target_os="macos")]tcp_phase("dns_initial_lookup_start")?;
@@ -395,9 +447,11 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         #[cfg(target_os="macos")]direct?;
         ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"actual system resolver did not use owned namespace");
         zone.write().await.update(&snapshot(own,remote,&next_suffix)?)?;
+        #[cfg(target_os="macos")]let dns_change=change_notification::Watch::arm()?;
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_publication_start")?;
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[next_suffix.clone()]).await?;
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_publication_effective_ready")?;
+        #[cfg(target_os="macos")]{dns_change.wait().await?;tcp_phase("dns_configd_notification_observed")?;}
         #[cfg(target_os="macos")]let _=dns_counts("before_replacement_lookup",&observer);
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_lookup_start")?;
         let lookup=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{next_suffix}"),443))).await;
@@ -431,9 +485,11 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         let restarted=tun.reconcile_sparse(&pools,&[remote]).await?;
         ensure!(restarted.capture.accepted.len()==2&&restarted.accepted_peers==vec![remote],"same-profile restart lost native capture ownership");
         zone.write().await.update(&snapshot(own,remote,&restart_suffix)?)?;
+        #[cfg(target_os="macos")]let dns_change=change_notification::Watch::arm()?;
         #[cfg(target_os="macos")]tcp_phase("dns_restart_publication_start")?;
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[restart_suffix.clone()]).await?;
         #[cfg(target_os="macos")]tcp_phase("dns_restart_publication_effective_ready")?;
+        #[cfg(target_os="macos")]{dns_change.wait().await?;tcp_phase("dns_configd_notification_observed")?;}
         #[cfg(target_os="macos")]let _=dns_counts("before_restart_lookup",&observer);
         #[cfg(target_os="macos")]tcp_phase("dns_restart_lookup_start")?;
         let lookup=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{restart_suffix}"),443))).await;
@@ -519,9 +575,11 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
                 let start=std::time::Instant::now();let result=direct_dns_witness(next_port,&format!("peer.{reallocated_suffix}."),&reallocation_observer,next_remote).await;
                 println!("native_owned_dns_direct_reallocation success={} elapsed_ms={}",result.is_ok(),start.elapsed().as_millis());std::io::stdout().flush()?;result
             };
-            #[cfg(target_os="macos")]tcp_phase("dns_reallocation_publication_start")?;
+            #[cfg(target_os="macos")]let dns_change=change_notification::Watch::arm()?;
+        #[cfg(target_os="macos")]tcp_phase("dns_reallocation_publication_start")?;
             dns::replace_registration(&mut registration,&spec.profile,source.as_ref().unwrap().index,next_own,next_port,&[reallocated_suffix.clone()]).await?;
             #[cfg(target_os="macos")]tcp_phase("dns_reallocation_publication_effective_ready")?;
+        #[cfg(target_os="macos")]{dns_change.wait().await?;tcp_phase("dns_configd_notification_observed")?;}
             #[cfg(target_os="macos")]
             if super::dns_convergence_macos::fixture_owned_projection(&super::dns_convergence_macos::Endpoint{suffix:reallocated_suffix.clone(),port:next_port},"before_reallocation_lookup").await.is_err(){let _=tcp_phase("dns_reallocation_config_observation_unavailable");}
             #[cfg(target_os="macos")]let _=dns_counts("before_reallocation_lookup",&reallocation_observer);
