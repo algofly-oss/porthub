@@ -1,11 +1,13 @@
 # PortHub transfer benchmarks
 
-These results describe the tested routes, not general performance guarantees.
+The [November 2026 private WAN and LAN qualification](2026-11-19-private-wan.md) covers Linux send buffers, TUN queues, local path selection and wired file transfers.
+
+The release 1.8 measurements below describe the tested routes, not general performance guarantees.
 Luna has a stated 400 Mbps ISP connection; Condor has 1 Gbps. Luna–Miro LAN is
 1 Gbps. Rates use decimal MB/s. Sparse zero-filled payloads use fresh download
-destinations and SHA256 verification. This directory retains only this summary.
+destinations and SHA256 verification.
 
-## Current deployment
+## Deployment during release 1.8 qualification
 
 Luna and URM2 run production gateway 1.8.2 with isolated core, edge and firewall
 containers. Release 1.8.3 is published with all ten platform binaries and their
