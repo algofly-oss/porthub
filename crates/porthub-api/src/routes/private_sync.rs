@@ -756,6 +756,11 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     if serde_json::to_vec(&response).expect("typed control response").len()>4*1024*1024 {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control reply exceeds bounded capacity; retry a smaller discovery batch"));
     }
+    if input.pinned_relay && epoch.is_some() {
+        if let Some(origin) = crate::gateway_origin::pinned_private_relay(&app) {
+            response["pinned_relay"] = origin;
+        }
+    }
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(response)).into_response())
 }
 

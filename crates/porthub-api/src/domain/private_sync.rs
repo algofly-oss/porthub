@@ -43,6 +43,8 @@ pub struct Sync {
     pub lan_exit: bool,
     #[serde(skip_serializing_if="is_false")]
     pub application_proxy: bool,
+    #[serde(skip_serializing_if="is_false")]
+    pub pinned_relay: bool,
     pub signals: Vec<Signal>,
     pub acks: Vec<String>,
     pub paths: BTreeMap<String, String>,
@@ -112,6 +114,9 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     if model.field(&["application_proxy"]).is_some_and(|value|!value.is_boolean()) {
         model.add("application_proxy","Expected a boolean","type_error.bool");
     }
+    let pinned_relay = if model.field(&["pinned_relay"]).is_some() {
+        model.required_bool("pinned_relay")
+    } else { false };
     let application_proxy=model.optional_bool("application_proxy").unwrap_or(false);
     for network in &lan_networks {
         if network.parse::<porthub_mesh::lan_routes::Network>().is_err() {
@@ -172,6 +177,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         lan_networks,
         lan_exit,
         application_proxy,
+        pinned_relay,
         signals,
         acks,
         paths,

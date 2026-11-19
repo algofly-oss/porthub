@@ -255,6 +255,13 @@ pub fn metadata(app: &crate::App) -> Option<porthub_identity::origin::Metadata> 
     .ok()
 }
 
+/// Pair the explicitly advertised external endpoint with the role-owned edge key.
+pub fn pinned_private_relay(app: &crate::App) -> Option<serde_json::Value> {
+    let url = app.config.private_relay_tls_origin.as_ref()?;
+    let key = metadata(app)?;
+    Some(serde_json::json!({ "url": url, "spki_sha256": key.spki_sha256 }))
+}
+
 #[cfg(test)]
 mod operator_tests {
     use super::*;

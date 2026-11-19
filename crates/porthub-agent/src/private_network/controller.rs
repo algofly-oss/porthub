@@ -30,6 +30,8 @@ struct Signal {
 }
 #[derive(Deserialize)]
 struct Reply {
+    #[serde(default)]
+    pinned_relay: Option<super::relay::PinnedRelay>,
     snapshot: Snapshot,
     #[serde(default)]
     exit_pick: Option<porthub_network::policy::ExitPickResponse>,
@@ -400,7 +402,7 @@ pub(crate) async fn run_watched_sparse_owned(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         #[cfg(feature="private-sparse")]
         let mut sent_exit_pick = None;
@@ -433,6 +435,11 @@ pub(crate) async fn run_watched_sparse_owned(
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
+                if !value.authenticated_tls {
+                    if let Some(reply) = &mut reply {
+                        reply.pinned_relay = None;
+                    }
+                }
                 bases = control.authorities();
                 preferred = 0;
             }
@@ -517,6 +524,7 @@ pub(crate) async fn run_watched_sparse_owned(
             }
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
+                pinned: reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some()),
                 relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
             })};
             if *relay_config.borrow()!=direct_relay{relay_config.send_replace(direct_relay);}

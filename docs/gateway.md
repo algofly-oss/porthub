@@ -36,6 +36,13 @@ host and port. It takes precedence over `PORTHUB_GATEWAY_PUBLIC_IP` and disables
 external IP discovery. These authenticated advertisements describe candidates;
 they do not guarantee reachability.
 
+For private packet transfers through a CDN-backed gateway, set
+`PORTHUB_PRIVATE_RELAY_TLS_ORIGIN` to the externally reachable HTTPS origin
+of the PortHub edge, including any forwarded port. Agents receive the edge
+public key pin through an authenticated HTTPS sync and verify it before sending
+a relay credential. If the listener is unreachable or its key differs, agents
+try the existing relay endpoints. Leave this setting empty to use those endpoints.
+
 Gateway configuration is shared through the scoped routing-config mount and is
 overridable with `PORTHUB_GATEWAY_CONFIG_PATH`. Historical `RATHOLE_*` settings
 and download routes remain compatibility aliases; they do not launch or fetch
