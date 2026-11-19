@@ -1,7 +1,7 @@
 //! Ignored native Linux contract. Execute ONLY in the reviewed, read-only
 //! chroot of a disposable --network=none container. No host execution is allowed.
 use super::device::Tun;
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use nlink::netlink::{route::Ipv4Route, types::route::RouteScope, Connection, Route};
 use serde::Deserialize;
 use std::{
@@ -157,6 +157,8 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
         let audit=match super::native_owner::reconcile(&mut source,profile,own,&pools,&[remote]).await?{
             super::native_owner::Outcome::Active(audit)=>audit,super::native_owner::Outcome::Retired(_)=>anyhow::bail!("clean owner retired")};
         let tun=source.as_ref().unwrap();
+        let link = connection.get_link_by_index(tun.index).await?.context("owned TUN missing")?;
+        ensure!(link.txqlen() == Some(4096), "owned TUN transmit queue was not configured");
         ensure!(audit.capture.conflicting.is_empty()&&audit.capture.accepted.len()==2&&audit.accepted_peers.contains(&remote),"clean private capture not installed");
         // No /32 for these unknown destinations exists: both aggregate
         // prefixes must actually intercept packets before pair discovery.
