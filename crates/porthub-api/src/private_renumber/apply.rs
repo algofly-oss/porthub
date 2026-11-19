@@ -282,7 +282,7 @@ mod tests {
                 app.collection("private_peers").insert_one(peer.clone()).await?;before.push(peer);rows.push(row);
             }
             let guard=fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            journal::prepare(&guard,job,&rows,&["10.204.0.0/16".into()]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+            journal::prepare(&guard,job,&rows,&["10.204.0.0/16".into()],None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
             let running={let app=app.clone();tokio::spawn(async move{run(&app,owner,job,Fault::AfterPeerBeforeProgress(1)).await})};
             tokio::time::timeout(std::time::Duration::from_secs(2),async {
                 while !app.private_sparse.workspace_fences.held(&owner.to_hex()).await {tokio::task::yield_now().await;}

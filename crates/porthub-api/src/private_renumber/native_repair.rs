@@ -108,7 +108,8 @@ pub async fn plan_once(app:&App,request:&Document)->ApiResult<bool>{
         assignments.push(Assignment{peer,machine,workspace:owner.to_hex(),credential_generation:row.get_str("enrollment_generation").unwrap_or("legacy").into(),old,new,previous_generation:generation as u64,generation:generation as u64+1});
     }
     let job=uuid::Uuid::new_v4().simple().to_string();
-    journal::prepare(&guard,&job,&assignments,&targets.iter().map(|p|p.cidr()).collect::<Vec<_>>()).await?;
+    let reporting_peer = peer.get_str("_id").map_err(|_| invalid("Missing reporting enrollment"))?;
+    journal::prepare(&guard,&job,&assignments,&targets.iter().map(|p|p.cidr()).collect::<Vec<_>>(),Some(reporting_peer)).await?;
     Ok(true)
 }
 // Delete only the exact immutable binding that was processed. A nonce may be
@@ -208,6 +209,13 @@ pub async fn pending_once(app:&App,after:Option<String>)->ApiResult<Option<Strin
             let (reserved,old)=super::super::retirement::occupied(&restarted).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             assert!(reserved.iter().any(|p|p.cidr()=="10.203.0.0/24"));assert!(old.contains(&report().source));
             assert_eq!(super::super::recover::workspace(&restarted,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,super::super::recover::Outcome::Committed);
+            remove_processed(&restarted, &queued).await.map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+            let plans = restarted.collection("private_renumber_assignments");
+            let reporter_filter = doc!{"job": &job, "reported_native_collision": true};
+            assert_eq!(plans.count_documents(reporter_filter.clone()).await?, 1);
+            let reporter = plans.find_one(reporter_filter).await?.unwrap();
+            assert_eq!(reporter.get_str("peer")?, id);
+            assert_eq!(reporter.get_str("old")?, report().source.to_string());
             let prefs=restarted.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();
             assert_eq!(prefs.get_str("dns_suffix")?,"kept.private");assert_eq!(prefs.get_str("custom_setting")?,"preserved");
             for mut original in before{
