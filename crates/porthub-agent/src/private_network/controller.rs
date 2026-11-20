@@ -91,6 +91,7 @@ async fn prepare(
     identity: Identity,
     base: String,
     direct_origin: Option<String>,
+    pinned_origin: Option<super::relay::PinnedRelay>,
     servers: Vec<IceServer>,
 ) -> Result<Prepared> {
     let settings = crate::outbound::Settings::from_env()?;
@@ -110,7 +111,8 @@ async fn prepare(
     });
     let mut allocation = None;
     if let Some(credential) = credential {
-        for (url, allow_plaintext) in turn_origins(
+        for (url, allow_plaintext, pin) in turn_origins(
+            pinned_origin.as_ref(),
             direct_origin.as_deref(),
             &base,
             profile.allow_insecure_http_for_tests,
@@ -119,12 +121,13 @@ async fn prepare(
             // in this background task; payloads retain peer-pinned DTLS.
             if let Ok(Ok(ready)) = tokio::time::timeout(
                 Duration::from_secs(3),
-                porthub_mesh::relay::Allocation::connect_bound(
+                porthub_mesh::relay::Allocation::connect_with_pin(
                     url.as_str(),
                     &credential.username,
                     &credential.credential,
                     allow_plaintext,
                     &interfaces.iter().map(|address| address.ip()).collect::<Vec<_>>(),
+                    pin,
                 ),
             )
             .await
@@ -158,16 +161,17 @@ async fn prepare(
         packets,
     })
 }
-fn turn_origins(
+fn turn_origins<'a>(
+    pinned: Option<&'a super::relay::PinnedRelay>,
     direct_origin: Option<&str>,
     base: &str,
     allow_plaintext_base: bool,
-) -> Vec<(url::Url, bool)> {
+) -> Vec<(url::Url, bool, Option<&'a str>)> {
     let mut result = Vec::new();
-    for (origin, explicit) in direct_origin
-        .into_iter()
-        .map(|origin| (origin, true))
-        .chain(std::iter::once((base, false)))
+    let pinned = pinned.and_then(|p| p.verified_origin()).map(|(url, pin)| (url, false, Some(pin)));
+    for (origin, explicit, pin) in pinned.into_iter()
+        .chain(direct_origin.map(|url| (url, true, None)))
+        .chain(std::iter::once((base, false, None)))
     {
         let Ok(mut url) = url::Url::parse(origin) else {
             continue;
@@ -190,8 +194,8 @@ fn turn_origins(
             continue;
         }
         url.set_path("/api/access/private/relay");
-        if !result.iter().any(|(existing, _)| *existing == url) {
-            result.push((url, allow_plaintext));
+        if !result.iter().any(|(existing, _, _)| *existing == url) {
+            result.push((url, allow_plaintext && pin.is_none(), pin));
         }
     }
     result
@@ -616,11 +620,12 @@ pub(crate) async fn run_endpoint(
                     }
                 } else {resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));}
             }
+            let pinned_origin = reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some());
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
                 #[cfg(feature="private-sparse")]
                 clock: request_window.as_ref().and_then(|window|window.clock_sample),
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
-                pinned: reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some()),
+                pinned: pinned_origin.clone(),
                 relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
             })};
             relay_config.send_if_modified(|current| {
@@ -728,6 +733,7 @@ pub(crate) async fn run_endpoint(
                 let identity = identity.clone();
                 let base = bases[preferred].clone();
                 let direct_origin = reply.direct_relay_url.clone();
+                let pinned_origin = pinned_origin.clone();
                 let servers = reply.ice_servers.clone();
                 preparing.spawn(async move {
                     let result = prepare(
@@ -737,6 +743,7 @@ pub(crate) async fn run_endpoint(
                         identity,
                         base,
                         direct_origin,
+                        pinned_origin,
                         servers,
                     )
                     .await;
@@ -997,6 +1004,7 @@ mod origin_tests {
     #[test]
     fn authenticated_direct_turn_origin_precedes_secure_fallback() {
         let origins = turn_origins(
+            None,
             Some("http://192.0.2.1:8345/api"),
             "https://gateway.example/api",
             false,
@@ -1009,7 +1017,21 @@ mod origin_tests {
         assert!(origins[0].1);
         assert_eq!(origins[1].0.scheme(), "wss");
         assert!(!origins[1].1);
-        assert!(turn_origins(None, "http://gateway.example", false).is_empty());
+        assert!(turn_origins(None, None, "http://gateway.example", false).is_empty());
+    }
+    #[test]
+    fn turn_uses_authenticated_pin_for_origin_and_keeps_cdn_fallback_unpinned() {
+        let pin = "ab".repeat(32);
+        let pinned = serde_json::from_value(serde_json::json!({
+            "url":"https://192.0.2.1:443/", "spki_sha256":pin
+        })).unwrap();
+        let origins = turn_origins(Some(&pinned), Some("https://192.0.2.1"), "https://gateway.example", false);
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0].0.host_str(), Some("192.0.2.1"));
+        assert_eq!(origins[0].0.scheme(), "wss");
+        assert!(!origins[0].1);
+        assert_eq!(origins[0].2, Some(pin.as_str()));
+        assert_eq!(origins[1].2, None);
     }
     #[test]
     fn turn_origin_rejects_embedded_credentials_and_url_metadata() {
@@ -1019,7 +1041,7 @@ mod origin_tests {
             "http://192.0.2.1/#fragment",
             "file:///tmp/socket",
         ] {
-            let origins = turn_origins(Some(origin), "https://gateway.example", false);
+            let origins = turn_origins(None, Some(origin), "https://gateway.example", false);
             assert_eq!(origins.len(), 1);
             assert_eq!(origins[0].0.scheme(), "wss");
         }

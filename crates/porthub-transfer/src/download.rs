@@ -379,6 +379,7 @@ async fn piece_run(
     file: &mut tokio::fs::File,
     index: &mut usize,
     last: usize,
+    started: &mut bool,
     completed: &mpsc::Sender<usize>,
 ) -> Result<()> {
     let start = (*index as u64)
@@ -447,6 +448,7 @@ async fn piece_run(
             );
             file.write_all(&bytes).await?;
             received += bytes.len() as u64;
+            *started |= !bytes.is_empty();
             work.received
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             // A resume checkpoint is independent of the HTTP request boundary.
@@ -503,14 +505,32 @@ async fn worker(work: Work, completed: mpsc::Sender<usize>) -> Result<()> {
         let Some((mut index, last)) = work.pending.get(cursor).copied() else {
             return Ok(());
         };
-        for attempt in 0..6 {
-            match piece_run(&work, &mut file, &mut index, last, &completed).await {
+        let mut failures = 0u32;
+        let mut first_failure = None;
+        let mut started = work.received.load(Ordering::Relaxed) > 0;
+        loop {
+            let previous_index = index;
+            let error = match piece_run(&work, &mut file, &mut index, last, &mut started, &completed).await {
                 Ok(()) => break,
-                Err(error) if attempt == 5 => {
-                    return Err(error.context(format!("segment {index} failed")))
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(200u64 << attempt)).await,
+                Err(error) => error,
+            };
+            if index != previous_index {
+                failures = 0;
+                first_failure = None;
             }
+            let elapsed = first_failure.get_or_insert_with(Instant::now).elapsed();
+            let transport_error = error.downcast_ref::<reqwest::Error>().is_some_and(|cause|
+                cause.is_connect() || cause.is_timeout() || cause.is_body()
+            );
+            // A validator-backed transfer already in progress can safely reopen
+            // its next byte range when the host's private route returns.
+            let reconnecting = transport_error && started;
+            if failures >= 5 && (!reconnecting || elapsed >= Duration::from_secs(120)) {
+                return Err(error.context(format!("segment {index} failed")));
+            }
+            let delay = Duration::from_millis(200u64 << failures.min(5));
+            tokio::time::sleep(delay).await;
+            failures = failures.saturating_add(1);
         }
     }
 }

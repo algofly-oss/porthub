@@ -56,6 +56,13 @@ pub struct PinnedRelay {
     pub(crate) url: String,
     pub(crate) spki_sha256: String,
 }
+impl PinnedRelay {
+    pub(super) fn verified_origin(&self) -> Option<(&str, &str)> {
+        (valid_relay_url(&self.url, true) && self.spki_sha256.len() == 64
+            && self.spki_sha256.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then_some((self.url.as_str(), self.spki_sha256.as_str()))
+    }
+}
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Config {
     #[cfg(feature="private-sparse")]
@@ -359,8 +366,7 @@ pub async fn run_bound(
         if let Some(configuration) = config.borrow_and_update().clone() {
             if let Some(token) = configuration.relay_token.filter(|t| (32..=128).contains(&t.len())) {
                 if let Some(pinned) = configuration.pinned {
-                    if valid_relay_url(&pinned.url, true) && pinned.spki_sha256.len() == 64
-                        && pinned.spki_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    if pinned.verified_origin().is_some() {
                         candidates.push((pinned.url, token.clone(), Some(pinned.spki_sha256)));
                     }
                 }

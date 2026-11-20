@@ -1,5 +1,7 @@
 import axios from "axios";
+import { IconPlus, IconRefresh, IconTerminal2 } from "@tabler/icons-react";
 import { sessionRows } from "@/shared/utils/host-shell-catalog.mjs";
+import EndShellButton from "@/components/Terminal/EndShellButton";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -107,22 +109,44 @@ export default function HostShellSessions({ machineId, platform }) {
       setError(typeof detail === "string" ? detail : "Could not open the shell. Try again.");
     } finally { setOpening(false); }
   }
+  const hasDashboardShells = sessions?.some(session => session.dashboard);
   const active = sessions?.find(session => session.id === selected);
   return <section className="space-y-3 p-4" aria-label="Shell sessions">
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <h2 className="text-sm font-semibold">Shell sessions</h2>
-      {canOpen && <Button type="button" size="sm" disabled={opening} onClick={openShell}>{opening ? "Opening…" : "New shell"}</Button>}
-      <Button type="button" size="sm" variant="ghost" onClick={() => setRevision(value => value + 1)}>Refresh</Button>
+      <div className="ml-auto flex items-center gap-1">
+        <Button type="button" size="sm" variant="ghost" className="px-2.5"
+          aria-label="Refresh shell sessions" title="Refresh shell sessions"
+          onClick={() => setRevision(value => value + 1)}>
+          <IconRefresh size={16} aria-hidden="true" />
+        </Button>
+        {(canOpen || hasDashboardShells) && <Button type="button" size="sm" disabled={opening || !canOpen} title={!canOpen ? "All available shell sessions are in use" : undefined} onClick={openShell}>
+          <IconPlus size={16} aria-hidden="true" />{opening ? "Opening…" : "New shell"}
+        </Button>}
+      </div>
     </div>
     {error && <p role="alert" className="text-sm">{error}</p>}
-    {sessions?.length ? <div className="flex flex-wrap gap-2" role="group" aria-label="Choose shell">
-      {sessions.map(session => <Button key={session.id} type="button" size="sm"
-        aria-pressed={selected === session.id} variant={selected === session.id ? "secondary" : "outline"}
-        onClick={() => select(session.id)}>{session.name}{session.read_only && " · Read only"}</Button>)}
-    </div> : !error && <p role="status" className="text-sm text-muted-foreground">
-      {sessions ? (canOpen ? "Choose New shell to start a workspace." : "No active browser shells.") : "Loading sessions…"}
+    {sessions?.length ? <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border" aria-label="Shell sessions on this host">
+      {sessions.map(session => <li key={session.id}
+        className={`flex items-center gap-2 border-l-2 pr-1 ${selected === session.id ? "border-l-primary bg-primary/10" : "border-l-transparent"}`}>
+        <button type="button" aria-pressed={selected === session.id} title={`Open ${session.name}`}
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-3 text-left text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+          onClick={() => select(session.id)}>
+          <IconTerminal2 size={16} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span className="truncate">{session.name}</span>
+          {session.read_only && <span className="text-xs text-muted-foreground">Read only</span>}
+        </button>
+        {session.dashboard && <EndShellButton machineId={machineId} workspaceId={session.id} name={session.name}
+          onEnded={() => {
+            select(current => current === session.id ? null : current);
+            setSessions(rows => rows?.filter(row => row.id !== session.id));
+            setRevision(value => value + 1);
+          }} />}
+      </li>)}
+    </ul> : !error && <p role="status" className="text-sm text-muted-foreground">
+      {sessions ? "No active shell sessions." : "Loading sessions…"}
     </p>}
-    {!canOpen && owner && /^[a-f0-9]{24}$/.test(machineId) && <details className="rounded-md border border-border px-3 py-2 text-sm">
+    {!canOpen && !hasDashboardShells && owner && /^[a-f0-9]{24}$/.test(machineId) && <details className="rounded-md border border-border px-3 py-2 text-sm">
       <summary className="cursor-pointer font-medium">Enable browser shells on this machine</summary>
       {String(platform || "").toLowerCase() === "windows"
         ? <p className="mt-2">The native Windows agent does not host interactive shells. Install PortHub in a WSL distribution, enroll that Linux agent, then enable browser shells on its registration.</p>

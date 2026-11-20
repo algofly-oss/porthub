@@ -118,7 +118,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/terminal/host", get(host))
         .route("/api/machines/{id}/terminal-sessions", get(machine_sessions).post(dashboard::claim))
         .route("/api/machines/{id}/terminal-sessions/{session}/join", get(dashboard::join))
-        .route("/api/machines/{id}/terminal-sessions/{session}", get(dashboard::status))
+        .route("/api/machines/{id}/terminal-sessions/{session}", get(dashboard::status).delete(dashboard::terminate))
         .route("/api/machines/{id}/terminal-sessions/{session}/guest-links", post(dashboard::guest_links))
         .route("/api/terminal/join", get(join))
         .route("/api/terminal/info", post(info))

@@ -61,7 +61,9 @@ pub struct Packet {
     permit: SendPermit,
 }
 impl Packet {
-    pub fn admission(&self) -> SendPermit { self.permit.clone() }
+    pub fn admission(&self) -> SendPermit {
+        self.permit.clone()
+    }
     pub fn remaining(&self) -> Option<Duration> {
         self.permit.remaining()
     }
@@ -914,8 +916,8 @@ impl TxToken for Transmit<'_> {
                 let mut native = vec![context.control.clone()];
                 native.extend(context.data.iter().cloned());
                 native.extend(context.fin.iter().cloned());
-                let mut origins = vec![SendPermit::combine(native)
-                    .retire_owner_on_expiry(context.alive.clone())];
+                let mut origins =
+                    vec![SendPermit::combine(native).retire_owner_on_expiry(context.alive.clone())];
                 // The receive companion can immediately ACK an old input. Keep
                 // that exact input's origin on the queued reply, not as the
                 // established connection's renewable control authority.
@@ -1020,6 +1022,7 @@ pub struct Runner {
     wide_forwarding: bool,
     stack_scope: Arc<()>,
     commands: mpsc::Receiver<Command>,
+    pending_accept: Option<Command>,
     output: PollSender<Packet>,
     bindings: Bindings,
     interface: Interface,
@@ -1065,6 +1068,7 @@ fn build_stack(wide_forwarding: bool) -> Result<(Handle, mpsc::Receiver<Packet>,
             wide_forwarding,
             stack_scope,
             commands: input,
+            pending_accept: None,
             output: PollSender::new(output),
             bindings,
             interface,
@@ -1243,7 +1247,24 @@ impl Runner {
         use std::task::Poll;
         let mut progress = false;
         for _ in 0..64 {
-            match self.commands.poll_recv(cx) {
+            let drain_before_accept =
+                !self.packets.input.is_empty() && self.packets.output.len() < QUEUE;
+            if self.pending_accept.is_some() && drain_before_accept {
+                break;
+            }
+            let next = match self.pending_accept.take() {
+                Some(open) => Poll::Ready(Some(open)),
+                None => self.commands.poll_recv(cx),
+            };
+            match next {
+                Poll::Ready(Some(open @ Command::Connect { syn: Some(_), .. }))
+                    if drain_before_accept =>
+                {
+                    // Drain earlier input before binding the new listener to its exact peer.
+                    // Keep this command at the head of the queue, with its original permit.
+                    self.pending_accept = Some(open);
+                    break;
+                }
                 Poll::Ready(Some(command)) => {
                     progress = true;
                     match command {
@@ -2068,13 +2089,14 @@ mod tests {
     }
     #[tokio::test]
     async fn accepting_two_native_syns_pins_each_remote_before_next_listener() -> Result<()> {
-        let (_, _, mut runner) = stack()?;
+        let (handle, _out, mut runner) = stack()?;
         let (native, mut packets, native_runner) = super::super::stack()?;
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let task = tokio::spawn(async move { native_runner.run(stop).await });
         let mut clients = Vec::new();
-        let mut waiters = Vec::new();
+        let mut openings = Vec::new();
+        let mut first_syn = None;
         for port in [5101, 5102] {
             let flow = Flow {
                 source: format!("10.234.248.1:{port}").parse()?,
@@ -2085,16 +2107,20 @@ mod tests {
             let syn = tokio::time::timeout(Duration::from_secs(1), packets.recv())
                 .await?
                 .unwrap();
-            let (reply, wait) = oneshot::channel();
-            waiters.push(wait);
-            runner.create(
-                flow.reverse(),
-                SendPermit::new(|| true),
-                reply,
-                Arc::new(AtomicBool::new(true)),
-                Some(syn),
-                false,
-            );
+            if let Some(previous) = first_syn.take() {
+                // Queue input for the first binding just before accepting the second SYN.
+                handle.incoming(previous, SendPermit::new(|| true))?;
+            } else {
+                first_syn = Some(syn.clone());
+            }
+            openings.push(handle.prepare_syn(syn, SendPermit::new(|| true)).await?);
+            tokio::time::timeout(Duration::from_millis(500), async {
+                while !runner.flows.contains_key(&flow.reverse()) {
+                    poll_fn(|cx| runner.poll(cx)).await?;
+                }
+                anyhow::Ok(())
+            })
+            .await??;
             let active = runner
                 .flows
                 .get(&flow.reverse())

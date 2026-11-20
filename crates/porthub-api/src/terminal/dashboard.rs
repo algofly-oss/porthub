@@ -199,6 +199,32 @@ pub(super) async fn status(
     ))
 }
 
+pub(super) async fn terminate(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path((machine, id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    origin(&headers)?;
+    let access = Connection { headers, machine, session: id.clone(), binding: String::new() };
+    let session = {
+        let _guard = app.terminal_lifecycle.lock().await;
+        access.allowed(&app).await?;
+        let session = app.terminals.sessions().into_iter()
+            .find(|s| s.id == id && s.owner == access.machine).ok_or_else(denied)?;
+        session.request_dashboard_end().map_err(|_| ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE, "Shell host unavailable. Reconnect and try again."))?;
+        session
+    };
+    // Wait outside the lifecycle lock so the host can report its workspace exit.
+    if tokio::time::timeout(Duration::from_secs(8), session.stop.cancelled()).await.is_ok()
+        && matches!(session.close_event(), Some(HostEvent::Stop { reason }) if reason == "owner ended session")
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE,
+        "The host did not confirm termination. Check the session and the installed terminal version."))
+}
+
 /// The initial, locally generated transport credentials never authorize a guest
 /// for a dashboard workspace. A deliberate owner action rotates the invitations.
 pub(super) fn guest_join_enabled(session: &porthub_terminal::hub::Shared) -> bool {

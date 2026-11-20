@@ -296,6 +296,13 @@ pub async fn serve(root: &Path, id: &str) -> Result<()> {
                             }
                             let Ok(event)=serde_json::from_value::<HostEvent>(value) else{break;};
                             last_gateway=tokio::time::Instant::now();
+                            if matches!(event, HostEvent::TerminateDashboardWorkspace) {
+                                if sharing.hello.options.dashboard_owner.is_some() {
+                                    workspace.stop()?;
+                                }
+                                // The normal workspace-exit check reports End and waits for its acknowledgement.
+                                continue;
+                            }
                             if matches!(event,HostEvent::Stop{..}) {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
                                 // Revocation ends sharing. The local owner keeps

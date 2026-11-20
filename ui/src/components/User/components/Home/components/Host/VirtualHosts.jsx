@@ -35,7 +35,7 @@ function ProviderNotice({ name, online, supported }) {
   return message ? <p role="status" className="text-sm text-amber-700 dark:text-amber-400">{message}</p> : null;
 }
 
-export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
+export function VirtualHostDetails({ host, privateDomain, onClose }) {
   return (
     <WorkspaceDrawer opened title={host.name} onClose={onClose} size="lg">
       <div className="space-y-5 pb-4">
@@ -51,7 +51,6 @@ export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
-          {host.via?.id && <Button type="button" onClick={() => onManage(host.via.id)}>Manage on {host.via.name || "serving agent"}</Button>}
         </div>
       </div>
     </WorkspaceDrawer>
@@ -143,7 +142,7 @@ export default function VirtualHosts({ host, onChanged }) {
     <section className={sectionStyle} aria-label="Virtual hosts">
       <div>
         <h2 className="text-base font-semibold">Virtual hosts</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Give a device on {host.name}’s directly attached IPv4 LAN a private IP and DNS name. Select the virtual host in Access Rules to allow private TCP and UDP connections through {host.name}.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Give a device on {host.name}’s directly attached IPv4 LAN a private IP and DNS name. Select the virtual host in Access Rules to allow private TCP and UDP connections through {host.name}. The host list shows the serving agent’s status. Shells and device metrics require an agent on the LAN device.</p>
       </div>
       {loading ? <p role="status" className="text-sm text-muted-foreground">Loading virtual hosts…</p> : loadError ? (
         <div className="flex items-center gap-3"><p className={errorStyle} role="alert">{loadError}</p><Button type="button" size="sm" variant="secondary" onClick={() => reload(v => v + 1)}>Retry</Button></div>
