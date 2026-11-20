@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrivateStage {
     Profile, Lease, Control, Strategy, Identity, TorPreferences,
-    Controller, NativeOwner, LegacyAdmission, DnsListener, Background,
+    Controller, NativeOwner, LegacyAdmission, DnsListener, DnsRegistration, Background,
 }
 impl std::fmt::Display for PrivateStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,7 +29,7 @@ impl PrivateStage {
             Self::Identity=>"transport-identity",Self::TorPreferences=>"tor-settings",
             Self::Controller=>"private-controller",Self::NativeOwner=>"native-owner",
             Self::LegacyAdmission=>"legacy-native-admission",Self::DnsListener=>"dns-listener",
-            Self::Background=>"background-task",
+            Self::DnsRegistration=>"dns-registration",Self::Background=>"background-task",
         }
     }
     pub(crate) async fn run<T>(self, task: impl Future<Output=Result<T>>) -> Result<T> {
@@ -37,7 +37,7 @@ impl PrivateStage {
         task.await.context(self)
     }
 }
-fn private_failure_stage(error: &anyhow::Error) -> &'static str {
+pub(crate) fn private_failure_stage(error: &anyhow::Error) -> &'static str {
     error.downcast_ref::<PrivateStage>().map_or("runtime",|stage|stage.label())
 }
 

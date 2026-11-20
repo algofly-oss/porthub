@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct PrivateStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<PrivateWorkerFailure>,
     #[serde(default)]
     pub relay_ready: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +35,11 @@ pub struct PrivateStatus {
     pub exit: Option<ExitStatus>,
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub tor: Option<TorStatus>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrivateWorkerFailure {
+    pub stage: String,
+    pub reason: String,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -69,8 +76,11 @@ pub struct ExitStatus {
 impl PrivateStatus {
     pub fn display(&self) -> String {
         let clean = |text: &str| text.chars().filter(|c| !c.is_control()).take(160).collect::<String>();
-        let mut output = format!("Private relay: {}\nPrivate policy: revision {}; lease {}; {} access grants; {} DNS rules", match self.relay_ready { Some(true)=>"authenticated carrier ready",Some(false) if self.native_repair.is_some()=>"unavailable",Some(false)=>"unavailable; check gateway relay connectivity",None=>"not observed" }, self.revision,
+        let mut output = format!("Private relay: {}\nPrivate policy: revision {}; lease {}; {} access grants; {} DNS rules", match self.relay_ready { Some(true)=>"authenticated carrier ready",Some(false) if self.native_repair.is_some() || self.last_failure.is_some()=>"unavailable",Some(false)=>"unavailable; check gateway relay connectivity",None=>"not observed" }, self.revision,
             if self.lease_valid { "valid" } else { "expired or unavailable" }, self.grants, self.dns_rules);
+        if let Some(failure) = &self.last_failure {
+            output.push_str(&format!("\nPrivate worker stopped during {}. {}", clean(&failure.stage), clean(&failure.reason)));
+        }
         if let Some(repair) = self.native_repair {
             output.push_str(match repair {
                 NativeRepairStatus::AwaitingSourceShutdown =>
@@ -711,6 +721,26 @@ pub fn status(path: &Path) -> Result<Status> {
 mod private_status_tests {
     use super::*;
     #[test]
+    fn worker_failure_survives_status_serialization_without_reporting_a_relay_fault() {
+        let error = anyhow::anyhow!("systemd-resolved failed at /sensitive/location")
+            .context(crate::unified::PrivateStage::DnsRegistration);
+        let status = PrivateStatus {
+            relay_ready: Some(false),
+            last_failure: Some(PrivateWorkerFailure {
+                stage: crate::unified::private_failure_stage(&error).to_owned(),
+                reason: crate::unified::private_failure_reason(&error).to_owned(),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("/sensitive/location"));
+        let rendered = serde_json::from_str::<PrivateStatus>(&json).unwrap().display();
+        assert!(rendered.contains("dns-registration"));
+        assert!(rendered.contains("systemd-resolved"));
+        assert!(!rendered.contains("check gateway relay connectivity"));
+    }
+
+    #[test]
     fn quarantine_diagnostic_survives_status_serialization() {
         let mut status = PrivateStatus { relay_ready: Some(false), ..Default::default() };
         assert!(status.display().contains("check gateway relay connectivity"));
@@ -733,6 +763,7 @@ mod private_status_tests {
         assert!(serde_json::from_value::<Status>(old).unwrap().private_status.is_none());
         let status = PrivateStatus {
             relay_ready: None,
+            last_failure: None,
             native_repair: None,
             dns_integration: None,
             dns_verified: None,

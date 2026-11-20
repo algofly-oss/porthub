@@ -760,7 +760,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
-                    if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await?; }
+                    if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await.context(PrivateStage::DnsRegistration)?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
                         let next=Some((own.hostname.clone(),own.ip));
@@ -1499,7 +1499,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         policy.revoke();
         sparse_handle.revoke_all();
     }
-    if authority_expired || private_status.native_repair.is_some() {
+    if let Err(error) = &result {
+        private_status.last_failure = Some(crate::runtime::PrivateWorkerFailure {
+            stage: crate::unified::private_failure_stage(error).to_owned(),
+            reason: crate::unified::private_failure_reason(error).to_owned(),
+        });
+    }
+    if authority_expired || private_status.native_repair.is_some() || result.is_err() {
+        private_status.relay_ready = Some(false);
+        private_status.dns_verified = Some(false);
         private_status.lease_valid = false;
         let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
         if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("private shutdown status update failed");}}
