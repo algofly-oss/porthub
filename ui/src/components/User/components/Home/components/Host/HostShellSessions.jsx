@@ -1,4 +1,5 @@
 import axios from "axios";
+import { sessionRows } from "@/shared/utils/host-shell-catalog.mjs";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -69,9 +70,10 @@ export default function HostShellSessions({ machineId }) {
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
-        setSessions(data.sessions);
-        select(current => data.sessions.some(session => session.id === current) ? current : null);
-        setInvitations(current => Object.fromEntries(data.sessions.filter(s => current[s.id]).map(s => [s.id, current[s.id]])));
+        const rows = sessionRows(data);
+        setSessions(rows);
+        select(current => rows.some(session => session.id === current) ? current : null);
+        setInvitations(current => Object.fromEntries(rows.filter(s => current[s.id]).map(s => [s.id, current[s.id]])));
         setError("");
       } catch (failure) {
         if (controller.signal.aborted) return;
