@@ -19,7 +19,8 @@ await popup.getByRole("button", { name: "amberotter", exact: true }).click({time
 await popup.getByLabel("Invitation for amberotter").fill(`${origin}/terminal#${write}`);
 await popup.getByRole("button", {name:"Connect", exact:true}).click();
 await output(popup,"porthub-test$");
-await type(popup, "SHARED_IN_HOST_POPUP=ok");
+await type(popup, 'SHARED_IN_HOST_POPUP=ok && printf "POPUP-%s\\n" "$SHARED_IN_HOST_POPUP"');
+await output(popup, "POPUP-ok");
 await popup.close();
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
