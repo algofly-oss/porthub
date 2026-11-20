@@ -28,7 +28,7 @@ function Addresses({ host }) {
 function ProviderNotice({ name, online, supported }) {
   let message;
   if (online === false) {
-    message = `${name} is offline. Connections through this agent require it to reconnect. You can save virtual hosts now.`;
+    message = `${name}’s private connection is offline. Connections through this agent require it to reconnect. You can save virtual hosts now.`;
   } else if (online === true && supported === false) {
     message = `Update the agent on ${name} to enable connections to its virtual hosts. You can configure them now.`;
   }
@@ -45,8 +45,8 @@ export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
         </div>
         <Addresses host={{ hostname: privateDomain, private_ip: host.privateIps?.[0], target_ip: host.localIp }} />
         <div className="space-y-1 text-sm text-muted-foreground">
-          <p>Serving agent {host.via?.online === true ? "online" : host.via?.online === false ? "offline" : "status unavailable"}.</p>
-          <p>This virtual host reports {host.via?.name || "the serving machine"}’s connection. PortHub cannot verify the LAN device’s status through this entry.</p>
+          <p>Serving agent’s private connection {host.via?.online === true ? "is online" : host.via?.online === false ? "is offline" : "status is unavailable"}.</p>
+          <p>This virtual host reports {host.via?.name || "the serving machine"}’s private connection. PortHub cannot verify the LAN device’s status through this entry.</p>
           <ProviderNotice name={host.via?.name || "The serving machine"} online={host.via?.online} supported={host.via?.supports_virtual_hosts} />
         </div>
         <div className="flex flex-wrap justify-end gap-2">

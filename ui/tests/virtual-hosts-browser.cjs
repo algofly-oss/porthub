@@ -34,7 +34,7 @@ async function pick(page, editor, label, search, option) {
       const configure = `${machines}&machine=${provider._id}&machineTab=virtual-hosts`;
       await page.goto(configure);
       const panel = page.getByRole("region", { name: "Virtual hosts" });
-      await panel.getByText(/luna is offline/).waitFor();
+      await panel.getByText(/luna’s private connection is offline/).waitFor();
       await panel.getByLabel("Name", { exact: true }).fill("miro-via-luna");
       await panel.getByLabel("LAN IPv4 address").fill("192.168.1.57");
       await panel.getByLabel("LAN IPv4 address").press("Enter");
