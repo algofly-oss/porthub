@@ -386,6 +386,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let (route_changes,mut route_events)=tokio::sync::watch::channel(0u64);
     let mut route_events_open=true;let mut last_route_audit:Option<Instant>=None;
     tasks.spawn(super::interfaces::watch_with_routes(interface_updates,if cfg!(feature="private-sparse"){Some(route_changes)}else{None}, work.clone()));
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let virtual_assignments = {
+        let (send,receive) = watch::channel(None);
+        tasks.spawn(super::virtual_hosts::manage(profile.clone(),interfaces.clone(),receive,work.clone()));
+        send
+    };
     let (relay_sender, relay_input) = super::relay::channel();
     #[cfg(feature = "private-stream")]
     let (stream_output, stream_input) = mpsc::channel(256);
@@ -546,6 +552,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(if error.downcast_ref::<PrivateStage>().is_some(){error}else{error.context(PrivateStage::Background)}),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            Some(Event::VirtualHosts(list))=>{
+                list.check()?;
+                virtual_assignments.send_replace(Some(list));
+            },
             Some(Event::Snapshot(authority))=>{
                 authority.check()?;
                 #[cfg(feature="local-tor")]

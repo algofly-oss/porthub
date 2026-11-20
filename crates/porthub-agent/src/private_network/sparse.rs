@@ -206,6 +206,10 @@ impl Handle {
         let left=match &s.authority {Some(authority)=>authority.remaining().ok()?.map(|left|left.as_secs()).unwrap_or(5),None=>5};
         (left>0).then_some(left.min(5) as u32)
     }
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    pub(super) fn current_base(&self) -> Option<super::authority_event::Authority<()>> {
+        self.state.lock().ok()?.authority.clone()
+    }
     pub(crate) fn authority_valid(&self)->bool {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
         !self.revoked() && s.authority.as_ref().is_none_or(|a|a.check().is_ok())

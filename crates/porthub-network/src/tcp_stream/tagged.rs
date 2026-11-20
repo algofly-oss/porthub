@@ -53,6 +53,7 @@ pub struct Packet {
     permit: SendPermit,
 }
 impl Packet {
+    pub fn admission(&self) -> SendPermit { self.permit.clone() }
     pub fn remaining(&self) -> Option<Duration> {
         self.permit.remaining()
     }

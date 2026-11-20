@@ -126,3 +126,6 @@ mod native_desktop_lifecycle_fixture;
 mod native_resolver_lifecycle_fixture;
 
 mod native_owner;
+
+#[cfg(all(feature = "private-stream", feature = "private-sparse"))]
+mod virtual_hosts;
