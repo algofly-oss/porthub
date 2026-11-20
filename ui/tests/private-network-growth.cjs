@@ -6,7 +6,7 @@ const {launchBrowser,waitForWorkspaceLayout}=require('./browser.cjs');
  try{for(const width of [1512,402,320]){
   const viewport={width,height:width===1512?982:874},context=await browser.newContext({viewport,locale:'en-US',isMobile:width<768,hasTouch:width<768,serviceWorkers:'block'});
   const state=makeDemoData(),pools=['10.203.0.0/16',...Array.from({length:10},(_,i)=>`10.204.${i}.0/24`)];
-  state.access={books:[],invitations:[],network:{cidr:pools[0],dns_suffix:'phub',auto_expand:true,cidrs:pools,address_capacity:65534+2540}};
+  state.access={books:[],invitations:[],network:{native_renumber_held:false,cidr:pools[0],dns_suffix:'phub',auto_expand:true,cidrs:pools,address_capacity:65534+2540}};
   await context.addInitScript(seed=>{sessionStorage.setItem('porthub-demo-v1',JSON.stringify(seed));delete Object.getPrototypeOf(navigator).serviceWorker;},state);
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:3219'}/home?demo=1&view=access&tab=network`);
@@ -21,6 +21,10 @@ const {launchBrowser,waitForWorkspaceLayout}=require('./browser.cjs');
   assert.equal(await panel.getByLabel('Private IPv4 range',{exact:true}).inputValue(),pools[0]);
   assert.equal(await panel.getByLabel('Private DNS suffix',{exact:true}).inputValue(),'phub');
   await panel.getByRole('button',{name:'Save Preferences',exact:true}).scrollIntoViewIfNeeded();assert(await panel.getByRole('button',{name:'Save Preferences',exact:true}).isVisible());
+  await panel.getByRole('button',{name:'Pause renumbering',exact:true}).click();
+  await panel.getByText(/^Paused\. Resuming/).waitFor();
+  await panel.getByRole('button',{name:'Resume renumbering',exact:true}).click();
+  await panel.getByText(/^Enabled\. A VPN/).waitFor();
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'No horizontal page overflow');assert.deepEqual(errors,[]);
   await page.screenshot({path:`/tmp/porthub-private-network-growth-${engine}-${width}.png`});await context.close();console.log(`PASS automatic private network pools ${engine} ${width}`);
  }}finally{await browser.close();}

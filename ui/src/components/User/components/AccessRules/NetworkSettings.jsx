@@ -23,6 +23,20 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
       setBusy(false);
     }
   }
+  const held = data.network.native_renumber_held;
+  async function setHold() {
+    setBusy(true);
+    setError("");
+    try {
+      await axios.put(`${API}/network/renumber-hold`, { held: !held }, { params });
+      await onSaved();
+      toast.success(held ? "Automatic renumbering resumed." : "Automatic renumbering paused.");
+    } catch (error) {
+      setError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <section className="rounded-xl bg-surface p-4 sm:p-6">
       <h2 className="text-base font-semibold">Private Network Preferences</h2>
@@ -84,6 +98,21 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
           </Button>
         )}
       </form>
+      {typeof held === "boolean" && (
+        <div className="mt-6 max-w-xl space-y-2 border-t border-input pt-5">
+          <h3 className="text-sm font-medium">Automatic renumbering</h3>
+          <p className="text-sm leading-6 text-muted-foreground">
+            {held
+              ? "Paused. Resuming allows pending VPN address conflicts to trigger a workspace-wide address change."
+              : "Enabled. A VPN address conflict on one machine can change private addresses throughout this workspace."}
+          </p>
+          {manage && (
+            <Button type="button" variant="outline" disabled={busy} onClick={setHold}>
+              {held ? "Resume renumbering" : "Pause renumbering"}
+            </Button>
+          )}
+        </div>
+      )}
     </section>
   );
 }

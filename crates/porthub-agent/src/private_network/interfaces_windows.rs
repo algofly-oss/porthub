@@ -13,14 +13,7 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         if !interface.flags.contains(InterfaceFlags::UP)
             || interface.flags.contains(InterfaceFlags::LOOPBACK)
             || interface.name.to_ascii_lowercase().starts_with("ph")
-            || interface
-                .description
-                .to_ascii_lowercase()
-                .contains("porthub")
-            || interface
-                .description
-                .to_ascii_lowercase()
-                .contains("wintun")
+            || porthub_mesh::underlay::overlay_interface(&interface.name, &interface.description)
         {
             continue;
         }

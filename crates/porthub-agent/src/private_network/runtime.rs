@@ -359,8 +359,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let owns_component_maintenance = logs.is_some();
     let mut component_maintenance = None;
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
+    // Older VPN discovery clients skip tun0-prefixed devices but advertise
+    // unrecognized TUN names as physical ICE endpoints to other machines.
+    #[cfg(target_os = "linux")]
+    let prefix = "tun0ph";
+    #[cfg(not(target_os = "linux"))]
+    let prefix = "ph";
     let name = format!(
-        "ph{}",
+        "{prefix}{}",
         &format!("{:x}", Sha256::digest(profile.peer_id.as_bytes()))[..8]
     );
     let traffic=super::traffic::Tracker::new(&path);

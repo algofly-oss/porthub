@@ -22,13 +22,30 @@ use std::{
 };
 
 pub fn router() -> Router<Arc<App>> {
-    Router::new()
+    let router = Router::new()
         .route("/api/access/snapshot", get(snapshot))
         .route("/api/access/network", put(network))
         .route(
             "/api/access/private/peers/{id}",
             put(change_peer).delete(revoke_peer),
-        )
+        );
+    #[cfg(feature = "private-sparse")]
+    let router = router.route("/api/access/network/renumber-hold", put(set_renumber_hold));
+    router
+}
+
+#[cfg(feature = "private-sparse")]
+async fn set_renumber_hold(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(query): Query<WorkspaceQuery>,
+    ApiBody(raw): ApiBody,
+) -> ApiResult<Json<Value>> {
+    let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    let held = Model::new(raw)?.field(&["held"]).and_then(|value| value.as_bool())
+        .ok_or_else(|| ApiError::bad_request("held must be a boolean"))?;
+    crate::private_renumber::native_repair::set_hold(&app, owner, held).await?;
+    Ok(Json(json!({"native_renumber_held": held})))
 }
 
 async fn change_peer(

@@ -59,7 +59,7 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         };
         // SAFETY: ifa_name is a NUL-terminated interface name from getifaddrs.
         let name = unsafe { CStr::from_ptr(item.ifa_name) }.to_string_lossy();
-        if ["lo", "utun", "bridge", "awdl", "llw", "gif", "stf", "ph"]
+        if porthub_mesh::underlay::overlay_interface(&name, "") || ["lo", "utun", "bridge", "awdl", "llw", "gif", "stf", "ph"]
             .iter()
             .any(|p| name.starts_with(p))
         {

@@ -16,9 +16,7 @@ pub struct Kernel {
 impl Kernel {
     pub fn new(interface: &str) -> Result<Self> {
         ensure!(
-            interface.len() == 10
-                && interface.starts_with("ph")
-                && interface[2..].bytes().all(|c| c.is_ascii_hexdigit()),
+            porthub_mesh::underlay::porthub_tun_name(interface),
             "invalid exit interface"
         );
         Ok(Self {

@@ -38,9 +38,7 @@ impl Tun {
     }
     pub async fn open(name: &str, own: Ipv4Addr, peers: &[Ipv4Addr]) -> Result<Self> {
         ensure!(
-            name.len() == 10
-                && name.starts_with("ph")
-                && name[2..].bytes().all(|c| c.is_ascii_hexdigit())
+            porthub_mesh::underlay::porthub_tun_name(name)
                 && own.is_private(),
             "invalid private interface configuration"
         );

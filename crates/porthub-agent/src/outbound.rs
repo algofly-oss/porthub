@@ -119,7 +119,7 @@ pub async fn discover(settings: &Settings, destinations: &[SocketAddr]) -> Resul
             if !interface.flags.contains(getifaddrs::InterfaceFlags::UP)
                 || source.is_ipv4() != destination.is_ipv4()
                 || !porthub_mesh::underlay::candidate_ip(source)
-                || interface.name.starts_with("ph")
+                || (interface.name.starts_with("ph") || porthub_mesh::underlay::porthub_tun_name(&interface.name))
                 || settings
                     .interface
                     .as_ref()

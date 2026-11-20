@@ -2,7 +2,7 @@
 //! before every query; shared workspace reads never use machine serializers
 //! containing enrollment tokens or credentials.
 use crate::{
-    domain::{enrollment, inventory, workspaces},
+    domain::{inventory, workspaces},
     error::{ApiError, ApiResult},
     inventory_query::{conditional, search_pipeline, Params},
     store, App,
@@ -105,10 +105,10 @@ pub async fn page(
         let prefs = app
             .collection("private_networks")
             .find_one(doc! {"_id":owner.to_hex()})
-            .projection(doc! {"cidr":1,"dns_suffix":1})
+            .projection(doc! {"cidr":1,"dns_suffix":1,"additional_cidrs":1,"native_renumber_held":1})
             .await?
             .unwrap_or_default();
-        let (network, suffix) = enrollment::preferences(&prefs)?;
+        let network = crate::domain::private_networks::describe(&prefs)?;
         let mut counts = serde_json::Map::new();
         for (name, collection, filter) in [
             (
@@ -134,7 +134,7 @@ pub async fn page(
             .unwrap_or_default();
         return conditional(
             headers,
-            json!({"data":{"workspace_id":owner.to_hex(),"workspace_name":format!("{}'s Workspace",store::string(&owner_record,"name")),"role":role,"transport_ready":false,"network":{"cidr":network.cidr(),"dns_suffix":suffix},"counts":counts}}),
+            json!({"data":{"workspace_id":owner.to_hex(),"workspace_name":format!("{}'s Workspace",store::string(&owner_record,"name")),"role":role,"transport_ready":false,"network":network,"counts":counts}}),
         );
     }
     let collection = match kind {
