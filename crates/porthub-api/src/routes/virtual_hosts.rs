@@ -201,6 +201,7 @@ async fn create(
             .await?;
         return Err(conflict("Virtual host removal is in progress"));
     }
+    app.private_changes.changed(owner);
     Ok(Json(json!({"virtual_host":view(&child,&parent,&suffix)})))
 }
 async fn remove(
@@ -217,6 +218,7 @@ async fn remove(
     #[cfg(feature = "private-sparse")]
     let _stable = crate::private_renumber::fence::revocation(&app, owner).await?;
     delete_child(&app, owner, parent, child).await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"removed":true})))
 }
 

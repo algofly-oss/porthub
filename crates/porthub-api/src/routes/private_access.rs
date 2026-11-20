@@ -75,6 +75,7 @@ async fn change_peer(
         ));
     }
     if !enabled { super::virtual_hosts::retire_with_children(&app,owner,&id).await?; }
+    app.private_changes.changed(owner);
     Ok(Json(
         json!({"msg":if enabled {"Private access enabled"} else {"Private access disabled"}}),
     ))
@@ -114,6 +115,7 @@ async fn revoke_peer(
     app.collection("private_signals")
         .delete_many(doc! {"$or":[{"from":&id},{"to":&id}]})
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(
         json!({"msg":"Private credential revoked; public access is unchanged"}),
     ))
@@ -131,6 +133,7 @@ async fn network(
     crate::routes::dns_rules::ensure_zones_available(&app, &Bson::ObjectId(owner), std::slice::from_ref(&suffix)).await?;
     ensure_suffix_unique(&app, &owner, &suffix).await?;
     crate::domain::private_networks::save(&app, &owner.to_hex(), network, &suffix).await?;
+    app.private_changes.changed(owner);
     Ok(Json(
         json!({"data":{"cidr":network.cidr(),"dns_suffix":suffix},"transport_ready":false}),
     ))

@@ -28,7 +28,29 @@ async fn virtual_host_has_a_separate_acl_identity_and_requires_its_enrolled_pare
         for target in ["127.0.0.1","169.254.169.254","8.8.8.8","10.203.0.2"]{
             case.status("POST",&endpoint,&cookie,json!({"name":"wrong","target_ip":target}),StatusCode::BAD_REQUEST).await?;
         }
+        #[cfg(feature="private-sparse")]
+        let pending_change = {
+            let enrollment = json!({"peer_id":parent,"token":parent_token,"fingerprint":vec!["AB";32].join(":"),
+                "instance":"native-virtual-fixture-12345","watch_changes":true,"virtual_host_provider":1});
+            let (status,headers,body)=case.call("POST","/api/access/private/sync","",enrollment,&[]).await?;
+            ensure!(status==StatusCode::OK && body["virtual_hosts"].as_array().is_some_and(Vec::is_empty));
+            let cursor=headers.get("x-porthub-private-cursor").ok_or_else(||anyhow::anyhow!("missing private cursor"))?.to_str()?.to_owned();
+            let watch=json!({"peer_id":parent,"token":parent_token,"instance":"native-virtual-fixture-12345","since":cursor});
+            let mut forged=watch.clone();forged["token"]=json!("fixture-wrong-token");
+            case.status("POST","/api/access/private/changes","",forged,StatusCode::FORBIDDEN).await?;
+            (watch,cursor)
+        };
         let added=case.status("POST",&endpoint,&cookie,create.clone(),StatusCode::OK).await?["virtual_host"].clone();
+        #[cfg(feature="private-sparse")]
+        {
+            // The edit committed before the provider started waiting. It must
+            // still get a wake without waiting for another edit or the timeout.
+            let (watch,previous)=pending_change;
+            let changed=tokio::time::timeout(std::time::Duration::from_secs(1),
+                case.status("POST","/api/access/private/changes","",watch,StatusCode::OK)).await??;
+            ensure!(changed["cursor"].as_str().is_some_and(|cursor|cursor!=previous));
+        }
+
         let id=added["id"].as_str().unwrap();let peer=format!("{owner}:{id}");
         ensure!(added["hostname"]=="miro-via-luna.phub" && added["private_ip"]!="192.168.0.166" && added["via"]["id"]==provider.to_hex());
         ensure!(case.status("POST",&endpoint,&cookie,create,StatusCode::OK).await?["virtual_host"]==added);

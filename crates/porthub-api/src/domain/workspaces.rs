@@ -127,5 +127,6 @@ pub async fn accept_invitation(app: &App, user: &Document, token: &str) -> ApiRe
             .await;
         return Err(error.into());
     }
+    if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
     Ok(owner_id)
 }
