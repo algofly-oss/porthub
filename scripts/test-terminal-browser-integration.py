@@ -72,7 +72,8 @@ def main():
             run(dict(os.environ), test_command + ['local_dashboard_pool_replenishes_and_withdraws_enrolled_shells', '--', '--ignored', '--exact', '--nocapture'])
             for browser in browsers:
                 preview = dict(os.environ, REVIEW_ORIGIN=f'http://127.0.0.1:{server.server_port}', REVIEW_BROWSER=browser)
-                owner_environment = dict(preview, PORTHUB_TEST_UI_ORIGIN=gateway)
+                owner_environment = dict(preview, PORTHUB_TEST_UI_ORIGIN=gateway,
+                                         PORTHUB_TEST_TERMINAL_PHONE='1' if browser == 'webkit' else '0')
                 owner_environment.pop('PORTHUB_TEST_NATIVE_HOST', None)
                 owner_environment.pop('PORTHUB_TEST_TERMINAL_DIRECT', None)
                 run(owner_environment, test_command + ['dashboard_owner_opens_a_reserved_nonprivileged_workspace', '--', '--ignored', '--exact', '--nocapture'])

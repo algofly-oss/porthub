@@ -8,7 +8,10 @@ async function exercise() {
   const browser = await launchBrowser();
   try {
     async function login(cookie) {
-      const context = await browser.newContext({viewport:{width:1440,height:900}});
+      const mobile = process.env.PORTHUB_TEST_TERMINAL_PHONE === "1";
+      const context = await browser.newContext(mobile
+        ? {viewport:{width:390,height:844},hasTouch:true,isMobile:true}
+        : {viewport:{width:1440,height:900}});
       const [name, value] = cookie.split("=");
       await context.addCookies([{name, value, url:origin, httpOnly:true, sameSite:"Lax"}]);
       return context;
