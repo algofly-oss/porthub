@@ -513,7 +513,7 @@ impl Session {
     pub async fn ready(&self) -> Result<()> {
         let mut state = self.state.clone();
         loop {
-            match state.borrow_and_update().0 {
+            match state.borrow_and_update().state {
                 State::Ready => return Ok(()),
                 State::Closed | State::Failed => anyhow::bail!("private peer handshake failed"),
                 _ => {}
