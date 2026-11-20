@@ -150,24 +150,31 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
                         // configd must see a changed supplemental configuration before
                         // mDNSResponder discards cached failures. Preserve the existing
                         // listener and domains, and yield to any competing resolver.
-                        let available = runtime.block_on(async {
+                        let next = 1 - current;
+                        let published = runtime.block_on(async {
+                            let refresh = super::dns_convergence_macos::retry_refresh(|| async {
+                                if !super::dns_convergence_macos::scope_available(&domains, &owned).await? {
+                                    return Ok(false);
+                                }
+                                let observed = store.get(key.as_str()).context("cannot read the owned private DNS resolver")?;
+                                if observed != values[current] {
+                                    return Ok(false);
+                                }
+                                ensure!(store.set_raw(key.as_str(), &values[next]),
+                                    "cannot republish the owned private DNS resolver");
+                                Ok(true)
+                            });
                             tokio::select! {
                                 biased;
                                 _ = owner_closing.cancelled() => false,
-                                result = super::dns_convergence_macos::ensure_available(&domains, &owned) => result.is_ok(),
+                                result = refresh => result,
                             }
                         });
                         if owner_closing.is_cancelled() {
                             break;
                         }
-                        if !available || store.get(key.as_str()).as_ref() != Some(&values[current]) {
-                            continue;
-                        }
-                        let next = 1 - current;
-                        if store.set_raw(key.as_str(), &values[next]) {
+                        if published {
                             current = next;
-                        } else {
-                            tracing::warn!("could not refresh the owned macOS private DNS resolver");
                         }
                     }
                 }
