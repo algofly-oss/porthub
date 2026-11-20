@@ -1,4 +1,4 @@
-//! Enrollment-only DNS integration. Preserve administrator DNS servers and PAM;
+//! Linux system resolver integration. Preserve administrator DNS servers and PAM;
 //! rollback if the real system resolver cannot answer after activation.
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -359,29 +359,131 @@ mod rollback_tests {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LookupTarget {
+    pub hostname: String,
+    pub address: std::net::Ipv4Addr,
+    pub link: Option<LinkDns>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LinkDns {
+    pub index: u32,
+    pub port: u16,
+    pub suffixes: Vec<String>,
+}
+
+impl LinkDns {
+    async fn matches(&self, own: std::net::Ipv4Addr) -> Result<bool> {
+        let bus = zbus::Connection::system().await?;
+        let manager = zbus::Proxy::new(
+            &bus,
+            "org.freedesktop.resolve1",
+            "/org/freedesktop/resolve1",
+            "org.freedesktop.resolve1.Manager",
+        )
+        .await?;
+        let path: zbus::zvariant::OwnedObjectPath =
+            manager.call("GetLink", &(self.index as i32,)).await?;
+        let link = zbus::Proxy::new(
+            &bus,
+            "org.freedesktop.resolve1",
+            path,
+            "org.freedesktop.resolve1.Link",
+        )
+        .await?;
+        let servers: Vec<(i32, Vec<u8>, u16, String)> = link.get_property("DNSEx").await?;
+        let domains: Vec<(String, bool)> = link.get_property("Domains").await?;
+        let default_route: bool = link.get_property("DefaultRoute").await?;
+        let expected_domains = self
+            .suffixes
+            .iter()
+            .all(|s| domains.iter().any(|(d, routing)| d == s && *routing));
+        Ok(!default_route
+            && domains.len() == self.suffixes.len()
+            && expected_domains
+            && servers.len() == 1
+            && servers[0].0 == libc::AF_INET
+            && servers[0].1 == own.octets()
+            && (servers[0].2 == self.port || self.port == 53 && servers[0].2 == 0)
+            && servers[0].3.is_empty())
+    }
+}
+
+impl LookupTarget {
+    async fn repair_if_stale(
+        &self,
+        target: &tokio::sync::watch::Receiver<Option<Self>>,
+        registration: &tokio::sync::Mutex<()>,
+    ) -> Result<bool> {
+        let Some(link) = &self.link else {
+            return Ok(false);
+        };
+        // A failed lookup may originate in NSS or on another VPN link.
+        if link.matches(self.address).await? {
+            return Ok(false);
+        }
+        let _guard = registration.lock().await;
+        if target.has_changed()? {
+            return Ok(false);
+        }
+        crate::private_network::dns::configure_linux_link(
+            link.index,
+            self.address,
+            link.port,
+            &link.suffixes,
+            false,
+        )
+        .await?;
+        Ok(true)
+    }
+}
+
 /// Verify the same libc lookup used by SSH, outside packet forwarding. A
 /// resolver registration alone must not make an installation appear DNS-ready.
 pub(crate) async fn monitor(
-    mut target: tokio::sync::watch::Receiver<Option<(String, std::net::Ipv4Addr)>>,
+    mut target: tokio::sync::watch::Receiver<Option<LookupTarget>>,
     result: tokio::sync::watch::Sender<Option<bool>>,
+    registration: std::sync::Arc<tokio::sync::Mutex<()>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    let mut next_repair = tokio::time::Instant::now();
     loop {
         let selected = target.borrow_and_update().clone();
-        if let Some((hostname, expected)) = selected {
-            let lookup_args = vec!["ahostsv4".into(), hostname];
+        if let Some(ref selected) = selected {
+            let expected = selected.address;
+            let lookup_args = vec!["ahostsv4".into(), selected.hostname.clone()];
             let lookup = command("/usr/bin/getent", &lookup_args);
             let ready = tokio::select! {
                 _=cancel.cancelled()=>return Ok(()),
                 answer=lookup=>answer.is_ok_and(|answer|answer.lines().filter_map(|line|line.split_whitespace().next()).any(|address|address.parse::<std::net::Ipv4Addr>()==Ok(expected))),
             };
+            match target.has_changed() {
+                Ok(true) => continue,
+                Err(_) => return Ok(()),
+                Ok(false) => {}
+            }
             result.send_replace(Some(ready));
+            if !ready && tokio::time::Instant::now() >= next_repair {
+                next_repair = tokio::time::Instant::now() + Duration::from_secs(30);
+                if matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        selected.repair_if_stale(&target, &registration)
+                    )
+                    .await,
+                    Ok(Ok(true))
+                ) {
+                    tracing::debug!("restored private DNS on the tunnel interface");
+                    continue;
+                }
+            }
         } else {
             result.send_replace(None);
         }
         tokio::select! {
             _=cancel.cancelled()=>return Ok(()),
-            changed=target.changed()=>{if changed.is_err(){return Ok(());}result.send_replace(None);},
+            changed=target.changed()=>{if changed.is_err(){return Ok(());}next_repair=tokio::time::Instant::now();result.send_replace(None);},
             _=tokio::time::sleep(Duration::from_secs(10))=>{},
         }
     }
