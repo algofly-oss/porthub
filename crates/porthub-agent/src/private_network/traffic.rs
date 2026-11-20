@@ -85,7 +85,7 @@ impl Tracker {
             state: Mutex::new(State {
                 journal,
                 last: Instant::now(),
-                last_wall: chrono::Utc::now().timestamp_millis(),
+                last_wall: porthub_network::local_wall_time().timestamp_millis(),
                 last_report: None,
                 enabled,
                 dirty: false,
@@ -184,7 +184,7 @@ impl Tracker {
         }
         let elapsed = state.last.elapsed().as_secs();
         let duration = elapsed.clamp(1, 120) as u32;
-        let observed_at = chrono::Utc::now().timestamp_millis();
+        let observed_at = porthub_network::local_wall_time().timestamp_millis();
         let start = state.last_wall;
         state.last_wall = observed_at;
         let invalid_interval =

@@ -332,7 +332,7 @@ impl Engine {
             }else{None};
             let remaining = snapshot
                 .expires_at
-                .signed_duration_since(Utc::now())
+                .signed_duration_since(crate::local_wall_time())
                 .to_std().map_err(|_| anyhow::anyhow!("private policy lease expired; check host clock synchronization and gateway connectivity"))?;
             ensure!(
                 !remaining.is_zero()

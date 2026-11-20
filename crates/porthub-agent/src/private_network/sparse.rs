@@ -243,7 +243,7 @@ impl Handle {
         s.authority = authority;
         s.deadline = snapshot
             .expires_at
-            .signed_duration_since(chrono::Utc::now())
+            .signed_duration_since(porthub_network::local_wall_time())
             .to_std()
             .ok()
             .map(|left| Instant::now() + left);
@@ -451,7 +451,7 @@ impl Handle {
         }
         let Ok(left) = lease
             .expires_at
-            .signed_duration_since(chrono::Utc::now())
+            .signed_duration_since(porthub_network::local_wall_time())
             .to_std()
         else {
             return;

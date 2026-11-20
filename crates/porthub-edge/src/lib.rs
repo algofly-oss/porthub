@@ -1,6 +1,7 @@
 //! Shared HTTP ingress for the embedded Rathole server.
 pub mod apply;
 mod health;
+mod gateway_clock;
 
 use axum::{
     extract::{ws::WebSocketUpgrade, FromRequestParts, Request, State},
@@ -152,6 +153,7 @@ pub fn router_with_web(
     Router::new()
         .route("/api/tunnel", get(tunnel))
         .route("/healthz", get(health::check))
+        .route("/api/gateway/clock", axum::routing::post(gateway_clock::sample))
         .fallback(upstream)
         .with_state(edge)
         .layer(axum::middleware::from_fn(
@@ -162,6 +164,14 @@ pub fn router_with_web(
                         .extensions()
                         .get::<Ingress>()
                         .is_some_and(|ingress| ingress.secure);
+                    // The edge key authenticates this sample. A virtual web host
+                    // must never be able to supply the clock reply for that key.
+                    if secure && request.method() == axum::http::Method::POST
+                        && request.uri().path() == "/api/gateway/clock"
+                        && request.headers().contains_key("porthub-clock-nonce")
+                    {
+                        return next.run(request).await;
+                    }
                     match web.select(&request, secure) {
                         porthub_runtime::web_routes::Selection::Proxy(proxy) => {
                             proxy.forward_with_security(request, secure).await

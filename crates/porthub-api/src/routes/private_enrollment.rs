@@ -225,7 +225,7 @@ async fn bootstrap(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiRes
         return Err(conflict("Enrollment was already completed or superseded"));
     }
     if let Ok(owner)=peer.get_object_id("workspace_id"){app.private_changes.changed(owner);}
-    Ok(([(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer")],Json(json!({"peer_id":store::field(&peer,"_id"),"token":credential,"workspace":store::field(&peer,"workspace_id")}))).into_response())
+    Ok(([(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer")],Json(json!({"peer_id":store::field(&peer,"_id"),"token":credential,"workspace":store::field(&peer,"workspace_id"),"clock_origin":crate::gateway_origin::clock_origin(&app)}))).into_response())
 }
 async fn rename(
     State(app): State<Arc<App>>,

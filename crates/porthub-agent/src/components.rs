@@ -58,6 +58,9 @@ pub fn cache_root() -> Result<PathBuf> {
     Ok(root)
 }
 pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
+    manager_with_routes(enrolled_gateway,network::Routes::new()?)
+}
+fn manager_with_routes(enrolled_gateway:Option<&str>,routes:network::Routes)->Result<Manager>{
     let root = cache_root()?;
     let parent = root.parent().context("component cache requires a parent")?;
     crate::service::directory(parent, true)?;
@@ -103,7 +106,7 @@ pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
             disabled,
             pins,
         },
-        Arc::new(Http::new()?.with_routing(Arc::new(network::Routes::new()?))),
+        Arc::new(Http::new()?.with_routing(Arc::new(routes))),
     )?;
     let shared = match std::env::var_os("PORTHUB_COMPONENT_SHARED_CACHE") {
         Some(value) if value == "off" => return Ok(manager),
@@ -145,6 +148,14 @@ fn system_cache_directory() -> Result<PathBuf> {
     }
 }
 pub fn background(gateway: &str, cancel: &CancellationToken) -> Result<Guard> {
+    start_maintenance(manager(Some(gateway))?,cancel)
+}
+#[cfg(feature="private-sparse")]
+pub(crate) fn private_background(gateway:&str,cancel:&CancellationToken,clock:network::ClockReceiver)->Result<Guard>{
+    let routes=network::Routes::for_registration(gateway,clock)?;
+    start_maintenance(manager_with_routes(Some(gateway),routes)?,cancel)
+}
+fn start_maintenance(manager:Manager,cancel:&CancellationToken)->Result<Guard>{
     let options = MaintenanceOptions {
         prefetch: match std::env::var("PORTHUB_COMPONENT_PREFETCH").as_deref() {
             Ok("false" | "0") => false,
@@ -153,7 +164,7 @@ pub fn background(gateway: &str, cancel: &CancellationToken) -> Result<Guard> {
         },
         ..Default::default()
     };
-    Ok(Guard::start(manager(Some(gateway))?, options, cancel))
+    Ok(Guard::start(manager, options, cancel))
 }
 pub async fn worker(
     component: Component,

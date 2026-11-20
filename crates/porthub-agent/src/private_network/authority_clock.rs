@@ -9,6 +9,16 @@ use std::{
 
 pub(crate) const REQUEST_VALIDITY: Duration = Duration::from_secs(15);
 
+#[derive(Debug)]
+pub(super) struct RequestExpired;
+
+impl std::fmt::Display for RequestExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("logical authority request expired")
+    }
+}
+impl std::error::Error for RequestExpired {}
+
 /// The machine slept through an entire authority window while this request was live.
 #[derive(Debug)]
 pub(crate) struct ExpiredDuringSuspend;
@@ -100,6 +110,7 @@ pub(crate) struct RequestWindow {
     awake_start: Instant,
     wall_start: SystemTime,
     relative_deadlines: bool,
+    pub(super) clock_sample: Option<super::gateway_time::ClockSample>,
 }
 impl RequestWindow {
     pub(crate) fn start(clock: Arc<dyn SuspendClock>) -> Result<Self> {
@@ -121,6 +132,7 @@ impl RequestWindow {
             awake_start: Instant::now(),
             wall_start: SystemTime::now(),
             relative_deadlines: false,
+            clock_sample: None,
         })
     }
     pub(crate) fn use_relative_deadlines(&mut self) {
@@ -168,11 +180,11 @@ impl RequestWindow {
         let boot = limit
             .checked_sub(elapsed)
             .filter(|n| !n.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
+            .ok_or(RequestExpired)?;
         let awake = limit
             .checked_sub(awake_elapsed)
             .filter(|n| !n.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
+            .ok_or(RequestExpired)?;
         Ok(boot.min(awake))
     }
 }
@@ -283,7 +295,7 @@ mod tests {
         let limit = Duration::from_millis(500);
         assert!(original.remaining_within(limit).unwrap() <= Duration::from_millis(250));
         clock.0.store(600, Ordering::SeqCst);
-        assert!(original.remaining_within(limit).is_err());
+        assert!(original.remaining_within(limit).unwrap_err().is::<RequestExpired>());
         assert!(original.clone().remaining_within(limit).is_err());
         assert!(original.remaining_within(Duration::ZERO).is_err());
         assert!(original.remaining_within(Duration::from_secs(16)).is_err());

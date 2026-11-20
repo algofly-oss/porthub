@@ -467,7 +467,14 @@ pub async fn run_with_logs(
     let _lease = Lease::acquire(&path)?;
     #[cfg(target_os="linux")]
     let _wsl_local_dns=crate::wsl_local_dns::start(&cancel);
-    let control = std::sync::Arc::new(Control::new(profile.clone())?);
+    let control = Control::new(profile.clone())?;
+    #[cfg(feature = "private-sparse")]
+    let control = {
+        let mut control = control;
+        control.use_registration_clock(&path);
+        control
+    };
+    let control = std::sync::Arc::new(control);
     let _metrics = crate::metrics::start(path.clone(), control.clone(), cancel.clone());
     let _usb = crate::usb::start(path.clone(), control.clone(), cancel.clone());
     #[cfg(any(target_os="linux",target_os="macos",windows))]
@@ -606,7 +613,14 @@ pub async fn run_with_logs(
                         state(&path, &session, status_name)?;
                         if !components_started && crate::features::enabled(&path,crate::features::Feature::AutoUpdate) {
                             components_started = true;
-                            _component_maintenance = crate::components::background(&profile.server, &cancel).map(Some)
+                            #[cfg(feature = "private-sparse")]
+                            let maintenance = match control.component_clock() {
+                                Some(clock) => crate::components::private_background(&profile.server, &cancel, clock),
+                                None => crate::components::background(&profile.server, &cancel),
+                            };
+                            #[cfg(not(feature = "private-sparse"))]
+                            let maintenance = crate::components::background(&profile.server, &cancel);
+                            _component_maintenance = maintenance.map(Some)
                                 .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; forwarding remains active"); None });
                         }
                         #[cfg(any(target_os = "linux", target_os = "macos"))]

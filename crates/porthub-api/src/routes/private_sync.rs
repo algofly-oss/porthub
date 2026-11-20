@@ -804,6 +804,9 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");
     }
     if let Some(nonce) = &input.clock_nonce {
+        if input.refresh_clock_origin {
+            response["clock_origin"] = crate::gateway_origin::clock_origin(&app).unwrap_or(serde_json::Value::Null);
+        }
         response["authority_clock"] = json!({"nonce": nonce, "server_time": chrono::Utc::now()});
     }
     if serde_json::to_vec(&response).expect("typed control response").len()>4*1024*1024 {

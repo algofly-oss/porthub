@@ -121,6 +121,10 @@ impl<T> Authority<T> {
     }
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
     pub(crate) fn retirement_domain(&self) -> Option<Domain> { self.retirement.clone() }
+    #[cfg(feature="private-sparse")]
+    pub(super) fn clock_sample(&self) -> Option<super::gateway_time::ClockSample> {
+        self.witness.as_ref().and_then(|window|window.clock_sample)
+    }
     pub(crate) fn retained(&self) -> Authority<()> {
         Authority {
             value: (),

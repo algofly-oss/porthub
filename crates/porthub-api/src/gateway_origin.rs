@@ -255,6 +255,21 @@ pub fn metadata(app: &crate::App) -> Option<porthub_identity::origin::Metadata> 
     .ok()
 }
 
+/// Direct edge identity for an enrolled agent's credential-free clock probe.
+/// This uses operator settings and local key metadata without IP discovery.
+pub fn clock_origin(app: &crate::App) -> Option<serde_json::Value> {
+    let key = metadata(app)?;
+    let origin = if let Some(url) = &app.config.private_relay_tls_origin {
+        advertised_url(url).ok()?
+    } else {
+        let mut url = advertised_url(app.config.gateway_advertised_url.as_deref()?).ok()?;
+        url.set_scheme("https").ok()?;
+        url.set_port(Some(key.tls_port)).ok()?;
+        url
+    };
+    Some(serde_json::json!({"url":origin.as_str(), "spki_sha256":key.spki_sha256}))
+}
+
 /// Pair the explicitly advertised external endpoint with the role-owned edge key.
 pub fn pinned_private_relay(app: &crate::App) -> Option<serde_json::Value> {
     let url = app.config.private_relay_tls_origin.as_ref()?;

@@ -331,7 +331,29 @@ pub async fn run_with_logs(
     cancel: CancellationToken,
     logs: crate::logs::Buffer,
 ) -> Result<()> {
-    run_inner(path, cancel, Some(logs)).await
+    #[cfg(not(feature = "private-sparse"))]
+    return run_inner(path, cancel, Some(logs)).await;
+
+    #[cfg(feature = "private-sparse")]
+    loop {
+        let result = run_inner(path.clone(), cancel.child_token(), Some(logs.clone())).await;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        match result {
+            Err(error) if error.is::<super::authority_clock::RequestExpired>()
+                || error.is::<super::ExpiredDuringSuspend>() => {
+                // run_inner has already revoked the old authority and removed
+                // its routes. Restart the data plane with a fresh request.
+                tracing::info!("private authority expired; requesting a fresh lease");
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = crate::unified::private_retry_delay(Duration::from_secs(5)) => {}
+                }
+            }
+            other => return other,
+        }
+    }
 }
 
 fn check_installed_authority(
@@ -362,6 +384,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     // worker. A standalone private enrollment owns its own background updates.
     let owns_component_maintenance = logs.is_some();
     let mut component_maintenance = None;
+    #[cfg(feature="private-sparse")]
+    let (component_clock, component_clock_rx)=tokio::sync::watch::channel(None);
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     // Older VPN discovery clients skip tun0-prefixed devices but advertise
     // unrecognized TUN names as physical ICE endpoints to other machines.
@@ -573,6 +597,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let cached_authority=authority.clone();
                 let snapshot=authority.accepted()?.clone();
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
+                #[cfg(feature="private-sparse")]
+                component_clock.send_replace(authority.clock_sample());
                 let mut route_snapshot=super::exit_plumbing::project(&snapshot,&sparse_handle.exit_leases());
                 #[cfg(feature="local-tor")]
                 {
@@ -793,7 +819,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if first_ready {
                     status_tick.reset_immediately();
                     if owns_component_maintenance {
-                        component_maintenance = crate::components::background(&profile.server, &work).map(Some)
+                        #[cfg(feature="private-sparse")]
+                        let maintenance=crate::components::private_background(&profile.server,&work,component_clock_rx.clone());
+                        #[cfg(not(feature="private-sparse"))]
+                        let maintenance=crate::components::background(&profile.server,&work);
+                        component_maintenance = maintenance.map(Some)
                             .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; private networking remains active"); None });
                     }
                 }
@@ -1196,7 +1226,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             {
                 super::tor_exit::reconcile(&mut local_tor,tor_route_groups,&tor_settings.borrow(),&path.with_extension("tor"),interfaces.clone(),events.clone(),work.child_token())?;
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
-                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.value.expires_at > chrono::Utc::now() && snapshot.check().is_ok()) {
+                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.value.expires_at > porthub_network::local_wall_time() && snapshot.check().is_ok()) {
                     events.send(Event::Snapshot(snapshot)).await.map_err(|_|anyhow::anyhow!("private packet owner closed"))?;
                 }
             }

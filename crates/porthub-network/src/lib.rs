@@ -10,3 +10,9 @@ pub mod tcp_stream;
 
 pub mod capture_routes;
 pub mod native_repair;
+
+/// Local wall time for comparing deadlines already translated into the
+/// host's clock domain. SystemTime supports machines booted before 1970.
+pub fn local_wall_time() -> chrono::DateTime<chrono::Utc> {
+    std::time::SystemTime::now().into()
+}

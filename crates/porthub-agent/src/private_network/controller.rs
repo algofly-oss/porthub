@@ -44,6 +44,9 @@ struct Reply {
     virtual_hosts: Vec<super::virtual_hosts::Spec>,
     #[serde(default)]
     pinned_relay: Option<super::relay::PinnedRelay>,
+    #[cfg(feature="private-sparse")]
+    #[serde(default)]
+    clock_origin: Option<super::relay::PinnedRelay>,
     snapshot: Snapshot,
     #[serde(default)]
     exit_pick: Option<porthub_network::policy::ExitPickResponse>,
@@ -387,12 +390,20 @@ pub(crate) async fn run_endpoint(
         instance,
         certificate: identity,
     } = local;
-    let control = Arc::new(crate::control::Control::new_private(&profile)?);
+    let mut control = crate::control::Control::new_private(&profile)?;
+    #[cfg(feature="private-sparse")]
+    let mut clock_pin = native_profile.as_deref().and_then(|p| super::clock_identity::read(p,&profile));
+    #[cfg(feature="private-sparse")]
+    if let Some(pin)=clock_pin.as_ref(){let _=control.set_clock_origin(pin);}
+    #[cfg(feature="private-sparse")]
+    let mut refresh_clock_origin = Instant::now();
+    let mut control = Arc::new(control);
     let (change_cursor, cursor_rx) = watch::channel(None);
     let change_wake = Arc::new(tokio::sync::Notify::new());
     let mut announced_edit = false;
     let mut change_listener = JoinSet::new();
-    change_listener.spawn(changes::listen(control.clone(), profile.clone(), instance.clone(), cursor_rx, change_wake.clone()));
+    let listen = |control| changes::listen(control, profile.clone(), instance.clone(), cursor_rx.clone(), change_wake.clone());
+    change_listener.spawn(listen(control.clone()));
     let mut bases = control.authorities();
     // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
     // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
@@ -488,13 +499,26 @@ pub(crate) async fn run_endpoint(
         #[cfg(feature="private-sparse")]
         let clock_nonce = uuid::Uuid::new_v4().simple().to_string();
         #[cfg(feature="private-sparse")]
-        { body["clock_nonce"] = serde_json::json!(clock_nonce); }
+        let request_clock_origin = !virtual_endpoint && native_profile.is_some() && Instant::now() >= refresh_clock_origin;
+        #[cfg(feature="private-sparse")]
+        {
+            body["clock_nonce"] = serde_json::json!(clock_nonce);
+            if request_clock_origin {
+                body["refresh_clock_origin"] = true.into();
+                // A failed first sync must not defer provisioning for six hours.
+                refresh_clock_origin = Instant::now() + Duration::from_secs(60);
+            }
+        }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
+                #[cfg(feature="private-sparse")]
+                if request_clock_origin && value.authenticated_tls && reply.is_some() {
+                    refresh_clock_origin = Instant::now() + Duration::from_secs(6 * 3600);
+                }
                 if reply.is_some() {
                     let cursor = (value.authenticated_tls || profile.allow_insecure_http_for_tests)
                         .then(|| value.headers.get("x-porthub-private-cursor")?.to_str().ok()?.parse::<uuid::Uuid>().ok()).flatten();
@@ -509,7 +533,7 @@ pub(crate) async fn run_endpoint(
                 if !value.authenticated_tls {
                     if let Some(reply) = &mut reply {
                         #[cfg(feature="private-sparse")]
-                        { reply.authority_clock = None; }
+                        { reply.authority_clock = None; reply.clock_origin = None; }
                         reply.pinned_relay = None;
                         #[cfg(all(feature="private-sparse",feature="private-stream"))]
                         if !profile.allow_insecure_http_for_tests {reply.virtual_hosts.clear();}
@@ -535,6 +559,7 @@ pub(crate) async fn run_endpoint(
             if let (Some(window), Some(clock)) = (&mut request_window, &reply.authority_clock) {
                 ensure!(clock.nonce == clock_nonce, "private authority response does not match request");
                 window.use_relative_deadlines();
+                window.clock_sample=super::gateway_time::ClockSample::from_sync(clock.server_time);
                 reply.snapshot.expires_at = window.local_expiry(clock.server_time, reply.snapshot.expires_at)?;
                 let leases = reply.pair_responses.iter_mut().filter_map(|p| p.lease.as_mut())
                     .chain(reply.exit_pick.iter_mut().filter_map(|pick| pick.lease.as_mut()));
@@ -556,6 +581,21 @@ pub(crate) async fn run_endpoint(
                 reply.snapshot.peers.len() <= 4096 && reply.signals.len() <= 128 && reply.proxy_jobs.len() <=64,
                 "private sync exceeds limits"
             );
+            #[cfg(feature="private-sparse")]
+            if let (Some(path),Some(pin))=(native_profile.as_deref(),reply.clock_origin.as_ref()) {
+                if clock_pin.as_ref() != Some(pin) {
+                    let mut replacement = crate::control::Control::new_private(&profile)?;
+                    if replacement.set_clock_origin(pin).is_ok()
+                        && super::clock_identity::remember(path, &profile, pin).is_ok()
+                    {
+                        // Drop requests and pools using the old trust identity before resuming the watcher.
+                        change_listener.shutdown().await;
+                        control = Arc::new(replacement);
+                        change_listener.spawn(listen(control.clone()));
+                        clock_pin = Some(pin.clone());
+                    }
+                }
+            }
             #[cfg(feature="local-tor")]
             {
                 let mut origins=Vec::new();
@@ -612,11 +652,20 @@ pub(crate) async fn run_endpoint(
             }
             let pinned_origin = reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some());
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
+                #[cfg(feature="private-sparse")]
+                clock: request_window.as_ref().and_then(|window|window.clock_sample),
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
                 pinned: pinned_origin.clone(),
                 relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
             })};
-            if *relay_config.borrow()!=direct_relay{relay_config.send_replace(direct_relay);}
+            relay_config.send_if_modified(|current| {
+                // Refresh elapsed-time references without restarting connected relay lanes.
+                #[cfg(feature="private-sparse")]
+                if let (Some(old),Some(new))=(current.as_mut(),direct_relay.as_ref()){old.clock=new.clock;}
+                if *current==direct_relay{return false;}
+                *current=direct_relay;
+                true
+            });
             let valid: HashMap<_, _> = transport_peers.iter()
                 .filter(|peer| peer.id != profile.peer_id)
                 .map(|peer| (peer.id.clone(), peer))
