@@ -290,7 +290,7 @@ impl Config {
             );
         }
         Ok(Self {
-            terminal: crate::terminal::Settings::load()?,
+            terminal: Default::default(),
             private_transport: crate::private_transport::Settings::load(),
             external_port_range,
             firewall_socket: std::env::var_os("FIREWALL_SOCKET")

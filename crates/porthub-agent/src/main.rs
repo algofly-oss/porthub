@@ -267,13 +267,6 @@ enum Command {
     Stats(porthub_agent::stats::Options),
     /// Inspect or update optional tools; normal commands prepare tools automatically.
     Components { #[command(subcommand)] command: ComponentCommand },
-    /// Start, reattach and manage persistent terminal workspaces.
-    #[cfg(unix)]
-    #[command(after_help = "Examples:\n  porthub terminal NAME                       Open or create a local workspace\n  porthub terminal ls                         List running workspaces\n  porthub terminal ls --all                   Include ended workspaces\n  porthub terminal attach NAME                Reattach without sharing\n  porthub terminal share NAME --detach        Share through browser and SSH\n  porthub terminal share NAME --access web --detach\n                                             Share through browser only\n  porthub terminal url NAME                   Show current browser URLs and SSH commands\n  porthub terminal join URL                   Join a shared terminal\n\nFlag reference (all flags, descriptions and defaults):\n  porthub terminal new --help\n  porthub terminal share --help\n  porthub terminal join --help\n  porthub terminal invite --help\n  porthub terminal ls --help\n\nLocal workspaces need no registration. Sharing uses an installed registration.\nInside a workspace:\n  Help: Ctrl+A, release both keys, then ? (Shift+/).\n  Detach: Ctrl+A, release both keys, then d. Tasks keep running.\n  Participants: Ctrl+A, release both keys, then Shift+P (owner only).\n  Scroll: mouse wheel or F7. F7 returns to the live shell.\n  Copy: drag to select; release copies and keeps your scroll position.\n        System clipboard requires support from your terminal emulator.\n\nNew workspaces use Bash when installed. The bottom bar counts active attachments.\nShared sizing follows the most recently active participant, as in tmux.\nPortHub uses its own tmux configuration; it does not load ~/.tmux.conf.")]
-    Terminal {
-        #[command(subcommand)]
-        command: Option<porthub_agent::terminal_cli::Command>,
-    },
     /// Start and manage authenticated application proxies.
     #[cfg(feature="local-tor")]
     Proxy {
@@ -1293,7 +1286,7 @@ async fn main() -> Result<()> {
             let manager = porthub_agent::components::manager(None)?;
             match command {
                 ComponentCommand::List => {
-                    for component in Component::ALL {
+                    for component in Component::ALL.into_iter().filter(|c| *c != Component::Terminal) {
                         match manager.installed(component).await {
                             Ok(versions) if !versions.is_empty() => println!("{component:<9} {}  {}", versions[0].0.version, versions[0].1.display()),
                             Ok(_) => println!("{component:<9} not downloaded"),
@@ -1303,6 +1296,7 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 ComponentCommand::Fetch { component } => {
+                    anyhow::ensure!(component != Component::Terminal, "Custom terminal access has been removed");
                     let catalog = manager.refresh(&cancel).await?;
                     eprintln!("Preparing {component}...");
                     let path = manager.ensure(&catalog, component, &cancel).await?;
@@ -1311,7 +1305,7 @@ async fn main() -> Result<()> {
                 ComponentCommand::Update => {
                     let catalog = manager.refresh(&cancel).await?;
                     let mut failed = Vec::new();
-                    for component in Component::ALL {
+                    for component in Component::ALL.into_iter().filter(|c| *c != Component::Terminal) {
                         if manager.selected(&catalog, component).is_err() { continue; }
                         if !Component::OPTIONAL.contains(&component) && !manager.has_installation(component).await? { continue; }
                         eprintln!("Preparing {component}...");
@@ -1322,16 +1316,6 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        #[cfg(unix)]
-        Some(Command::Terminal { command }) => match command {
-            Some(command) => porthub_agent::terminal_cli::run(command).await,
-            None => {
-                Args::command().find_subcommand_mut("terminal")
-                    .expect("terminal command is registered").print_long_help()?;
-                println!();
-                Ok(())
-            }
-        },
         #[cfg(feature="local-tor")]
         Some(Command::Tor {command})=>tor_command(command),
         #[cfg(feature="local-tor")]
@@ -1777,24 +1761,11 @@ mod cli_tests {
         assert!(Args::try_parse_from(["porthub","forward"]).is_err());
     }
 
-    #[cfg(all(unix,feature="terminal-direct"))]
     #[test]
-    fn native_terminal_join_is_opt_in_and_does_not_require_system_privileges() {
-        use porthub_agent::terminal_cli::{Command,JoinTransport};
-        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation"]).unwrap();
-        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Ssh,..})})));
-        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","relay"]).unwrap();
-        assert!(!requires_system_privileges(&parsed));
-        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Relay,..})})));
-        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","auto","--registration","abcdef","--user"]).unwrap();
-        assert!(!requires_system_privileges(&parsed));
-        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Auto,registration:Some(_),user:true,..})})));
-        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","auto","--stun-server","stun:example.com"]).unwrap();
-        assert!(!requires_system_privileges(&parsed));
-        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {stun_servers,..})}) if stun_servers==["stun:example.com:3478"]));
-        assert!(Args::try_parse_from(["porthub","terminal","share","--stun-server","stun:user:password@example.com"]).is_err());
-        assert!(Args::try_parse_from(["porthub","terminal","share","--relay-only","--stun-server","stun:example.com"]).is_err());
-        assert!(Args::try_parse_from(["porthub","terminal","join","url","--transport","unknown"]).is_err());
+    fn custom_terminal_commands_are_unavailable() {
+        for command in ["share", "join", "dashboard", "__serve"] {
+            assert!(Args::try_parse_from(["porthub", "terminal", command]).is_err());
+        }
     }
 
     fn args(arguments: &[&str]) -> Args {

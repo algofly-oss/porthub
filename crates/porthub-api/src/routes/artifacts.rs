@@ -58,11 +58,16 @@ async fn component_capabilities() -> Json<serde_json::Value> {
 }
 
 async fn component_catalog(State(app): State<Arc<App>>) -> ApiResult<Json<porthub_components::catalog::Catalog>> {
-    Ok(Json(app.artifacts.components().await?))
+    let mut catalog = app.artifacts.components().await?;
+    catalog.artifacts.retain(|artifact| artifact.component != porthub_components::catalog::Component::Terminal);
+    Ok(Json(catalog))
 }
 async fn component_download(State(app): State<Arc<App>>,
     Path((component, version, target, digest)): Path<(String, String, String, String)>) -> ApiResult<Response>
 {
+    if component == "terminal" {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "Not Found"));
+    }
     let (artifact, file) = app.artifacts.component(&component, &version, &target, &digest).await?;
     let mut response = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response();
     for (name, value) in [("content-type", "application/octet-stream".to_owned()),

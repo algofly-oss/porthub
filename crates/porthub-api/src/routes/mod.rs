@@ -43,7 +43,14 @@ pub fn router() -> Router<Arc<App>> {
         .merge(crate::native_media::router())
         .merge(crate::hosted_images::router())
         .merge(crate::image_rooms::router())
-        .merge(crate::terminal::router())
+        // Retired shell URLs also match legacy machine routes or cached UI assets.
+        // Reject them explicitly, before those handlers can accept credentials.
+        .route("/terminal", axum::routing::any(retired_shell))
+        .route("/terminal/", axum::routing::any(retired_shell))
+        .route("/terminal.html", axum::routing::any(retired_shell))
+        .route("/api/terminal/{*path}", axum::routing::any(retired_shell))
+        .route("/api/machines/{id}/terminal-sessions", axum::routing::any(retired_shell))
+        .route("/api/machines/{id}/terminal-sessions/{*path}", axum::routing::any(retired_shell))
         .merge(crate::terminal_traffic::router())
         .merge(crate::private_traffic::router())
         .merge(connections::router())
@@ -77,4 +84,8 @@ pub fn router() -> Router<Arc<App>> {
         .merge(traffic_routes::router())
         .merge(crate::inventory_query::router())
         .merge(crate::traffic_hover::router())
+}
+
+async fn retired_shell() -> axum::http::StatusCode {
+    axum::http::StatusCode::GONE
 }

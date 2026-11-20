@@ -60,8 +60,7 @@ async function pick(page, editor, label, search, option) {
       const configTabs = page.getByRole("group", { name: "Machine configuration sections" });
       const virtualTab = configTabs.getByRole("button", { name: "Virtual Host", exact: true });
       assert.equal(await virtualTab.getAttribute("aria-pressed"), "true");
-      await configTabs.getByRole("button", { name: "Shells", exact: true }).click();
-      await page.getByRole("region", { name: "Shell sessions" }).waitFor();
+      assert.equal(await configTabs.getByRole("button", { name: "Shells", exact: true }).count(), 0);
       await virtualTab.click();
       await panel.getByRole("heading", { name: "miro-via-luna" }).waitFor();
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

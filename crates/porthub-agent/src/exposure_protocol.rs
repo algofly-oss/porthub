@@ -131,10 +131,13 @@ async fn serve_connection_identity<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+
         return crate::features::serve(reader, &profile, message).await;
     }
     let operation=message.get("operation").and_then(serde_json::Value::as_str);
+    if matches!(operation, Some("terminal_host" | "terminal_guest_policy")) {
+        reader.get_mut().write_all(b"{\"type\":\"disabled\",\"error\":\"Custom terminal access has been removed\"}\n").await?;
+        return Ok(());
+    }
     let feature=match operation {
         Some("usb")=>Some(crate::features::Feature::Usb),
         Some("keyboard_host")=>Some(crate::features::Feature::Keyboard),
-        Some("terminal_host")=>Some(crate::features::Feature::Terminal),
         Some("image_upload")=>Some(crate::features::Feature::Images),
         None=>Some(crate::features::Feature::Expose),
         _=>None,
@@ -151,15 +154,14 @@ async fn serve_connection_identity<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+
         }));
         let result=tokio::select! {
             _=child.cancelled()=>Ok(()),
-            result=dispatch(reader,control,child.clone(),cancel.clone(),profile,message)=>result,
+            result=dispatch(reader,control,child.clone(),profile,message)=>result,
         };
         child.cancel();drop(task);return result;
     }
-    dispatch(reader,control,cancel.clone(),cancel,profile,message).await
+    dispatch(reader,control,cancel,profile,message).await
 }
 async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     reader: BufReader<S>, control: Arc<crate::control::Control>, cancel: CancellationToken,
-    service_cancel: CancellationToken,
     profile:std::path::PathBuf,message:serde_json::Value,
 )->Result<()> {
     let mut reader=reader;
@@ -169,12 +171,6 @@ async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("agent_stats") {
         return crate::stats::serve(reader,&control,&profile,message,cancel).await;
-    }
-    if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_guest_policy") {
-        return crate::terminal_policy::serve(reader,&control,&profile,message,cancel).await;
-    }
-    if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_host") {
-        return crate::terminal_transport::serve(reader, control, &profile, message, cancel, service_cancel).await;
     }
     #[cfg(feature="local-tor")]
     if matches!(message.get("operation").and_then(serde_json::Value::as_str),Some("proxy_connect"|"proxy_check")) {

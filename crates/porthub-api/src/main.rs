@@ -61,7 +61,6 @@ async fn main() -> Result<()> {
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
     porthub_api::private_migration_mode::startup_check(&app).await.map_err(|e|anyhow::anyhow!("private migration preflight failed: {}",e.detail))?;
-    porthub_api::terminal_grants::ensure_indexes(&app).await.map_err(|e|anyhow::anyhow!("terminal index initialization failed: {}",e.detail))?;
     porthub_api::inventory_query::ensure_indexes(&app)
         .await
         .map_err(|e| anyhow::anyhow!("inventory index initialization failed: {}", e.detail))?;
@@ -157,19 +156,6 @@ async fn main() -> Result<()> {
         activity_stop.subscribe(),
     ));
     let image_maintenance = tokio::spawn(porthub_api::image_storage::maintenance(app.clone(), activity_stop.subscribe()));
-    let terminal_stop = tokio_util::sync::CancellationToken::new();
-    let terminal_maintenance = tokio::spawn(porthub_api::terminal::maintenance(
-        app.clone(),
-        terminal_stop.clone(),
-    ));
-    let terminal_app = app.clone();
-    let terminal_ssh_stop = terminal_stop.clone();
-    let terminal_ssh = tokio::spawn(async move {
-        if let Err(error) = porthub_api::terminal::serve_ssh(terminal_app, terminal_ssh_stop).await
-        {
-            tracing::error!(%error,"terminal SSH gateway stopped");
-        }
-    });
     let realtime = app.clone();
     let router = porthub_api::router(app);
     let shutdown = realtime.clone();
@@ -187,9 +173,6 @@ async fn main() -> Result<()> {
             .with_graceful_shutdown(shutdown)
             .await
     };
-    terminal_stop.cancel();
-    terminal_maintenance.await?;
-    terminal_ssh.await?;
     realtime.file_relay.close();
     realtime.realtime.close().await;
     refresh.abort();

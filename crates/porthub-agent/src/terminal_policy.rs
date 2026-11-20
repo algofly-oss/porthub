@@ -1,13 +1,10 @@
 //! Secure paired-identity terminal egress decisions. Display metadata cannot
 //! approve direct traffic. Guest grants are short lived and reveal no credentials.
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio_util::sync::CancellationToken;
 
 pub(crate) fn direct_allowed(path: &Path, public: &crate::profile::Profile) -> bool {
     crate::features::enabled(path,crate::features::Feature::DirectConnections) && checked(path, public, false).unwrap_or(false)
@@ -45,89 +42,11 @@ pub(crate) fn direct_status_allowed(status: &crate::runtime::Status, now: u64) -
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    operation: Operation,
-}
-#[derive(Deserialize)]
-enum Operation {
-    #[serde(rename = "terminal_guest_policy")]
-    Guest,
-}
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Snapshot {
-    allowed: bool,
-    expires_at: u64,
-}
-impl Snapshot {
-    #[cfg(test)]
-    fn valid(&self, now: u64) -> bool {
-        self.allowed && self.expires_at > now && self.expires_at.saturating_sub(now) <= 4
-    }
-}
-/// Called only after the local broker authenticates the OS peer. No gateway
-/// request, shell, route or listening socket is created by a policy subscription.
-pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
-    mut reader: BufReader<S>,
-    control: &crate::control::Control,
-    path: &Path,
-    message: serde_json::Value,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let request: Request = serde_json::from_value(message)?;
-    let Operation::Guest = request.operation;
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut byte = [0];
-    loop {
-        tokio::select! {
-            _=cancel.cancelled()=>return Ok(()),
-            _=reader.read(&mut byte)=>return Ok(()),
-            _=tick.tick()=>{
-                let allowed=guest_allowed(path,control.profile());
-                let snapshot=Snapshot {allowed,expires_at:now()?.saturating_add(4)};
-                let mut bytes=serde_json::to_vec(&snapshot)?;bytes.push(b'\n');
-                tokio::time::timeout(Duration::from_secs(3),reader.get_mut().write_all(&bytes)).await??;
-                if !allowed {return Ok(());}
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn policy_snapshots_cannot_be_expired_future_or_override_identity_with_extra_fields() {
-        assert!(Snapshot {
-            allowed: true,
-            expires_at: 104
-        }
-        .valid(100));
-        for (allowed, expires_at) in [
-            (false, 104),
-            (true, 100),
-            (true, 99),
-            (true, 105),
-            (true, u64::MAX),
-        ] {
-            assert!(!Snapshot {
-                allowed,
-                expires_at
-            }
-            .valid(100));
-        }
-        assert!(serde_json::from_value::<Request>(
-            serde_json::json!({"operation":"terminal_guest_policy","machine_id":"another-account"})
-        )
-        .is_err());
-        assert!(serde_json::from_value::<Snapshot>(
-            serde_json::json!({"allowed":true,"expires_at":104,"token":"secret"})
-        )
-        .is_err());
-    }
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio_util::sync::CancellationToken;
 
     fn fixture() -> Result<(
         crate::profile::Lease,
@@ -177,17 +96,18 @@ mod tests {
         Ok((lease, root, public, path, private_path))
     }
     #[test]
-    fn guest_requires_a_live_paired_identity_and_honors_tor_even_without_the_tor_engine(
+    fn paired_underlay_policy_requires_a_live_paired_identity_and_honors_tor_even_without_the_tor_engine(
     ) -> Result<()> {
         let (lease, _root, public, path, private) = fixture()?;
-        assert!(guest_allowed(&path, &public));
+        assert!(!guest_allowed(&path, &public));
+        assert!(checked(&path, &public, true)?);
         let mut config = crate::unified::load(&path, &public)?.unwrap();
         config.enabled = false;
         crate::unified::save(&path, &public, &config)?;
-        assert!(!guest_allowed(&path, &public));
+        assert!(!checked(&path, &public, true)?);
         config.enabled = true;
         crate::unified::save(&path, &public, &config)?;
-        assert!(guest_allowed(&path, &public));
+        assert!(checked(&path, &public, true)?);
         crate::private_network::tor_preferences::save(
             &private,
             crate::private_network::tor_preferences::Settings {
@@ -195,61 +115,44 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        assert!(!guest_allowed(&path, &public));
+        assert!(!checked(&path, &public, true)?);
         crate::private_network::tor_preferences::save(&private, Default::default())?;
-        assert!(guest_allowed(&path, &public));
+        assert!(checked(&path, &public, true)?);
         crate::private_network::strategy::save(
             &private,
             crate::private_network::strategy::Mode::PreferGateway,
         )?;
-        assert!(!guest_allowed(&path, &public));
+        assert!(!checked(&path, &public, true)?);
         crate::private_network::strategy::save(
             &private,
             crate::private_network::strategy::Mode::PreferDirect,
         )?;
-        assert!(guest_allowed(&path, &public));
+        assert!(checked(&path, &public, true)?);
         let other: crate::profile::Profile = serde_json::from_value(serde_json::json!({
             "server":"https://another.test","machine_id":"0123456789abcdef01234567","token":"other-secret"}))?;
         assert!(
-            !guest_allowed(&path, &other),
+            !checked(&path, &other, true).unwrap_or(false),
             "another account or gateway cannot supply privacy approval"
         );
         drop(lease);
-        assert!(!guest_allowed(&path, &public));
+        assert!(!checked(&path, &public, true)?);
         Ok(())
     }
 
-    #[cfg(all(unix, feature = "terminal-direct"))]
     #[tokio::test]
-    async fn broker_stream_is_scoped_and_revokes_after_paired_policy_becomes_unknown() -> Result<()>
-    {
+    async fn broker_rejects_terminal_operations_on_an_enrolled_profile() -> Result<()> {
         let (_lease, _root, public, path, _private) = fixture()?;
-        let control = crate::control::Control::new(public)?;
-        let (client, server) = tokio::io::duplex(16384);
-        let corrupt = crate::unified::configuration_path(&path);
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            serve(
-                BufReader::new(server),
-                &control,
-                &path,
-                serde_json::json!({"operation":"terminal_guest_policy"}),
-                CancellationToken::new(),
-            )
-            .await
-        }));
-        let mut reader = BufReader::new(client);
-        let first = crate::exposure_protocol::line(&mut reader).await?;
-        let first: Snapshot = serde_json::from_slice(&first)?;
-        assert!(first.valid(now()?));
-        crate::profile::write_private(&corrupt, b"unknown paired configuration", true)?;
-        let next = tokio::time::timeout(
-            Duration::from_secs(3),
-            crate::exposure_protocol::line(&mut reader),
-        )
-        .await??;
-        let next: Snapshot = serde_json::from_slice(&next)?;
-        assert!(!next.allowed);
-        task.await??;
+        let control = std::sync::Arc::new(crate::control::Control::new(public)?);
+        for operation in ["terminal_host", "terminal_guest_policy"] {
+            let (mut client, server) = tokio::io::duplex(1024);
+            let request = serde_json::json!({"operation":operation}).to_string() + "\n";
+            client.write_all(request.as_bytes()).await?;
+            crate::exposure_protocol::serve_connection(
+                server, control.clone(), CancellationToken::new(), path.clone(),
+            ).await?;
+            let reply = crate::exposure_protocol::line(&mut BufReader::new(client)).await?;
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&reply)?["type"], "disabled");
+        }
         Ok(())
     }
 }
