@@ -329,7 +329,9 @@ impl Peer {
             started: false,
             remote_credentials: None,
             state: State::Waiting,
-            deadline: None,
+            // A lost signaling answer must eventually give the controller a fresh offer.
+            // The answering peer can wait passively until an offer arrives.
+            deadline: controlling.then(|| now + Duration::from_secs(40)),
             ice_tick: None,
             packets: VecDeque::new(),
             last_pair: None,

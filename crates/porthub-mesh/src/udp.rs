@@ -579,6 +579,7 @@ async fn drive(
     drop(datagrams);
     let mut disabled = HashSet::new();
     let mut pending_permit:Option<SendPermit>=None;
+    let mut earliest_timer = Instant::now();
     loop {
         while let Some(packet) = peer.transmit() {
             if disabled.contains(&packet.local) {
@@ -620,7 +621,16 @@ async fn drive(
         if peer.state() == State::Closed {
             return Ok(());
         }
-        let deadline = peer.next_timeout();
+        // Keep the timer floor anchored to the last service, even when data or
+        // control messages keep winning the select. An overdue connectivity
+        // check must run before processing another packet.
+        let deadline = peer.next_timeout().map(|at| at.max(earliest_timer));
+        let now = Instant::now();
+        if deadline.is_some_and(|at| at <= now) {
+            peer.timeout(now)?;
+            earliest_timer = now + Duration::from_millis(1);
+            continue;
+        }
         tokio::select! {
             _=cancel.cancelled()=>return Ok(()),
             received=datagram_rx.recv()=>{
@@ -644,7 +654,7 @@ async fn drive(
                     else {statistics.dropped_outgoing=statistics.dropped_outgoing.saturating_add(1);}
                 },None=>return Ok(()),
             },
-            _=async {match deadline {Some(deadline)=>tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.max(Instant::now()+Duration::from_millis(1)))).await,None=>std::future::pending().await}}=>{peer.timeout(Instant::now())?;},
+            _=async {match deadline {Some(deadline)=>tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,None=>std::future::pending().await}}=>{},
         }
     }
 }
@@ -657,7 +667,7 @@ mod io_tests {
     use turn_util::{Conn, Error as IoError, Result as IoResult};
 
     #[derive(Default)]
-    struct Gate {blocked:AtomicBool,entered:tokio::sync::Notify,release:tokio::sync::Notify,sends:AtomicUsize}
+    struct Gate {isolated:AtomicBool,blocked:AtomicBool,entered:tokio::sync::Notify,release:tokio::sync::Notify,sends:AtomicUsize}
     struct FaultSocket {
         gate:Option<Arc<Gate>>,
         socket: Arc<UdpSocket>,
@@ -685,7 +695,12 @@ mod io_tests {
             if self.oversized.swap(false, Ordering::SeqCst) {
                 return Err(IoError::ErrPacketTooBig);
             }
-            Ok(self.socket.recv_from(buffer).await?)
+            loop {
+                let packet = self.socket.recv_from(buffer).await?;
+                if !self.gate.as_ref().is_some_and(|gate| gate.isolated.load(Ordering::SeqCst)) {
+                    return Ok(packet);
+                }
+            }
         }
         async fn send(&self, buffer: &[u8]) -> IoResult<usize> {
             self.send_to(buffer, self.target).await
@@ -699,6 +714,7 @@ mod io_tests {
                 return Err(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable).into());
             }
             if let Some(gate)=&self.gate {
+                if gate.isolated.load(Ordering::SeqCst) { return Ok(buffer.len()); }
                 if gate.blocked.load(Ordering::SeqCst){gate.entered.notify_one();gate.release.notified().await;}
                 gate.sends.fetch_add(1,Ordering::SeqCst);
             }
@@ -723,7 +739,10 @@ mod io_tests {
         ensure!(tokio::time::timeout(Duration::from_secs(2), right.recv()).await? == Some(packet));
         Ok(())
     }
-    async fn exercise(dead_interface: bool,guarded_delivery:bool) -> Result<()> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fault { Unreachable, ClosedInterface, RetiredPermit, SilentLoss }
+    async fn exercise(fault: Fault) -> Result<()> {
+        let dead_interface = fault == Fault::ClosedInterface;
         let gate=Arc::new(Gate::default());
         let a = Identity::new()?;
         let b = Identity::new()?;
@@ -807,7 +826,19 @@ mod io_tests {
                         && left.statistics().await?.write_errors > 0
                 );
             }
-            if guarded_delivery {
+            if fault == Fault::SilentLoss {
+                gate.isolated.store(true, Ordering::SeqCst);
+                // Keep an otherwise healthy control queue busy while the established
+                // UDP path silently drops every datagram in both directions.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while left.state() == State::Ready {
+                        let _ = left.statistics().await;
+                        tokio::task::yield_now().await;
+                    }
+                }).await?;
+                ensure!(left.state() == State::Failed);
+            }
+            if fault == Fault::RetiredPermit {
                 let valid=Arc::new(AtomicBool::new(true));let check=valid.clone();
                 gate.blocked.store(true,Ordering::SeqCst);let sent=gate.sends.load(Ordering::SeqCst);
                 left.send_guarded(Bytes::from(vec![7;20]),Some(SendPermit::new(move||check.load(Ordering::SeqCst))))?;
@@ -827,14 +858,18 @@ mod io_tests {
     #[tokio::test]
     async fn unreachable_candidate_receive_reset_and_oversized_datagrams_preserve_the_valid_peer(
     ) -> Result<()> {
-        exercise(false,false).await
+        exercise(Fault::Unreachable).await
     }
     #[tokio::test]
     async fn closed_interface_does_not_close_a_peer_using_another_interface() -> Result<()> {
-        exercise(true,false).await
+        exercise(Fault::ClosedInterface).await
     }
     #[tokio::test]
-    async fn actual_native_udp_pending_send_cannot_resume_after_admission_retirement()->Result<()> {exercise(false,true).await}
+    async fn actual_native_udp_pending_send_cannot_resume_after_admission_retirement()->Result<()> {exercise(Fault::RetiredPermit).await}
+    #[tokio::test]
+    async fn busy_session_detects_silent_loss_of_established_path() -> Result<()> {
+        exercise(Fault::SilentLoss).await
+    }
     #[tokio::test]
     async fn all_closed_interfaces_fail_promptly_for_route_fallback() -> Result<()> {
         let identity = Identity::new()?;

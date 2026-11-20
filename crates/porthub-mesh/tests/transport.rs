@@ -64,6 +64,27 @@ fn connect(left: &mut Peer, right: &mut Peer, start: Instant) -> Result<Instant>
     anyhow::bail!("private handshake did not complete")
 }
 #[test]
+fn unanswered_offer_expires_and_a_fresh_offer_can_connect() -> Result<()> {
+    let start = Instant::now();
+    let a = Identity::new()?;
+    let b = Identity::new()?;
+    let local = "127.0.0.1:41001".parse()?;
+    let mut offerer = Peer::new(start, local, "a", "b", a.clone(), b.fingerprint())?;
+    let mut answerer = Peer::new(start, "127.0.0.1:41002".parse()?, "b", "a", b.clone(), a.fingerprint())?;
+    let later = start + Duration::from_secs(41);
+    assert!(offerer.next_timeout().is_some_and(|due| due <= later));
+    assert!(offerer.timeout(later).is_err());
+    assert_eq!(offerer.state(), State::Failed);
+    answerer.timeout(later)?;
+    assert_eq!(answerer.state(), State::Waiting);
+    let mut fresh = Peer::new(later, local, "a", "b", a, b.fingerprint())?;
+    answerer.remote(later, "a", &fresh.description())?;
+    fresh.remote(later, "b", &answerer.description())?;
+    connect(&mut fresh, &mut answerer, later)?;
+    Ok(())
+}
+
+#[test]
 fn ice_dtls_core_proves_both_certificates_and_preserves_packet_boundaries() -> Result<()> {
     let (mut left, mut right, start) = memory_pair()?;
     let now = connect(&mut left, &mut right, start)?;
@@ -145,6 +166,7 @@ fn description_actor_fingerprint_and_size_fail_before_connectivity_changes() -> 
         b,
         a.fingerprint(),
     )?;
+    let initial_deadline = left.next_timeout();
     assert!(left
         .remote(now, "another-peer", &right.description())
         .is_err());
@@ -154,7 +176,7 @@ fn description_actor_fingerprint_and_size_fail_before_connectivity_changes() -> 
         .replace("a=porthub-peer-id:peer-b", "a=porthub-peer-id:another-peer");
     assert!(left.remote(now, "peer-b", &bad).is_err());
     assert_eq!(left.state(), State::Waiting);
-    assert!(left.next_timeout().is_none());
+    assert_eq!(left.next_timeout(), initial_deadline);
     let mut bad = right.description();
     bad.sdp = "x".repeat(65537);
     assert!(left.remote(now, "peer-b", &bad).is_err());
