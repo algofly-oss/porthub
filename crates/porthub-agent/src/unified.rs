@@ -325,7 +325,7 @@ fn linux_retry_timer(delay: Duration) -> std::io::Result<tokio::io::unix::AsyncF
     tokio::io::unix::AsyncFd::new(fd)
 }
 
-async fn private_retry_delay(delay: Duration) {
+pub(crate) async fn private_retry_delay(delay: Duration) {
     #[cfg(target_os = "macos")]
     if let Ok(queue) = crate::macos_kqueue::continuous_timer(delay) {
         // A failed worker should retry on the first wake after its deadline.

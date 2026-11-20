@@ -327,7 +327,29 @@ pub async fn run_with_logs(
     cancel: CancellationToken,
     logs: crate::logs::Buffer,
 ) -> Result<()> {
-    run_inner(path, cancel, Some(logs)).await
+    #[cfg(not(feature = "private-sparse"))]
+    return run_inner(path, cancel, Some(logs)).await;
+
+    #[cfg(feature = "private-sparse")]
+    loop {
+        let result = run_inner(path.clone(), cancel.child_token(), Some(logs.clone())).await;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        match result {
+            Err(error) if error.is::<super::authority_clock::RequestExpired>()
+                || error.is::<super::ExpiredDuringSuspend>() => {
+                // run_inner has already revoked the old authority and removed
+                // its routes. Restart the data plane with a fresh request.
+                tracing::info!("private authority expired; requesting a fresh lease");
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = crate::unified::private_retry_delay(Duration::from_secs(5)) => {}
+                }
+            }
+            other => return other,
+        }
+    }
 }
 
 fn check_installed_authority(
