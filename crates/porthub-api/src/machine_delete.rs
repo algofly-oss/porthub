@@ -196,6 +196,7 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
             app.collection("machines").delete_one(acknowledged).await?;
         }
     }
+    if let Ok(owner)=machine.get_object_id("user_id"){app.private_changes.changed(owner);}
     app.realtime.disconnect_machine(&id.to_hex());
     app.config_signals.changed(&id.to_hex());
     Ok(())

@@ -35,6 +35,7 @@ struct Cached {
     lease: PairLease,
     deadline: Instant,
     last_used: Instant,
+    names_current: bool,
     lan_discovery_started: Option<Instant>,
 }
 fn name_matches(peer: &PeerInfo, name: &str) -> bool {
@@ -256,10 +257,10 @@ impl Handle {
     }
     fn peer(&self, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
         let mut s = self.state.try_lock().ok()?;
-        self.peer_locked(&mut s, select)
+        self.peer_locked(&mut s, |c|select(&c.lease.peer))
     }
 
-    fn peer_locked(&self, s: &mut State, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
+    fn peer_locked(&self, s: &mut State, select: impl Fn(&Cached) -> bool) -> Option<PeerInfo> {
         let now = Instant::now();
         if self.revoked() || s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return None;
@@ -267,7 +268,7 @@ impl Handle {
         let hit = s
             .cache
             .values_mut()
-            .find(|c| select(&c.lease.peer) && c.valid(now))?;
+            .find(|c| select(c) && c.valid(now))?;
         hit.last_used = now;
         Some(hit.lease.peer.clone())
     }
@@ -290,7 +291,7 @@ impl Handle {
         let peer = s
             .cache
             .values()
-            .find(|c| select(&c.lease.peer) && c.valid(now))?;
+            .find(|c| c.names_current && select(&c.lease.peer) && c.valid(now))?;
         let mut remaining=peer.deadline.min(base).checked_duration_since(now)?;
         for authority in [s.authority.as_ref(),peer.metadata_authority(now)].into_iter().flatten(){
             if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
@@ -501,6 +502,7 @@ impl Handle {
                 lease,
                 deadline: now + left,
                 last_used: used,
+                names_current: true,
                 lan_discovery_started,
             },
         );
@@ -536,6 +538,21 @@ impl Handle {
             .remove(id);
         self.changed.notify_waiters();
     }
+    pub(super) fn refresh_after_edit(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        let cached: Vec<_> = state.cache.iter_mut().map(|(id, entry)| {
+            entry.names_current = false;
+            id.clone()
+        }).collect();
+        for id in cached {
+            self.queue_request_locked(&mut state, Lookup { kind: "peer".into(), value: id });
+        }
+        for intent in state.wanted.values_mut() { intent.retry_after = now; intent.sent = None; }
+        drop(state);
+        self.changed.notify_waiters();
+        self.demand.notify_one();
+    }
     pub fn unavailable(&self, query: &Lookup) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(i) = s.wanted.get_mut(query) {
@@ -557,7 +574,7 @@ impl Handle {
                     // DNS may wait for the short cache critical section. A busy
                     // packet path does not invalidate an installed lease.
                     let mut state = self.state.lock().ok()?;
-                    if let Some(peer) = self.peer_locked(&mut state, |p| name_matches(p, &name)) {
+                    if let Some(peer) = self.peer_locked(&mut state, |c| c.names_current && name_matches(&c.lease.peer, &name)) {
                         return Some(peer);
                     }
                     if !self.queue_request_locked(&mut state, query.clone()) {

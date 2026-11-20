@@ -1,3 +1,4 @@
+pub mod private_changes;
 pub mod private_migration_mode;
 pub mod private_retired_sources;
 #[cfg(feature = "private-sparse")]
@@ -70,6 +71,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub private_changes: private_changes::Changes,
     pub keyboard: keyboard::Hub,
     pub usb: usb::Hub,
     pub native_media: native_media::Hub,
@@ -137,6 +139,7 @@ impl App {
             )
         };
         Self {
+            private_changes: Default::default(),
             keyboard: Default::default(),
             usb: Default::default(),
             native_media: Default::default(),

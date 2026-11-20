@@ -201,6 +201,9 @@ async fn update(
     if config_changed {
         app.notify_config(&id.to_hex()).await;
     }
+    if ["name","aliases","hostname","enabled","private_domains","group_ids","group_id"].iter().any(|key|previous.get(*key)!=updated.get(*key)) {
+        if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
+    }
     app.notify_status(&updated).await;
     Ok(Json(
         json!({"msg":"Machine updated successfully","data":updated_view}),

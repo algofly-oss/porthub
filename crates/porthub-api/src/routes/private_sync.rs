@@ -31,6 +31,7 @@ use std::{
 
 pub fn router() -> Router<Arc<App>> {
     Router::new().route("/api/access/private/sync", post(sync))
+        .route("/api/access/private/changes", post(changes))
 }
 const PAIR_REPLY_BYTES:usize=2*1024*1024;
 fn push_pair_response(output:&mut Vec<Value>,bytes:&mut usize,value:Value){
@@ -179,9 +180,28 @@ pub fn validate_signal(
     Ok(())
 }
 
+async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
+    #[derive(serde::Deserialize)]
+    struct Request { peer_id: String, token: String, instance: String, since: String }
+    let r: Request = serde_json::from_value(raw).map_err(|_| ApiError::bad_request("Invalid private change cursor"))?;
+    if r.peer_id.len()>128 || r.token.len()>256 || r.instance.len()>128 { return Err(ApiError::bad_request("Invalid peer")); }
+    let since = uuid::Uuid::parse_str(&r.since).map_err(|_|ApiError::bad_request("Invalid private change cursor"))?;
+    let hash = token_digest(&r.token);
+    let owner = app.private_relay.change_workspace(&r.peer_id, &hash, &r.instance).ok_or_else(|| forbidden("Private sync required"))?;
+    let busy = || ApiError::new(StatusCode::TOO_MANY_REQUESTS, "Change watcher busy");
+    let _permit = app.private_changes.admit(&r.peer_id).ok_or_else(busy)?;
+    let mut signal = app.private_changes.subscribe(owner).ok_or_else(busy)?;
+    if *signal.borrow_and_update() == since {
+        let _ = tokio::time::timeout(Duration::from_secs(25), signal.changed()).await;
+    }
+    if app.private_relay.change_workspace(&r.peer_id, &hash, &r.instance) != Some(owner) {return Err(forbidden("Private sync required"));}
+    let current = *signal.borrow();
+    Ok(([(header::CACHE_CONTROL,"no-store")], Json(json!({"cursor":current.to_string()}))).into_response())
+}
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let _lifecycle=app.account_lifecycle.read().await;
     let traffic=raw.get("traffic").cloned().map(serde_json::from_value::<porthub_mesh::traffic_report::Report>);
+    let raw_watch=raw.get("watch_changes").and_then(Value::as_bool)==Some(true);
     let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
     let observed=app.private_relay.admission_snapshot(&input.peer_id,&hash,&input.instance);
     let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":&hash};
@@ -205,9 +225,15 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let observed_exit_pairs=if cfg!(feature="private-sparse")&&input.exit_pair_protocol==Some(1){app.private_relay.observe_exit_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
-    let result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
+    let cursor = if raw_watch { peer.get_object_id("workspace_id").ok().and_then(|owner|app.private_changes.subscribe(owner)).map(|rx| rx.borrow().to_string()) } else { None };
+    let mut result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
+    }
+    if let (Ok(reply), Some(cursor)) = (&mut result, cursor) {
+        if app.private_relay.change_workspace(&input.peer_id,&hash,&input.instance).is_some() {
+            reply.headers_mut().insert("x-porthub-private-cursor", cursor.parse().expect("UUID header"));
+        }
     }
     result
 }

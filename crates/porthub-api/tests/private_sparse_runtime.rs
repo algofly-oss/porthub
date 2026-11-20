@@ -85,7 +85,7 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
     let _guard = stop.clone().drop_guard();
     let mut tasks = JoinSet::new();
     let result=timeout(Duration::from_secs(if idle{90}else{45}),async {
-        let(owner,_)=case.user("sparse-runtime@test.invalid","user").await?;
+        let(owner,cookie)=case.user("sparse-runtime@test.invalid","user").await?;
         let mut ids=Vec::new();let mut machines=Vec::new();let mut peers=Vec::new();
         for i in 0..4097u32 {
             let machine=ObjectId::new();let id=format!("{owner}:{machine}");
@@ -183,8 +183,10 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
         ensure!(a.node.counts()==(1,2)&&b.node.counts()==(1,2),"cross-pool application exceeded actual bounded owner counts");
         println!("registered=4097 active_identity_pairs=1 source_flow_slots=2 destination_flow_slots=2 request_bytes={} response_bytes={} native_application_elapsed_ms={}",request.len(),answer.len(),started.elapsed().as_millis());
         let revoke_started=std::time::Instant::now();
-        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"enabled":false},"$inc":{"revision":1_i64}}).await?;
-        ha.request_peer(&bid);hb.request_peer(&aid);
+        // Remove the rule through the dashboard's authenticated endpoint. Both
+        // controllers must retire active grants without another lookup or reconnect.
+        case.status("DELETE", &format!("/api/access/books/{book}"), &cookie,
+            serde_json::json!({"revision":1}), axum::http::StatusCode::OK).await?;
         timeout(Duration::from_secs(5),async {while a.node.counts()!=(0,0)||b.node.counts()!=(0,0){tokio::time::sleep(Duration::from_millis(10)).await;}}).await?;
         ensure!(a.policy.lock().await.valid_lease()&&b.policy.lock().await.valid_lease()&&ha.by_id(&bid).is_none()&&hb.by_id(&aid).is_none(),"real policy revoke retained pair or unnecessarily revoked still-valid base");
         println!("actual_rulebook_revoke_dispatch_retirement_ms={}",revoke_started.elapsed().as_millis());

@@ -156,6 +156,7 @@ async fn delete(
     app.collection("machine_groups")
         .delete_one(doc! {"_id":id,"user_id":owner})
         .await?;
+    if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
     Ok(Json(
         json!({"msg":"Group deleted successfully","data":serialize(&group)}),
     ))

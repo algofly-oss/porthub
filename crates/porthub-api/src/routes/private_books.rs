@@ -115,6 +115,7 @@ async fn create(
     app.collection("access_rulebooks")
         .insert_one(&document)
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"data":store::document(&document)})))
 }
 async fn update(
@@ -145,6 +146,7 @@ async fn update(
                 "Rule book changed or no longer exists. Reload before saving.",
             )
         })?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"data":store::document(&updated)})))
 }
 async fn delete(
@@ -167,6 +169,7 @@ async fn delete(
             "Rule book changed or no longer exists. Reload before deleting.",
         ));
     }
+    app.private_changes.changed(owner);
     Ok(Json(json!({"msg":"Rule book deleted"})))
 }
 async fn test_connection(
