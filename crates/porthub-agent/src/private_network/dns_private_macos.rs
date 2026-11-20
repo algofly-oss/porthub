@@ -54,10 +54,23 @@ impl Drop for DnsChange {
 pub(super) struct Session {
     pub endpoints: Vec<Endpoint>,
     publication: Option<DnsChange>,
-    stop: Option<std::sync::mpsc::Sender<()>>,
+    closing: tokio_util::sync::CancellationToken,
+    refresh_sender: Option<std::sync::mpsc::SyncSender<()>>,
     finished: Option<tokio::sync::oneshot::Receiver<()>>,
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.closing.cancel();
+    }
+}
+
 impl Session {
+    pub fn refresh(&self) {
+        if let Some(owner) = &self.refresh_sender {
+            let _ = owner.try_send(());
+        }
+    }
+
     pub async fn wait_for_change(&mut self) -> Result<()> {
         if let Some(change) = &self.publication {
             change.wait().await?;
@@ -67,7 +80,8 @@ impl Session {
     }
 
     pub async fn close(&mut self) -> Result<()> {
-        self.stop.take();
+        self.closing.cancel();
+        self.refresh_sender.take();
         if let Some(finished) = self.finished.as_mut() {
             tokio::time::timeout(std::time::Duration::from_secs(2), finished)
                 .await.context("private DNS session closure timed out")?
@@ -98,7 +112,11 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
         None
     };
     let domains = suffixes.to_vec();
-    let (stop, stopped) = std::sync::mpsc::channel();
+    let (refresh_sender, requests) = std::sync::mpsc::sync_channel(1);
+    let owned = endpoints.clone();
+    let closing = tokio_util::sync::CancellationToken::new();
+    let owner_closing = closing.clone();
+    let runtime = tokio::runtime::Handle::current();
     let (ready, result) = tokio::sync::oneshot::channel();
     let (finished, completion) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
@@ -107,23 +125,52 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
                 .session_keys(true).build().context("cannot open private DNS session")?;
             let key = format!("State:/Network/Service/PortHub-Private-{}/DNS", uuid::Uuid::new_v4().simple());
             ensure!(store.get(key.as_str()).is_none(), "private DNS session key already exists");
-            let domain_values: Vec<_> = domains.iter().map(|s| CFString::new(s)).collect();
-            let orders: Vec<_> = domains.iter().map(|_| CFNumber::from(100)).collect();
-            let value = CFDictionary::from_CFType_pairs(&[
-                (CFString::new("ServerAddresses"), CFArray::from_CFTypes(&[CFString::new("127.0.0.1")]).as_CFType()),
-                (CFString::new("ServerPort"), CFNumber::from(i32::from(port)).as_CFType()),
-                (CFString::new("SupplementalMatchDomains"), CFArray::from_CFTypes(&domain_values).as_CFType()),
-                (CFString::new("SupplementalMatchOrders"), CFArray::from_CFTypes(&orders).as_CFType()),
-                (CFString::new("SupplementalMatchDomainsNoSearch"), CFNumber::from(1).as_CFType()),
-                (CFString::new("SearchOrder"), CFNumber::from(100).as_CFType()),
-            ]).into_untyped().into_CFPropertyList();
-            ensure!(store.set_raw(key.as_str(), &value), "cannot publish private DNS session");
-            ensure!(store.get(key.as_str()).as_ref() == Some(&value), "private DNS session readback differs");
-            Ok::<_, anyhow::Error>(store)
+            let values = [100, 101].map(|order| {
+                let domain_values: Vec<_> = domains.iter().map(|s| CFString::new(s)).collect();
+                let orders: Vec<_> = domains.iter().map(|_| CFNumber::from(order)).collect();
+                CFDictionary::from_CFType_pairs(&[
+                    (CFString::new("ServerAddresses"), CFArray::from_CFTypes(&[CFString::new("127.0.0.1")]).as_CFType()),
+                    (CFString::new("ServerPort"), CFNumber::from(i32::from(port)).as_CFType()),
+                    (CFString::new("SupplementalMatchDomains"), CFArray::from_CFTypes(&domain_values).as_CFType()),
+                    (CFString::new("SupplementalMatchOrders"), CFArray::from_CFTypes(&orders).as_CFType()),
+                    (CFString::new("SupplementalMatchDomainsNoSearch"), CFNumber::from(1).as_CFType()),
+                    (CFString::new("SearchOrder"), CFNumber::from(order).as_CFType()),
+                ]).into_untyped().into_CFPropertyList()
+            });
+            let value = &values[0];
+            ensure!(store.set_raw(key.as_str(), value), "cannot publish private DNS session");
+            ensure!(store.get(key.as_str()).as_ref() == Some(value), "private DNS session readback differs");
+            Ok::<_, anyhow::Error>((store, key, values))
         })();
         match installed {
-            Ok(store) => {
-                if ready.send(Ok(())).is_ok() { let _ = stopped.recv(); }
+            Ok((store, key, values)) => {
+                if ready.send(Ok(())).is_ok() {
+                    let mut current = 0;
+                    while requests.recv().is_ok() {
+                        // configd must see a changed supplemental configuration before
+                        // mDNSResponder discards cached failures. Preserve the existing
+                        // listener and domains, and yield to any competing resolver.
+                        let available = runtime.block_on(async {
+                            tokio::select! {
+                                biased;
+                                _ = owner_closing.cancelled() => false,
+                                result = super::dns_convergence_macos::ensure_available(&domains, &owned) => result.is_ok(),
+                            }
+                        });
+                        if owner_closing.is_cancelled() {
+                            break;
+                        }
+                        if !available || store.get(key.as_str()).as_ref() != Some(&values[current]) {
+                            continue;
+                        }
+                        let next = 1 - current;
+                        if store.set_raw(key.as_str(), &values[next]) {
+                            current = next;
+                        } else {
+                            tracing::warn!("could not refresh the owned macOS private DNS resolver");
+                        }
+                    }
+                }
                 // Closing only our private session removes only its session keys.
                 drop(store);
             }
@@ -131,7 +178,7 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
         }
         let _ = finished.send(());
     });
-    let mut session=Session { endpoints, publication, stop: Some(stop), finished: Some(completion) };
+    let mut session=Session { endpoints, publication, closing, refresh_sender: Some(refresh_sender), finished: Some(completion) };
     let readiness=async {
         tokio::time::timeout(std::time::Duration::from_secs(2),result).await
             .context("private DNS session publication timed out")?
