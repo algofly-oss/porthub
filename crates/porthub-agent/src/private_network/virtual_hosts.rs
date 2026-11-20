@@ -177,6 +177,33 @@ impl Admission {
     }
 }
 
+/// A session reader or stamped relay record can signal changed peer metadata.
+/// The triggering packet is discarded; a subsequent packet needs an exact match.
+fn packet_origin_matches(
+    current: &porthub_network::policy::PeerInfo,
+    origin: &porthub_network::policy::PeerInfo,
+    direct: bool,
+    refresh: impl FnOnce(),
+) -> bool {
+    if current.id != origin.id || current.ip != origin.ip {
+        return false;
+    }
+    let identity_matches = current.instance == origin.instance && current.fingerprint == origin.fingerprint;
+    if direct {
+        if !identity_matches { refresh(); }
+        return identity_matches;
+    }
+    let Some(stamp) = origin.relay_origin.as_deref() else { return false; };
+    if stamp.len() != 32 || !stamp.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return false;
+    }
+    if identity_matches && current.relay_origin.as_deref() == Some(stamp) {
+        return true;
+    }
+    refresh();
+    false
+}
+
 async fn run(
     profile: Profile,
     parent: Parent,
@@ -227,6 +254,7 @@ async fn run(
     let mut policy = Engine::default();
     let mut paths = porthub_network::paths::Pinned::default();
     let mut own = None;
+    let mut refreshed = HashMap::<String, std::time::Instant>::new();
     let lan = Lan::find(parent.spec.target_ip, &interfaces.borrow())?;
     let mut audit = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -238,6 +266,7 @@ async fn run(
                 ensure!(lan==Lan::find(parent.spec.target_ip,&interfaces.borrow())?,"virtual host LAN changed");
                 if own.is_some(){ensure!(pairs.authority_valid() && policy.valid_lease(),"virtual host lease expired");}
                 flows.prune();
+                refreshed.retain(|_, at| at.elapsed() < Duration::from_secs(2));
             }
             Some(event)=events.recv()=>match event {
                 controller::Event::Snapshot(a)=>{
@@ -263,8 +292,12 @@ async fn run(
                     let Some(pkt)=Packet::parse(&bytes) else{continue;};
                     if Some(pkt.destination())!=own || !matches!(bytes[9],6|17){continue;}
                     let Some(info)=pairs.by_id(&peer) else{pairs.request_peer_once(&peer);continue;};
-                    if !origin.is_some_and(|p|p.id==info.id && p.ip==info.ip && p.instance==info.instance && p.fingerprint==info.fingerprint &&
-                        (direct || (p.relay_origin.is_some() && p.relay_origin==info.relay_origin))){continue;}
+                    if !origin.is_some_and(|p| packet_origin_matches(&info, &p, direct, || {
+                        if refreshed.len() < 256 && !refreshed.contains_key(&peer) {
+                            refreshed.insert(peer.clone(), std::time::Instant::now());
+                            pairs.request_peer_once(&peer);
+                        }
+                    })) { continue; }
                     if !pairs.touch_peer(&peer)|| !policy.check(&bytes,&peer,true){continue;}
                     let Some(domain)=pairs.pair_authority(&peer).and_then(|a|a.retirement_domain()) else{continue;};
                     let grant=Admission{parent:parent.clone(),pairs:pairs.clone(),peer,domain};
@@ -320,5 +353,35 @@ async fn transmit(
             let _ = relay.send_guarded(peer, &bytes, Some(permit));
         }
         None => (),
+    }
+}
+
+#[cfg(test)]
+mod origin_refresh_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn rotated_relay_record_requests_refresh_without_admitting_stale_data() {
+        let current: porthub_network::policy::PeerInfo = serde_json::from_value(serde_json::json!({
+            "id":"sender", "ip":"10.0.0.2", "fingerprint":"first", "instance":"one",
+            "hostname":"sender.phub", "relay_origin":"1".repeat(32)
+        })).unwrap();
+        let mut record = current.clone();
+        let requests = Cell::new(0);
+        let refresh = || requests.set(requests.get()+1);
+        assert!(packet_origin_matches(&current, &record, false, refresh));
+        record.relay_origin = Some("2".repeat(32));
+        assert!(!packet_origin_matches(&current, &record, false, refresh));
+        assert_eq!(requests.get(), 1);
+        record.instance = "two".into();
+        assert!(!packet_origin_matches(&current, &record, true, refresh));
+        assert!(packet_origin_matches(&record, &record, false, refresh));
+        record.relay_origin = None;
+        assert!(!packet_origin_matches(&current, &record, false, refresh));
+        record.relay_origin = Some("2".repeat(32));
+        record.ip = "10.0.0.3".parse().unwrap();
+        assert!(!packet_origin_matches(&current, &record, false, refresh));
+        assert_eq!(requests.get(), 2);
     }
 }
