@@ -1,5 +1,7 @@
 //! Real native API+Mongo signaling followed by real native UDP packet transport.
 //! No privileged host networking or deployed agent is modified.
+#![recursion_limit = "256"]
+
 use anyhow::{ensure, Result};
 use mongodb::bson::{doc, oid::ObjectId};
 use porthub_agent::{
