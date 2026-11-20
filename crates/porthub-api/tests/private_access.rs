@@ -103,6 +103,17 @@ async fn network_changes_validate_permissions_and_preserve_existing_peer_address
         let (member,member_cookie)=case.user("network-member@test.invalid","user").await?;
         case.app.collection("workspace_members").insert_one(doc!{"_id":format!("{owner}:{member}"),"workspace_id":owner,"user_id":member,"role":"member"}).await?;
         case.app.collection("private_peers").insert_one(doc!{"_id":"existing","workspace_id":owner,"ip":"10.203.0.10","credential_hash":"unchanged"}).await?;
+        #[cfg(feature = "private-sparse")]
+        {
+            let path = format!("/api/access/network/renumber-hold?workspace={owner}");
+            let hold = json!({"held": true});
+            case.status("PUT", &path, &member_cookie, hold.clone(), StatusCode::FORBIDDEN).await?;
+            let (status, _, _) = case.call("PUT", &path, &cookie, hold.clone(), &[("origin", "https://evil.test")]).await?;
+            ensure!(status == StatusCode::FORBIDDEN);
+            case.status("PUT", &path, &cookie, json!({"held": "false"}), StatusCode::BAD_REQUEST).await?;
+            let saved = case.status("PUT", &path, &cookie, hold, StatusCode::OK).await?;
+            ensure!(saved["native_renumber_held"] == true);
+        }
         let body=json!({"cidr":"192.168.40.0/24","dns_suffix":"LAN.Example.COM.","ignored":u64::MAX});
         let path=format!("/api/access/network?workspace={owner}");
         case.status("PUT",&path,&member_cookie,body.clone(),StatusCode::FORBIDDEN).await?;

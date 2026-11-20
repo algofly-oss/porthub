@@ -6,6 +6,22 @@ use porthub_network::native_repair::Request;
 use super::{journal,recovery::Assignment};
 use futures_util::TryStreamExt;
 fn invalid(message:&str)->ApiError{ApiError::new(axum::http::StatusCode::CONFLICT,message)}
+/// Serialize the hold with the worker's activation boundary. An already
+/// applying journal must finish; never acknowledge a hold over an active job.
+pub(crate) async fn set_hold(app: &App, owner: ObjectId, held: bool) -> ApiResult<()> {
+    let _allocation = app.private_network_lock.lock().await;
+    let _publication = super::fence::stable_with_allocation(app, owner).await?;
+    let id = owner.to_hex();
+    crate::domain::private_networks::ensure_locked(app, &id).await?;
+    let result = journal::durable(app, "private_networks")
+        .update_one(doc! {"_id":id}, doc! {"$set":{"native_renumber_held":held}})
+        .await?;
+    if result.matched_count != 1 {
+        return Err(invalid("Private workspace changed while setting renumber hold"));
+    }
+    Ok(())
+}
+
 pub async fn record(app:&App,owner:ObjectId,peer:&Document,request:&Request)->ApiResult<()>{
     request.validate().map_err(|_|ApiError::bad_request("Invalid native collision report"))?;
     if peer.get_str("ip").ok()!=Some(request.source.to_string().as_str()){return Ok(());} // stale completed request
@@ -90,6 +106,11 @@ pub async fn plan_once(app:&App,request:&Document)->ApiResult<bool>{
     let generation=head.as_ref().map_or(Ok(0),|h|h.get_i64("generation")).map_err(|_|invalid("Invalid repair generation"))?;
     if generation<0||generation==i64::MAX{return Err(invalid("Native repair generation exhausted"));}
     let prefs=app.collection("private_networks").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap_or_default();
+    match prefs.get("native_renumber_held") {
+        None | Some(mongodb::bson::Bson::Boolean(false)) => {}
+        Some(mongodb::bson::Bson::Boolean(true)) => return Ok(false),
+        _ => return Err(invalid("Invalid private workspace renumber hold")),
+    }
     let pools=crate::domain::private_networks::pools(&prefs)?;
     if published_generation(app,owner,&prefs).await?!=generation{return Err(invalid("Native repair generation changed"));}
     let blocked=request.get_array("blocked").map_err(|_|invalid("Missing native repair scope"))?;
@@ -198,8 +219,16 @@ pub async fn pending_once(app:&App,after:Option<String>)->ApiResult<Option<Strin
             assert_eq!(post(app.clone(),id,token,Some(report())).await?,axum::http::StatusCode::OK);
             let before:Vec<_>=app.collection("private_peers").find(doc!{"workspace_id":owner}).sort(doc!{"_id":1}).await?.try_collect().await?;
             let queued=app.collection("private_native_repairs").find_one(doc!{"_id":id}).await?.unwrap();
+            set_hold(&app,owner,true).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            let held = App::new(crate::config::Config::default(), db.clone());
+            pending_once(&held,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert!(held.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.is_none());
+            assert_eq!(held.collection("private_peers").find(doc!{"workspace_id":owner}).sort(doc!{"_id":1}).await?.try_collect::<Vec<Document>>().await?,before);
+            assert_eq!(held.collection("private_native_repairs").find_one(doc!{"_id":id}).await?,Some(queued.clone()));
+            set_hold(&held,owner,false).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             assert!(plan_once(&app,&queued).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?);
             let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(head.get_str("state")?,"applying");
+            assert!(set_hold(&app,owner,true).await.is_err(), "must not acknowledge a hold after migration activation");
             let job=head.get_str("job")?.to_owned();
             let reservation=app.collection("private_retired_sources").find_one(doc!{"_id":&job}).await?.unwrap();assert_eq!(reservation.get_bool("activated")?,true);
             // Simulate ACK lost after head activation: the durable head still
