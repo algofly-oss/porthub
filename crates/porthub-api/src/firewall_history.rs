@@ -5,7 +5,7 @@ use anyhow::{ensure, Context, Result};
 use futures_util::TryStreamExt;
 use mongodb::{
     bson::{self, doc, oid::ObjectId, Bson, DateTime, Document},
-    options::IndexOptions,
+    options::{Hint, IndexOptions},
     IndexModel,
 };
 use serde_json::{json, Value};
@@ -21,6 +21,8 @@ pub async fn initialize(app: &App) -> Result<()> {
                 .keys(doc! {"expires_at":1})
                 .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
                 .build(),
+            // The collector prunes across all owners once per pass.
+            IndexModel::builder().keys(doc! {"connection_id":1}).build(),
             IndexModel::builder()
                 .keys(doc! {"owner_id":1,"connection_id":1,"timestamp":1})
                 .build(),
@@ -169,6 +171,7 @@ pub async fn collect(app: &App, since: i64) -> Result<()> {
         .collect();
     app.collection(COLLECTION)
         .delete_many(doc! {"connection_id":{"$nin":ids}})
+        .hint(Hint::Keys(doc! {"connection_id":1}))
         .await?;
     Ok(())
 }
