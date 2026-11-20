@@ -280,6 +280,51 @@ impl Drop for Worker {
     }
 }
 
+// The active timer bounds retries even if the platform clock becomes unavailable.
+async fn wait_retry_clock(delay: Duration, clock: impl Fn() -> Option<Duration>) {
+    let active_deadline = tokio::time::Instant::now() + delay;
+    let Some(deadline) = clock().and_then(|start| start.checked_add(delay)) else {
+        tokio::time::sleep_until(active_deadline).await;
+        return;
+    };
+    loop {
+        let Some(now) = clock() else {
+            tokio::time::sleep_until(active_deadline).await;
+            return;
+        };
+        let remaining = deadline.saturating_sub(now);
+        if remaining.is_zero() || tokio::time::Instant::now() >= active_deadline {
+            return;
+        }
+        // Only a failed worker waits here. A short remaining active-time sleep
+        // lets the first wake observe a retry deadline that passed in suspend.
+        let check = tokio::time::Instant::now() + remaining.min(Duration::from_secs(1));
+        tokio::time::sleep_until(check.min(active_deadline)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_retry_timer(delay: Duration) -> std::io::Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>> {
+    use std::{io, os::fd::{AsRawFd, FromRawFd, OwnedFd}};
+    // CLOCK_BOOTTIME counts suspend. This non-alarm timer cannot wake the host.
+    let raw = unsafe { libc::timerfd_create(libc::CLOCK_BOOTTIME, libc::TFD_CLOEXEC | libc::TFD_NONBLOCK) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let timer = libc::itimerspec {
+        it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+        it_value: libc::timespec {
+            tv_sec: delay.as_secs().try_into().map_err(|_| io::Error::other("retry delay out of range"))?,
+            tv_nsec: delay.subsec_nanos() as _,
+        },
+    };
+    if unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &timer, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    tokio::io::unix::AsyncFd::new(fd)
+}
+
 async fn private_retry_delay(delay: Duration) {
     #[cfg(target_os = "macos")]
     if let Ok(queue) = crate::macos_kqueue::continuous_timer(delay) {
@@ -291,7 +336,25 @@ async fn private_retry_delay(delay: Duration) {
         }
         return;
     }
-    tokio::time::sleep(delay).await;
+    #[cfg(target_os = "linux")]
+    if !delay.is_zero() {
+        if let Ok(timer) = linux_retry_timer(delay) {
+            tokio::select! {
+                Ok(_) = timer.readable() => {},
+                _ = tokio::time::sleep(delay) => {},
+            }
+            return;
+        }
+    }
+    #[cfg(feature = "private-sparse")]
+    {
+        use crate::private_network::{NativeClock, SuspendClock};
+        wait_retry_clock(delay, || NativeClock.elapsed_since_boot().ok()).await;
+    }
+    #[cfg(not(feature = "private-sparse"))]
+    wait_retry_clock(delay, || {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+    }).await;
 }
 
 /// Watch-based supervision: no idle polling, one worker at a time, bounded
@@ -374,6 +437,46 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_private_retry_observes_suspend_within_one_second_of_wake() {
+        use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+        let boot = Arc::new(AtomicU64::new(100));
+        let clock = boot.clone();
+        let retry = tokio::spawn(super::wait_retry_clock(Duration::from_secs(60), move || {
+            Some(Duration::from_secs(clock.load(Ordering::SeqCst)))
+        }));
+        tokio::task::yield_now().await;
+        assert!(!retry.is_finished());
+        boot.store(185, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(retry.is_finished());
+        retry.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_private_retry_keeps_active_deadline_when_clock_stops() {
+        let before = tokio::time::Instant::now();
+        super::wait_retry_clock(Duration::from_secs(5), || Some(Duration::ZERO)).await;
+        assert_eq!(before.elapsed(), Duration::from_secs(5));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stopped_private_retry_kernel_timer_expires_once() -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let timer = super::linux_retry_timer(Duration::from_millis(30))?;
+        let _ready = tokio::time::timeout(Duration::from_secs(2), timer.readable()).await??;
+        let mut expirations = 0u64;
+        let count = unsafe {
+            libc::read(timer.get_ref().as_raw_fd(), (&mut expirations as *mut u64).cast(),
+                       std::mem::size_of::<u64>())
+        };
+        assert_eq!(count, 8);
+        assert_eq!(expirations, 1);
+        Ok(())
+    }
 
     fn profiles() -> (crate::profile::Profile, crate::private_profile::Profile) {
         let public: crate::profile::Profile = serde_json::from_value(serde_json::json!({
