@@ -294,11 +294,25 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
         let public = serde_json::from_value(serde_json::json!({
             "server": origin, "machine_id": "000000000000000000000002", "token": "x".repeat(32)
         }))?;
+        let directory = tempfile::tempdir()?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
+        let host_path = directory.path().join("public.json");
         let mut host = crate::control::Control::new(public)?;
         host.use_fixture_roots(roots.clone())?;
-        host.set_clock_origin(&super::relay::PinnedRelay {
-            url: origin.clone(),
-            spki_sha256: pin.clone(),
+        host.use_registration_clock(&host_path);
+        let mut component_clock = host.component_clock().unwrap();
+        assert!(host.request(reqwest::Method::GET,"probe",None,&[]).await.is_err());
+        let identity = crate::service::RegistrationProfile::Private(p.clone()).identity();
+        let private_path = directory.path().join(format!("{identity}.json"));
+        crate::profile::write_private(&private_path,&serde_json::to_vec(&p)?,false)?;
+        crate::unified::save(&host_path,host.profile(),&crate::unified::Configuration{
+            format_version:1,private_profile:private_path.clone(),enabled:true,
+        })?;
+        super::clock_identity::remember(&private_path,&p,&super::relay::PinnedRelay {
+            url: origin.clone(), spki_sha256: pin.clone(),
         })?;
         assert_eq!(
             host.request(reqwest::Method::GET, "probe", None, &[])
@@ -306,6 +320,8 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
                 .status,
             StatusCode::NO_CONTENT
         );
+        assert!(component_clock.has_changed()?);
+        assert!(component_clock.borrow_and_update().is_some());
         let recovered = GatewayTime::new(&origin, &pin)?;
         let cfg = recovered.tls_config(roots).await?;
         let now = cfg.time_provider.current_time().unwrap().as_secs();

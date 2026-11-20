@@ -59,6 +59,40 @@ fn certificate_time_error(err: &(dyn std::error::Error + 'static)) -> bool {
     }
     false
 }
+#[cfg(feature = "private-sparse")]
+struct RegistrationClock {
+    path: std::path::PathBuf,
+    origin: tokio::sync::Mutex<Option<(crate::private_network::relay::PinnedRelay, crate::private_network::gateway_time::GatewayTime)>>,
+    updates: tokio::sync::watch::Sender<Option<crate::private_network::gateway_time::ClockSample>>,
+}
+
+#[cfg(feature = "private-sparse")]
+impl RegistrationClock {
+    async fn tls_config(&self, public: &Profile, roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, Failure> {
+        let mut current = self.origin.lock().await;
+        // Read the protected registration only on a date failure. The private
+        // module can enroll or rotate its clock key after the public agent starts.
+        let module = crate::unified::load(&self.path, public)
+            .map_err(|_| Failure::Unavailable)?.ok_or(Failure::Unavailable)?;
+        let private = crate::private_profile::Profile::load(&module.private_profile)
+            .map_err(|_| Failure::Unavailable)?;
+        if !crate::unified::matches(public, &private) { return Err(Failure::Unavailable); }
+        let pin = crate::private_network::clock_identity::read(&module.private_profile, &private)
+            .ok_or(Failure::Unavailable)?;
+        if !current.as_ref().is_some_and(|(old,_)| old == &pin) {
+            self.updates.send_replace(None);
+            *current = None;
+            let clock = crate::private_network::gateway_time::GatewayTime::new(&pin.url, &pin.spki_sha256)
+                .map_err(|_| Failure::Unavailable)?;
+            *current = Some((pin,clock));
+        }
+        let clock = &current.as_ref().ok_or(Failure::Unavailable)?.1;
+        let config = clock.tls_config(roots).await.map_err(|_| Failure::Unavailable)?;
+        self.updates.send_replace(*clock.subscribe().borrow());
+        Ok(config)
+    }
+}
+
 pub struct Control {
     #[cfg(test)]
     test_paths: Option<Vec<crate::outbound::Candidate>>,
@@ -68,6 +102,8 @@ pub struct Control {
     private_peer_id: Option<String>,
     #[cfg(all(test,feature="private-sparse"))]
     test_clock_roots: Option<rustls::RootCertStore>,
+    #[cfg(feature = "private-sparse")]
+    registration_clock: Option<RegistrationClock>,
     #[cfg(feature = "private-sparse")]
     clock_origin: Option<crate::private_network::gateway_time::GatewayTime>,
     #[cfg(feature = "private-sparse")]
@@ -97,6 +133,8 @@ impl Control {
             #[cfg(all(test,feature="private-sparse"))]
             test_clock_roots: None,
             #[cfg(feature = "private-sparse")]
+            registration_clock: None,
+            #[cfg(feature = "private-sparse")]
             clock_origin: None,
             #[cfg(feature = "private-sparse")]
             recovered_tls: Mutex::new(None),
@@ -116,7 +154,15 @@ impl Control {
     }
     #[cfg(feature = "private-sparse")]
     pub(crate) fn component_clock(&self) -> Option<tokio::sync::watch::Receiver<Option<crate::private_network::gateway_time::ClockSample>>> {
-        self.clock_origin.as_ref().map(|clock| clock.subscribe())
+        self.registration_clock.as_ref().map(|c|c.updates.subscribe()).or_else(||self.clock_origin.as_ref().map(|clock| clock.subscribe()))
+    }
+
+    #[cfg(feature = "private-sparse")]
+    pub(crate) fn use_registration_clock(&mut self, path: &std::path::Path) {
+        self.registration_clock = Some(RegistrationClock {
+            path: path.to_owned(), origin: tokio::sync::Mutex::new(None),
+            updates: tokio::sync::watch::channel(None).0,
+        });
     }
 
     #[cfg(feature = "private-sparse")]
@@ -133,11 +179,15 @@ impl Control {
 
     #[cfg(feature = "private-sparse")]
     async fn recover_clock(&self) -> Result<(),Failure> {
-        let clock=self.clock_origin.as_ref().ok_or(Failure::Unavailable)?;
         let roots=rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         #[cfg(test)]
         let roots=self.test_clock_roots.clone().unwrap_or(roots);
-        let tls=clock.tls_config(roots).await.map_err(|_|Failure::Unavailable)?;
+        let tls = if let Some(registration) = &self.registration_clock {
+            registration.tls_config(&self.profile, roots).await?
+        } else {
+            self.clock_origin.as_ref().ok_or(Failure::Unavailable)?
+                .tls_config(roots).await.map_err(|_|Failure::Unavailable)?
+        };
         let http=reqwest::Client::builder().use_preconfigured_tls(tls.clone())
             .redirect(reqwest::redirect::Policy::none()).pool_max_idle_per_host(2)
             .pool_idle_timeout(Duration::from_secs(60)).connect_timeout(Duration::from_secs(3))
@@ -439,7 +489,7 @@ impl Control {
                 Ok(response) => response,
                 Err(error) => {
                     #[cfg(feature = "private-sparse")]
-                    if !tried_clock && self.clock_origin.is_some() && error.is_connect() && certificate_time_error(&error) {
+                    if !tried_clock && (self.clock_origin.is_some() || self.registration_clock.is_some()) && error.is_connect() && certificate_time_error(&error) {
                         tried_clock=true;
                         if self.recover_clock().await.is_ok() {continue;}
                     }

@@ -471,16 +471,7 @@ pub async fn run_with_logs(
     #[cfg(feature = "private-sparse")]
     let control = {
         let mut control = control;
-        if let Ok(Some(module)) = crate::unified::load(&path, &profile) {
-            let pin = crate::private_profile::Profile::load(&module.private_profile).ok()
-                .filter(|private| crate::unified::matches(&profile, private))
-                .and_then(|private| crate::private_network::clock_identity::read(&module.private_profile, &private));
-            if let Some(pin) = pin {
-                if control.set_clock_origin(&pin).is_err() {
-                    tracing::warn!("saved gateway clock identity unavailable");
-                }
-            }
-        }
+        control.use_registration_clock(&path);
         control
     };
     let control = std::sync::Arc::new(control);
