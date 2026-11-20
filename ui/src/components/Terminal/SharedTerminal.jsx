@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconCopy, IconExternalLink, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import HistoryPanel from "./HistoryPanel";
+import DashboardGuestLinks from "./DashboardGuestLinks";
 import useTerminalManagement from "./useTerminalManagement";
 import { terminalStunServers } from "@/lib/terminalConnectivity.mjs";
 import { TerminalTransport } from "@/lib/terminalTransport";
@@ -13,7 +14,7 @@ function bytesToBase64(bytes) {
   return btoa(text);
 }
 
-export default function SharedTerminal({ invitation, embedded = false }) {
+export default function SharedTerminal({ invitation, embedded = false, machineId, workspaceId }) {
   const container = useRef(null), terminal = useRef(null), connection = useRef(null);
   const transport = useRef(null);
   const permission = useRef(true), copySelection = useRef(false);
@@ -119,16 +120,18 @@ export default function SharedTerminal({ invitation, embedded = false }) {
 
   useEffect(() => {
     if (!ready || !attempt) return;
-    const token = invitation || window.location.hash.slice(1);
-    if (!/^[a-f0-9]{64}$/.test(token)) { setError("This terminal invitation is incomplete or invalid."); return; }
-    const storageKey = `porthub:terminal:recovery:${token}`;
+    const dashboard = Boolean(machineId && workspaceId);
+    const token = dashboard ? workspaceId : invitation || window.location.hash.slice(1);
+    if (!(dashboard ? /^[a-f0-9]{32}$/ : /^[a-f0-9]{64}$/).test(token)) { setError("This terminal invitation is incomplete or invalid."); return; }
+    const storageKey = dashboard ? `porthub:terminal:owner:${machineId}:${workspaceId}` : `porthub:terminal:recovery:${token}`;
     if (recovery.current?.invitation !== token) recovery.current = null;
     try {
       const saved = JSON.parse(sessionStorage.getItem(storageKey));
       recovery.current = saved && /^[a-f0-9]{64}$/.test(saved.token) && Number.isInteger(saved.reconnect_timeout) && saved.reconnect_timeout >= 10 && saved.reconnect_timeout <= 300 ? {...saved, invitation: token} : recovery.current;
     } catch { /* Use in-memory recovery when session storage is unavailable. */ }
     manualDisconnect.current = false;
-    const endpoint = new URL("/api/terminal/join", window.location.origin);
+    const route = dashboard ? `/api/machines/${machineId}/terminal-sessions/${workspaceId}/join` : "/api/terminal/join";
+    const endpoint = new URL(route, window.location.origin);
     endpoint.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(endpoint);
     const instance = terminal.current;
@@ -138,7 +141,7 @@ export default function SharedTerminal({ invitation, embedded = false }) {
     const handshake = setTimeout(() => { if (alive && !welcome) { closedReason = "Host unavailable or invitation expired. Try connecting again."; socket.close(); } }, 10000);
     socket.onopen = () => {
       if (!alive) return;
-      socket.send(JSON.stringify({ ...(recovery.current ? {resume_token: recovery.current.token} : {token}), cols: Math.max(20, Math.min(500, instance.cols)), rows: Math.max(5, Math.min(200, instance.rows)), term: "xterm-256color" }));
+      socket.send(JSON.stringify({ ...(recovery.current ? {resume_token: recovery.current.token} : dashboard ? {} : {token}), cols: Math.max(20, Math.min(500, instance.cols)), rows: Math.max(5, Math.min(200, instance.rows)), term: "xterm-256color" }));
     };
     socket.onmessage = ({ data }) => {
       if (!alive) return;
@@ -211,13 +214,23 @@ export default function SharedTerminal({ invitation, embedded = false }) {
         } else if (event.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
       } catch { retryable = false; closedReason = "Invalid terminal response. The connection was closed."; socket.close(); }
     };
-    socket.onclose = () => {
+    socket.onclose = async () => {
       if (!alive) return;
       transport.current?.close(); transport.current = null;
       clearTimeout(handshake); permission.current = true; instance.options.disableStdin = true;
       setMembers([]);
       if(history.current.snapshot)history.current.stale=true;
       if(history.current.pending){clearTimeout(history.current.timer);history.current.pending=null;setHistoryBusy(false);setHistoryError("Connection changed. Refresh history after reconnecting.");}
+      if (dashboard && retryable && !manualDisconnect.current) {
+        try {
+          const response = await fetch(`/api/machines/${machineId}/terminal-sessions/${workspaceId}`, {cache:"no-store"});
+          if ([401,403,404].includes(response.status)) {
+            retryable = false;
+            closedReason = "Shell ended or dashboard access was withdrawn.";
+          }
+        } catch { /* Allow normal reconnection during a network interruption. */ }
+        if (!alive) return;
+      }
       if (!manualDisconnect.current && retryable && recovery.current) {
         if (!retryDeadline.current) retryDeadline.current = Date.now() + recovery.current.reconnect_timeout * 1000;
         if (Date.now() < retryDeadline.current) {
@@ -232,7 +245,7 @@ export default function SharedTerminal({ invitation, embedded = false }) {
     };
     socket.onerror = () => { if (alive) setError("Could not reach the terminal host. Check the connection and try again."); };
     return () => { alive = false; transport.current?.close(); transport.current = null; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
-  }, [ready, attempt, invitation]);
+  }, [ready, attempt, invitation, machineId, workspaceId]);
 
   useEffect(()=>{
     const key=event=>{if(event.key==="F7"){event.preventDefault();historyAction.current?.();}};
@@ -265,9 +278,9 @@ export default function SharedTerminal({ invitation, embedded = false }) {
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
       <div className="flex min-w-0 items-center gap-3"><IconTerminal2 size={23} className="shrink-0 text-primary" /><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{session?.name || "PortHub shared terminal"}</h1><p role="status" className="mt-0.5 text-xs text-muted-foreground">{status}{session ? ` · ${session.read_only ? "Read-only" : "Interactive"}` : " · Join with an invitation"}</p></div></div>
       <div className="flex flex-wrap items-center gap-2">
-        {connected && recovery.current?.invitation && !management.invitationsRevoked && (
+        {connected && recovery.current?.invitation && (machineId || !management.invitationsRevoked) && (
           <Button asChild variant="secondary" size="sm">
-            <a href={`/terminal?connect=1#${recovery.current.invitation}`} target="_blank" rel="noopener noreferrer">
+            <a href={machineId ? `/terminal?connect=1&machine=${machineId}&workspace=${workspaceId}` : `/terminal?connect=1#${recovery.current.invitation}`} target="_blank" rel="noopener noreferrer">
               <IconExternalLink size={15} aria-hidden="true" />Open in new tab
             </a>
           </Button>
@@ -282,6 +295,7 @@ export default function SharedTerminal({ invitation, embedded = false }) {
         <h2 className="flex items-center gap-2 text-xs font-semibold"><IconUsers size={16} />Participants <span className="ml-auto tabular-nums text-muted-foreground">{members.length}</span></h2>
         <div className="mt-3 min-h-0 flex-1 overflow-auto">{members.length ? <ul className="space-y-3">{members.map(member=><li key={member.id} className="flex items-center justify-between gap-2 text-xs"><span className="min-w-0 truncate" title={`Guest ${member.id}`}>Guest {member.id}{member.id === participant ? " (you)" : ""}</span><span className="shrink-0 rounded bg-muted px-2 py-1 text-muted-foreground">{member.read_only ? "Read-only" : "Interactive"}</span>{management.allowed && <button type="button" aria-label={`Remove Guest ${member.id}`} title="Remove participant" disabled={management.busy} onClick={()=>{setConfirmInvitations(false);setConfirmRemoval(member.id);}} className="shrink-0 rounded p-1 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><IconUserMinus size={15} /></button>}</li>)}</ul> : <p className="text-xs leading-5 text-muted-foreground">{connected ? "Waiting for participant details…" : "Connect to see who is attached."}</p>}</div>
         <details className="mt-3 shrink-0 text-xs"><summary className="cursor-pointer py-1 font-medium">Connection options</summary><label className="mt-2 flex items-center gap-2 text-[11px]"><input type="checkbox" checked={relayOnly} disabled={connected || connecting} onChange={event=>{setRelayOnly(event.target.checked);try{sessionStorage.setItem("porthub:terminal:relay-only:v1",String(event.target.checked));}catch{}}} />Use gateway relay only</label><label htmlFor="terminal-stun-servers" className="mt-2 block text-[11px] font-medium">Optional UDP STUN endpoints</label><textarea id="terminal-stun-servers" rows={2} maxLength={513} value={stunText} onChange={event=>changeStun(event.target.value)} readOnly={connected || connecting} aria-invalid={!!connectivity.error} aria-describedby="terminal-stun-help" placeholder="stun:your-server.example:3478" spellCheck={false} className="mt-1 w-full resize-none rounded-lg border-0 bg-control p-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60" /><p id="terminal-stun-help" className="mt-1 text-[11px] leading-5 text-muted-foreground">Up to two endpoints, separated by lines or commas. Only these servers receive discovery probes. Leave blank for host candidates and gateway fallback. Saved in this tab; applies when you connect.</p>{!relayOnly && connectivity.error && <p role="alert" className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">{connectivity.error}</p>}</details>
+        {connected && machineId && management.allowed && <DashboardGuestLinks machineId={machineId} workspaceId={workspaceId} blocked={management.invitationsRevoked} onIssued={management.invitationsIssued} />}
         {management.allowed && <div className="mt-3 space-y-2"><p className="text-[11px] text-muted-foreground">Machine administrator · manage guests</p>{management.invitationsRevoked ? <p role="status" className="text-xs text-amber-600 dark:text-amber-300">New invitation joins blocked</p> : <Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>{setConfirmRemoval(null);setConfirmInvitations(true);}}>Block new joins</Button>}</div>}
         {management.allowed && confirmInvitations && <div role="alertdialog" aria-label="Block new invitation joins" className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Block new joins through the invitation URLs? Attached guests, their recovery access and the workspace will keep running.</p><div className="mt-2 flex gap-2"><Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmInvitations(false)}>Cancel</Button><Button type="button" size="sm" disabled={management.busy} onClick={async()=>{if(await management.revokeInvitations())setConfirmInvitations(false);}}>{management.busy ? "Blocking…" : "Block invitation URLs"}</Button></div></div>}
         {management.allowed && confirmRemoval!==null && <div role="alertdialog" aria-label={`Remove Guest ${confirmRemoval}`} className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Remove Guest {confirmRemoval}? Their recovery access will be revoked.</p><div className="mt-2 flex gap-2"><Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmRemoval(null)}>Cancel</Button><Button type="button" size="sm" disabled={management.busy} onClick={async()=>{const remaining=await management.remove(confirmRemoval);if(remaining){setMembers(remaining);setConfirmRemoval(null);}}}>{management.busy ? "Removing…" : "Remove guest"}</Button></div></div>}

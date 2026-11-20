@@ -34,6 +34,7 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: None,
             name: "amberotter".into(),
             expires_at: 0,
             session_expires_at: None,
@@ -70,7 +71,7 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         .attach(&hello.write_token, 80, 24, "xterm-256color")?;
     let list = format!("/api/machines/{machine}/terminal-sessions");
     let rows = case.status("GET", &list, &owner_cookie, json!(null), StatusCode::OK).await?;
-    ensure!(rows == json!({"sessions": [{"id": hello.id, "name": "amberotter", "read_only": false}]}));
+    ensure!(rows == json!({"owner_id":owner.to_hex(),"can_open":false,"sessions": [{"id": hello.id, "name": "amberotter", "read_only": false,"dashboard":false}]}));
     for cookie in ["", &foreign_cookie, &member_cookie] {
         let (status, _, _) = case.call("GET", &list, cookie, json!(null), &[]).await?;
         ensure!(!status.is_success(), "foreign shell sessions must not be listed");
@@ -91,8 +92,8 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
     let _other_host = additional_session(&ObjectId::new().to_hex(), "other", Access::Web)?;
     let rows = case.status("GET", &list, &owner_cookie, json!(null), StatusCode::OK).await?;
     ensure!(rows["sessions"] == json!([
-        {"id": hello.id, "name": "amberotter", "read_only": false},
-        {"id": second.session.id, "name": "build", "read_only": false}
+        {"id": hello.id, "name": "amberotter", "read_only": false,"dashboard":false},
+        {"id": second.session.id, "name": "build", "read_only": false,"dashboard":false}
     ]));
     case.app.terminals.end(&second.session.id, "owner ended session");
     let rows = case.status("GET", &list, &owner_cookie, json!(null), StatusCode::OK).await?;

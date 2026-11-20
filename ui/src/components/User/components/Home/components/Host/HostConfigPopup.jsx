@@ -2907,7 +2907,7 @@ export default function HostConfigPopup({
                       }} containerRef={clientLogsContainerRef} onScroll={handleClientLogsScroll} />
                   </div>
 
-                  {opened && machineSection === "shells" && host?.id && host.kind !== "virtual_host" && <HostShellSessions key={host.id} machineId={host.id} />}
+                  {opened && machineSection === "shells" && host?.id && host.kind !== "virtual_host" && <HostShellSessions key={host.id} machineId={host.id} platform={host.clientOs} />}
                   <div hidden={machineSection !== "usb"}><UsbForwarding machineId={host?.id} active={opened && machineSection === "usb"}/><NativeMediaForwarding machineId={host?.id} active={opened && machineSection === "usb"}/></div>
                   <div hidden={machineSection !== "resources"}><MachineMetrics machineId={host?.id} active={opened && machineSection === "resources"} /></div>
                   <div hidden={machineSection !== "uptime"}>
