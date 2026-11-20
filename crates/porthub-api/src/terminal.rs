@@ -431,7 +431,11 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
                         if !matches!(tokio::time::timeout(Duration::from_secs(3),persist_invitation_revocation(&app,&hello.id)).await,Ok(Ok(()))) {break;}
                         continue;
                     }
-                    if matches!(output,HostOutput::End) {finish(&app,&hello.id,"owner ended session").await;break;}
+                    if matches!(output,HostOutput::End) {
+                        finish(&app,&hello.id,"owner ended session").await;
+                        let _=send_host(&mut socket,&HostEvent::Stop{reason:"owner ended session".into()}).await;
+                        break;
+                    }
                     if host.session.output(host.generation,output).is_err() {break;}
                 }
                 Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},

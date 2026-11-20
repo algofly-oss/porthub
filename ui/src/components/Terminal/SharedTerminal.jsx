@@ -210,6 +210,13 @@ export default function SharedTerminal({ invitation, embedded = false, machineId
           setMembers(event.members);
         } else if (event.type === "closed") {
           retryable = event.retryable === true;
+          if (dashboard && !welcome && !retryable && recovery.current) {
+            // An authorized owner can explicitly reattach after the old browser
+            // lease expires, including after a long sleep. Guests retain their
+            // own recovery/revocation policy.
+            recovery.current = null;
+            try { sessionStorage.removeItem(storageKey); } catch { /* In-memory state is already cleared. */ }
+          }
           closedReason = typeof event.reason === "string" ? event.reason.slice(0, 200) : "Session ended"; socket.close();
         } else if (event.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
       } catch { retryable = false; closedReason = "Invalid terminal response. The connection was closed."; socket.close(); }

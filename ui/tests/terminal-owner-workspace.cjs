@@ -100,6 +100,14 @@ async function exercise() {
     await output(concurrent,"DASHBOARD-shared");
     await tab.reload();
     await output(tab,"DASHBOARD-shared");
+    await tab.evaluate(({machine,session})=>{
+      const key=`porthub:terminal:owner:${machine}:${session}`;
+      const cached=JSON.parse(sessionStorage.getItem(key));cached.token="0".repeat(64);
+      sessionStorage.setItem(key,JSON.stringify(cached));
+    },{machine,session});
+    await tab.reload();
+    await tab.getByRole("button",{name:"Reconnect",exact:true}).click();
+    await output(tab,"DASHBOARD-shared");
     const extra = await first.request.post(origin+path,{headers:{Origin:origin},data:{request_id:"5".repeat(32)}});
     assert.equal(extra.status(),409);
     const response = await first.request.post(origin+"/api/terminal/info",{data:{token:process.env.PORTHUB_TEST_TERMINAL_WRITE}});

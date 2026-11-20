@@ -368,7 +368,16 @@ pub async fn serve(root: &Path, id: &str) -> Result<()> {
                             }
                             if !alive {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
-                                let _=tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(b"{\"type\":\"end\"}\n")).await;
+                                // Keep the broker stream alive until the gateway records the end.
+                                // Closing with queued peer frames can otherwise reset the transport
+                                // before the final End reaches the gateway.
+                                let _=tokio::time::timeout(Duration::from_secs(3), async {
+                                    local.get_mut().write_all(b"{\"type\":\"end\"}\n").await?;
+                                    while let Ok(bytes)=crate::owner::frame(&mut local,&mut partial).await {
+                                        if matches!(serde_json::from_slice::<HostEvent>(&bytes), Ok(HostEvent::Stop {..})) {break;}
+                                    }
+                                    Ok::<(),anyhow::Error>(())
+                                }).await;
                                 return Ok(());
                             }
                             if last_gateway.elapsed()>Duration::from_secs(45){break;}

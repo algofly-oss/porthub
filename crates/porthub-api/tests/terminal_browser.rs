@@ -306,7 +306,16 @@ async fn exercise(multiplex: bool, dashboard: bool) -> Result<()> {
                         Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
                     },
                     output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
-                    _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+                    _=tick.tick()=>{if !workspace_state.is_alive(){
+                        socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;
+                        tokio::time::timeout(Duration::from_secs(5),async {
+                            while let Some(Ok(Message::Text(value)))=socket.next().await {
+                                if matches!(serde_json::from_str::<HostEvent>(&value)?,HostEvent::Stop{..}) {return Ok::<_,anyhow::Error>(());}
+                            }
+                            anyhow::bail!("gateway did not acknowledge the terminal end")
+                        }).await??;
+                        break;
+                    }},
                 }
             }
             Ok::<_, anyhow::Error>(())
