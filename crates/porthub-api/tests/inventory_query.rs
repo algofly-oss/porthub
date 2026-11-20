@@ -402,6 +402,9 @@ async fn virtual_hosts_are_distinct_machine_identities_with_provider_status() ->
             if path.ends_with("peers") || path.ends_with("snapshot") {ensure!(host_row["online"].is_null());}
         }
         case.app.collection("private_peers").update_one(doc!{"_id":format!("{owner}:{provider}")},doc!{"$set":{"last_seen_at":DateTime::from_millis(0),"virtual_host_provider":true}}).await?;
+        let polled=case.status("GET",&format!("/api/inventory/status?ids={host},{provider}"),&cookie,json!(null),StatusCode::OK).await?;
+        let child=polled["data"].as_array().unwrap().iter().find(|row|row["_id"]==host.to_hex()).unwrap();
+        ensure!(child["via"]["online"]==false && child["via"]["name"]=="luna-current" && child["connection_status"]=="unknown");
         let stale=case.status("GET","/api/inventory/machines?q=miro-via-luna",&cookie,json!(null),StatusCode::OK).await?;
         ensure!(stale["data"][0]["via"]["online"]==false && stale["data"][0]["via"]["supports_virtual_hosts"]==true);
         for endpoint in ["machines","access-machines","access-entities","access-peers"] {

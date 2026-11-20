@@ -71,15 +71,29 @@ async function pick(page, editor, label, search, option) {
       await page.getByLabel("Search machines", { exact: true }).fill("miro-via-luna");
       const row = page.getByRole("row").filter({ hasText: "miro-via-luna" });
       await row.getByText(`Virtual host via ${provider.name}`, { exact: true }).waitFor();
+      await row.getByText(/Agent update needed/).waitFor();
+      assert(await row.locator("span.bg-amber-400").count());
+      for (const [status, label, dot] of [["offline", "Agent offline", "bg-red-600"], ["online", "Agent online", "bg-emerald-500"]]) {
+        await page.evaluate(({id, status}) => {
+          const state = JSON.parse(sessionStorage.getItem("porthub-demo-v1"));
+          const agent = state.machines.find(machine => machine._id === id);
+          agent.connection_status = status;
+          agent.supports_virtual_hosts = true;
+          sessionStorage.setItem("porthub-demo-v1", JSON.stringify(state));
+        }, {id: provider._id, status});
+        await page.reload();
+        await page.getByLabel("Search machines", { exact: true }).fill("miro-via-luna");
+        await row.getByText(new RegExp(label)).waitFor();
+        assert(await row.locator("span." + dot).count());
+      }
       await row.click();
-      const details = page.getByRole("dialog", { name: "miro-via-luna" });
-      await details.getByText("192.168.1.57").waitFor();
-      assert.equal(await details.getByRole("button", { name: /shells|open shell|update client/i }).count(), 0);
-      await page.goto(`${machines}&machine=${encodeURIComponent(new URL(page.url()).searchParams.get("machine"))}&machineTab=shells`);
-      await details.getByText("192.168.1.57").waitFor();
-      assert.equal(await page.getByRole("region", { name: "Shell sessions" }).count(), 0);
-      await details.getByRole("button", { name: `Manage on ${provider.name}` }).click();
-      await panel.waitFor();
+      await panel.getByRole("heading", { name: "miro-via-luna" }).waitFor();
+      assert.equal(new URL(page.url()).searchParams.get("machine"), provider._id);
+      assert.equal(new URL(page.url()).searchParams.get("machineTab"), "virtual-hosts");
+      const virtualId = await page.evaluate(() => JSON.parse(sessionStorage.getItem("porthub-demo-v1")).virtualHosts[0].id);
+      await page.goto(`${machines}&machine=${virtualId}&machineTab=shells`);
+      await panel.getByText("192.168.1.57").waitFor();
+      assert.equal(new URL(page.url()).searchParams.get("machine"), provider._id);
 
       await page.goto(`${origin}/home?demo=1&view=access`);
       await page.getByRole("button", { name: "Policy", exact: true }).click();

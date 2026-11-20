@@ -325,7 +325,7 @@ export default function Home({ onStatsChange, active = true }) {
     const states = new Map(statusInventory.rows.map(row => [row._id, row]));
     setHosts(previous => previous.map(host => {
       const row = states.get(host.id);
-      return row ? { ...host, enabled: row.enabled, connectionStatus: row.connection_status,
+      return row ? { ...host, enabled: row.enabled, connectionStatus: row.connection_status, via: row.via ?? host.via,
         isActive: row.is_active, lastSeenAt: row.last_seen_at, lastSeen: formatLastSeen(row),
         clientVersion: row.client_version, clientUpdateAvailable: row.client_update_available,
         latestClientVersion: row.latest_client_version, clientUpdateRequested: row.client_update_requested } : host;
@@ -339,6 +339,11 @@ export default function Home({ onStatsChange, active = true }) {
     }
     return machineGroups.find((group) => group._id === groupFilter)?.name || "Group";
   }, [groupFilter, machineGroups]);
+  const virtualProviderId = selectedHost?.kind === "virtual_host" ? selectedHost.via?.id : null;
+  useEffect(() => {
+    if (!active || !virtualProviderId || router.query.machine !== selectedHostId) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, machine: virtualProviderId, machineTab: "virtual-hosts" } }, undefined, { shallow: true, scroll: false });
+  }, [active, virtualProviderId, selectedHostId, router]);
   const groupLabelById = useMemo(
     () => Object.fromEntries(machineGroups.map((group) => [group._id, group.name])),
     [machineGroups]
@@ -1076,6 +1081,7 @@ export default function Home({ onStatsChange, active = true }) {
                               hostname={host.hostname}
                               kind={host.kind}
                               via={host.via}
+                              enabled={host.enabled}
                               clientOs={host.clientOs}
                               clientOsId={host.clientOsId}
                               clientOsName={host.clientOsName}
@@ -1098,7 +1104,9 @@ export default function Home({ onStatsChange, active = true }) {
                               showLastSeen
                               lastSeen={host.lastSeen}
                               trafficSamples={machineTrafficByHostId[host.id] || []}
-                              onClick={() => handleOpenConfig(host.id)}
+                              onClick={() => host.kind === "virtual_host" && host.via?.id
+                                ? handleOpenConfig(host.via.id, "virtual-hosts")
+                                : handleOpenConfig(host.id)}
                             />
                           ))}
                         </TableBody></Table>
@@ -1143,7 +1151,7 @@ export default function Home({ onStatsChange, active = true }) {
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
       {selectedHost?.kind === "virtual_host" ? (
-        <VirtualHostDetails host={selectedHost} privateDomain={privateDomain(selectedHost)} onClose={handleCloseConfig} onManage={id => handleOpenConfig(id, "virtual-hosts")} />
+        virtualProviderId ? null : <VirtualHostDetails host={selectedHost} privateDomain={privateDomain(selectedHost)} onClose={handleCloseConfig} />
       ) : <HostConfigPopup
         onVirtualHostsChanged={() => inventory.resource.invalidate()}
         onRefreshPorts={refreshPorts}

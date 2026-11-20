@@ -1109,9 +1109,13 @@ async fn status(
             "Status requests support at most 100 machine IDs",
         ));
     }
+    let owner = user.get("_id").cloned().ok_or_else(ApiError::unauthenticated)?;
     let machines = app
         .collection("machines")
-        .find(doc! {"_id":{"$in":ids},"user_id":user.get("_id"),"deletion_pending":{"$ne":true}})
+        .aggregate(vec![
+            doc! {"$match":{"_id":{"$in":ids},"user_id":&owner,"deletion_pending":{"$ne":true}}},
+            inventory::serving_machine_lookup(owner),
+        ])
         .await?
         .try_collect::<Vec<Document>>()
         .await?;
@@ -1135,6 +1139,9 @@ async fn status(
                 "client_update_requested",
             ] {
                 light.insert(key.into(), full[key].clone());
+            }
+            if let Some(via) = full.get("via") {
+                light.insert("via".into(), via.clone());
             }
             Value::Object(light)
         })

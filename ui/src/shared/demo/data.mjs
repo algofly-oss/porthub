@@ -58,7 +58,7 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
     return demoTerminalTraffic(url.searchParams.get("range") || "1h",machine,machine==="all" || state.machines.some(row=>row._id===machine));
   }
   if(path==="/inventory/summary")return {data:{machines:{total:state.machines.length,online:state.machines.filter(m=>m.connection_status==="online").length,offline:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="offline").length,disabled:state.machines.filter(m=>m.enabled===false).length,auth_required:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="auth_required").length},ports:state.connections.length,proxies:state.proxies.length}};
-  if(path==="/inventory/status") {const ids=new Set((url.searchParams.get("ids") || "").split(","));return {data:state.machines.filter(m=>ids.has(m._id))};}
+  if(path==="/inventory/status") {const ids=new Set((url.searchParams.get("ids") || "").split(","));return {data:[...state.machines,...demoVirtualMachines(state)].filter(m=>ids.has(m._id))};}
   if(path==="/inventory/machine-traffic") {
     const ids=new Set((url.searchParams.get("ids") || "").split(","));
     const data=state.machines.filter(m=>ids.has(m._id)).map(m=>({connection:{_id:m._id},traffic:normalizeTrafficSamples(state.connections.filter(c=>c.machine_id===m._id).map(traffic).flatMap(row=>row.traffic))}));
