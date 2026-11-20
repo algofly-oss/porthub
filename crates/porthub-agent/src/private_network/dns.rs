@@ -1004,7 +1004,7 @@ mod tcp_tests {
 #[tokio::test]
 #[ignore = "requires a disposable network namespace with a private systemd-resolved and phtest0"]
 async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()> {
-    use crate::private_dns_setup::{monitor, LinkDns, LookupTarget};
+    use crate::private_dns_setup::{monitor, update_probe_hostname, LinkDns, LookupTarget};
     use std::time::Duration;
     use tokio::sync::{watch, Mutex};
     ensure!(
@@ -1025,6 +1025,7 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
         zone.records.insert(format!("{hostname}."), own);
     }
     let cancel = CancellationToken::new();
+    let zone = server.zone.clone();
     let server_task = tokio::spawn(server.serve(cancel.clone()));
     let suffixes = vec!["phub".to_owned()];
     let registration = register(index, own, port, &suffixes).await?;
@@ -1037,7 +1038,7 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
             suffixes,
         }),
     };
-    let (_target, input) = watch::channel(Some(target));
+    let (probe, input) = watch::channel(Some(target));
     let (report, mut health) = watch::channel(None);
     let task = tokio::spawn(monitor(
         input,
@@ -1079,6 +1080,21 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
         ensure!(
             answer.status.success() && String::from_utf8(answer.stdout)?.contains(&own.to_string())
         );
+        let renamed = "renamed-recovery.phub";
+        {
+            let mut zone = zone.write().await;
+            zone.records.remove(&format!("{hostname}."));
+            zone.records.insert(format!("{renamed}."), own);
+        }
+        ensure!(tokio::process::Command::new("resolvectl")
+            .arg("flush-caches")
+            .status()
+            .await?
+            .success());
+        tokio::time::timeout(Duration::from_secs(15), health.wait_for(|v| *v == Some(false))).await??;
+        update_probe_hostname(&probe, renamed);
+        // The name change wakes the monitor before its normal ten-second interval.
+        tokio::time::timeout(Duration::from_secs(5), health.wait_for(|v| *v == Some(true))).await??;
         Ok::<(), anyhow::Error>(())
     }
     .await;

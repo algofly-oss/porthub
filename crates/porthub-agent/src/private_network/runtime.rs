@@ -805,6 +805,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     });}
                     registered_suffixes=suffixes;
                     registered_rules=snapshot.dns_rules.clone();
+                } else {
+                    // Renaming a peer within the same suffix leaves the OS resolver routes intact.
+                    #[cfg(target_os="linux")]
+                    crate::private_dns_setup::update_probe_hostname(&dns_target, &own.hostname);
                 }
                 traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,Some(&snapshot),&sparse_handle);
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();

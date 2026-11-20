@@ -277,6 +277,31 @@ pub(crate) async fn configure() -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn peer_rename_wakes_the_probe_without_changing_its_resolver_link() {
+        let address = std::net::Ipv4Addr::new(10, 203, 11, 3);
+        let link = LinkDns { index: 3, port: 5353, suffixes: vec!["phub".into()] };
+        let (target, mut updates) = tokio::sync::watch::channel(Some(LookupTarget {
+            hostname: "old.phub".into(),
+            address,
+            link: Some(link.clone()),
+        }));
+
+        update_probe_hostname(&target, "old.phub");
+        assert!(!updates.has_changed().unwrap());
+        update_probe_hostname(&target, "new.phub");
+        assert!(updates.has_changed().unwrap());
+        {
+            let latest = updates.borrow_and_update();
+            let probe = latest.as_ref().unwrap();
+            assert_eq!(probe.hostname, "new.phub");
+            assert_eq!(probe.address, address);
+            assert!(probe.link.as_ref() == Some(&link));
+        }
+        update_probe_hostname(&target, "new.phub");
+        assert!(!updates.has_changed().unwrap());
+    }
+
+    #[test]
     fn integrates_rhel_hosts_without_touching_other_databases_or_authentication() {
         let original="# managed by authselect\npasswd: files systemd\nhosts: files dns myhostname\nshadow: files\n";
         let updated = integrate_hosts(original).unwrap();
@@ -408,6 +433,19 @@ impl LinkDns {
             && (servers[0].2 == self.port || self.port == 53 && servers[0].2 == 0)
             && servers[0].3.is_empty())
     }
+}
+
+pub(crate) fn update_probe_hostname(
+    target: &tokio::sync::watch::Sender<Option<LookupTarget>>,
+    hostname: &str,
+) {
+    target.send_if_modified(|current| match current {
+        Some(probe) if probe.hostname != hostname => {
+            hostname.clone_into(&mut probe.hostname);
+            true
+        }
+        _ => false,
+    });
 }
 
 impl LookupTarget {
