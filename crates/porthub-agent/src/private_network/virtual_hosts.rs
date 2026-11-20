@@ -220,11 +220,12 @@ async fn run(
         event_tx,
         stop.clone(),
     ));
-    let (stack, mut tcp_out, runner) = tagged::stack()?;
+    let (stack, mut tcp_out, runner) = tagged::forwarding_stack()?;
     owners.spawn(runner.run(stop.clone()));
     let (udp_send, mut udp_out) = mpsc::channel(256);
     let mut flows = flows::Flows::new(stack, udp_send);
     let mut policy = Engine::default();
+    let mut paths = porthub_network::paths::Pinned::default();
     let mut own = None;
     let lan = Lan::find(parent.spec.target_ip, &interfaces.borrow())?;
     let mut audit = tokio::time::interval(Duration::from_secs(1));
@@ -258,7 +259,7 @@ async fn run(
                     }
                     sparse::apply_denial(&pairs,&mut policy,res);pairs.unavailable(&res.query);
                 }
-                controller::Event::Packet{peer,bytes,origin,direct,..}=>{
+                controller::Event::Packet{peer,bytes,origin,direct,carrier_direct,..}=>{
                     let Some(pkt)=Packet::parse(&bytes) else{continue;};
                     if Some(pkt.destination())!=own || !matches!(bytes[9],6|17){continue;}
                     let Some(info)=pairs.by_id(&peer) else{pairs.request_peer_once(&peer);continue;};
@@ -267,7 +268,7 @@ async fn run(
                     if !pairs.touch_peer(&peer)|| !policy.check(&bytes,&peer,true){continue;}
                     let Some(domain)=pairs.pair_authority(&peer).and_then(|a|a.retirement_domain()) else{continue;};
                     let grant=Admission{parent:parent.clone(),pairs:pairs.clone(),peer,domain};
-                    if let Some(permit)=grant.current(){flows.receive(bytes,grant,permit,&lan).await;}
+                    if let Some(permit)=grant.current(){paths.observe(pkt,direct);flows.receive(bytes,grant,permit,&lan,carrier_direct).await;}
                 }
                 _=>{}
             },
@@ -275,12 +276,12 @@ async fn run(
                 if let Some((id,permit))=flows.tcp_egress(&packet) {
                     let admitted=SendPermit::combine(vec![permit,packet.admission()]);
                     let _=packet.deliver(|bytes|async {
-                        transmit(&mut policy,&sessions,&relay,&id,bytes,admitted).await;
+                        transmit(&mut policy,&mut paths,&sessions,&relay,&id,bytes,admitted).await;
                         Ok(())
                     }).await;
                 }
             }
-            Some((peer,bytes,permit))=udp_out.recv()=>transmit(&mut policy,&sessions,&relay,&peer,bytes,permit).await
+            Some((peer,bytes,permit))=udp_out.recv()=>transmit(&mut policy,&mut paths,&sessions,&relay,&peer,bytes,permit).await
         }
     }
     Ok(())
@@ -288,6 +289,7 @@ async fn run(
 
 async fn transmit(
     policy: &mut Engine,
+    paths: &mut porthub_network::paths::Pinned,
     sessions: &controller::Sessions,
     relay: &relay::Sender,
     peer: &str,
@@ -303,13 +305,20 @@ async fn transmit(
         .get(peer)
         .filter(|s| s.state() == porthub_mesh::State::Ready)
         .cloned();
-    if let Some(session) = session {
-        if session
-            .send_guarded(bytes.clone(), Some(permit.clone()))
-            .is_ok()
-        {
-            return;
+    let Some(packet) = Packet::parse(&bytes) else {
+        return;
+    };
+    // Use the same carrier as the incoming flow, as registered peers do.
+    // Queue pressure must not reorder one TCP stream across two carriers.
+    match paths.choose(packet, session.is_some(), relay.is_ready()) {
+        Some(true) => {
+            if let Some(session) = session {
+                let _ = session.send_guarded(bytes, Some(permit));
+            }
         }
+        Some(false) => {
+            let _ = relay.send_guarded(peer, &bytes, Some(permit));
+        }
+        None => (),
     }
-    let _ = relay.send_guarded(peer, &bytes, Some(permit));
 }

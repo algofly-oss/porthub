@@ -81,6 +81,7 @@ async fn udp_reaches_configured_socket_and_parent_withdrawal_invalidates_queued_
             grant.clone(),
             grant.current().unwrap(),
             &Lan::loopback_fixture(),
+            true,
         )
         .await;
     let mut bytes = [0; 16];
@@ -112,7 +113,7 @@ async fn tcp_carries_both_directions_and_retires_the_live_socket_on_acl_revocati
     let stop = CancellationToken::new();
     let _guard = stop.clone().drop_guard();
     let (client, mut from_client, client_stack) = tagged::stack()?;
-    let (server, mut from_server, server_stack) = tagged::stack()?;
+    let (server, mut from_server, server_stack) = tagged::forwarding_stack()?;
     let (output, _rx) = mpsc::channel(4);
     let mut routes = Flows::new(server, output);
     let mut background = JoinSet::new();
@@ -128,7 +129,7 @@ async fn tcp_carries_both_directions_and_retires_the_live_socket_on_acl_revocati
             _=tick.tick()=>routes.prune(),
             Some(packet)=from_client.recv()=>{
                 if let Some(active)=path.current(){
-                    packet.deliver(|data|async {routes.receive(data,path.clone(),active,&lan).await;Ok(())}).await?;
+                    packet.deliver(|data|async {routes.receive(data,path.clone(),active,&lan,true).await;Ok(())}).await?;
                 }
             }
             Some(packet)=from_server.recv()=>{
@@ -150,15 +151,24 @@ async fn tcp_carries_both_directions_and_retires_the_live_socket_on_acl_revocati
         let mut bytes = [0; 7];
         socket.read_exact(&mut bytes).await?;
         assert_eq!(&bytes, b"request");
-        socket.write_all(b"response").await?;
-        conn.read_chunk()
-            .await?
-            .deliver(|data, eof| async move {
-                assert_eq!(&data[..], b"response");
-                assert!(!eof);
-                Ok(())
-            })
-            .await?;
+        let response: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        socket.write_all(&response).await?;
+        socket.shutdown().await?;
+        let mut received = Vec::new();
+        loop {
+            let chunk = conn.read_chunk().await?;
+            let finished = chunk.eof();
+            chunk
+                .deliver(|data, _| {
+                    received.extend_from_slice(&data);
+                    async { Ok(()) }
+                })
+                .await?;
+            if finished {
+                break;
+            }
+        }
+        assert_eq!(received, response);
         grant.pairs.revoke_all();
         assert!(!permit.valid());
         assert_eq!(socket.read(&mut bytes).await?, 0);

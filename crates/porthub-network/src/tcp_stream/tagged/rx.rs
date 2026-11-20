@@ -1,8 +1,8 @@
 //! First-admission TCP sequence spans. Metadata never authorizes a packet; the
 //! native TCP parser still validates it. Ambiguity/overflow retires the flow.
 use super::{AdmissionError, SendPermit};
-use anyhow::{ensure, Result};
-const WINDOW: u64 = 16 * 1024;
+use anyhow::{Result, ensure};
+const DEFAULT_WINDOW: usize = 16 * 1024;
 const SPANS: usize = 256;
 #[derive(Clone)]
 struct Span {
@@ -10,15 +10,32 @@ struct Span {
     end: u64,
     permit: SendPermit,
 }
-#[derive(Default)]
 pub(super) struct Origins {
+    window: u64,
+    max_spans: usize,
     base: Option<u32>,
     consumed: u64,
     spans: Vec<Span>,
     fin: Option<(u64, SendPermit)>,
     eof: bool,
 }
+impl Default for Origins {
+    fn default() -> Self {
+        Self::with_window(DEFAULT_WINDOW)
+    }
+}
 impl Origins {
+    pub fn with_window(window: usize) -> Self {
+        Self {
+            window: window as u64,
+            max_spans: SPANS.max(window.div_ceil(512)),
+            base: None,
+            consumed: 0,
+            spans: Vec::new(),
+            fin: None,
+            eof: false,
+        }
+    }
     pub fn eof_pending(&self) -> bool {
         !self.eof
             && self
@@ -58,7 +75,7 @@ impl Origins {
                 .wrapping_sub(wire_consumed) as i32 as i128;
         let end = start + len as i128;
         let low = start.max(self.consumed as i128);
-        let high = end.min((self.consumed + WINDOW) as i128);
+        let high = end.min((self.consumed + self.window) as i128);
         if high > low {
             let (mut cursor, high) = (low as u64, high as u64);
             let mut additions = Vec::new();
@@ -86,13 +103,13 @@ impl Origins {
                 });
             }
             ensure!(
-                self.spans.len() + additions.len() <= SPANS,
+                self.spans.len() + additions.len() <= self.max_spans,
                 "native RX origin metadata full"
             );
             self.spans.extend(additions);
             self.spans.sort_by_key(|s| s.start);
         }
-        if fin && end >= self.consumed as i128 && end <= (self.consumed + WINDOW) as i128 {
+        if fin && end >= self.consumed as i128 && end <= (self.consumed + self.window) as i128 {
             let at = end as u64;
             if let Some((old, _)) = &self.fin {
                 ensure!(*old == at, "native FIN sequence changed");
@@ -148,9 +165,32 @@ impl Origins {
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
+    #[test]
+    fn forwarding_receive_window_retains_the_first_origin_beyond_the_legacy_window() -> Result<()> {
+        let mut origins = Origins::with_window(super::super::FORWARD_WINDOW);
+        let active = Arc::new(AtomicBool::new(true));
+        let first = active.clone();
+        origins.observe(0, true, 0, false, SendPermit::new(|| true))?;
+        let offset = 24 * 1024;
+        origins.observe(
+            1 + offset,
+            false,
+            1024,
+            false,
+            SendPermit::new(move || first.load(Ordering::SeqCst)),
+        )?;
+        for start in (0..=offset).step_by(1024) {
+            origins.observe(1 + start, false, 1024, false, SendPermit::new(|| true))?;
+        }
+        origins.take(offset as usize, false)?;
+        let originals = origins.take(1024, false)?;
+        active.store(false, Ordering::SeqCst);
+        assert!(originals.iter().any(|p| !p.valid()));
+        Ok(())
+    }
     #[test]
     fn wrapping_out_of_order_spans_keep_first_origin_on_overlap() -> Result<()> {
         let mut o = Origins::default();
@@ -214,9 +254,10 @@ mod tests {
         for n in 0..255 {
             o.observe(104 + n * 2, false, 1, false, SendPermit::new(|| true))?;
         }
-        assert!(o
-            .observe(1000, false, 1, false, SendPermit::new(|| true))
-            .is_err());
+        assert!(
+            o.observe(1000, false, 1, false, SendPermit::new(|| true))
+                .is_err()
+        );
         Ok(())
     }
 }

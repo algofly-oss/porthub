@@ -61,6 +61,7 @@ impl Flows {
         grant: Admission,
         permit: SendPermit,
         lan: &Lan,
+        direct_carrier: bool,
     ) {
         let full = self.tcp.len() + self.udp.len() >= FLOW_LIMIT;
         if bytes[9] == 6 {
@@ -100,11 +101,18 @@ impl Flows {
                             return Err(error);
                         }
                     };
-                    let pending = stack.prepare_syn(bytes, permit).await?;
+                    let pending = stack
+                        .prepare_forward_syn(bytes, permit, direct_carrier)
+                        .await?;
                     publish.send_replace(Some(pending.ingress()));
                     let conn = pending.established().await?;
                     publish.send_replace(Some(conn.ingress()));
-                    tcp_bridge(conn, tcp, admitted).await
+                    let read_limit = if direct_carrier {
+                        1024 * 1024
+                    } else {
+                        tagged::FORWARD_WINDOW
+                    };
+                    tcp_bridge(conn, tcp, admitted, read_limit).await
                 }
                 .await;
             });
@@ -146,6 +154,7 @@ async fn tcp_bridge(
     conn: tagged::Connection,
     tcp: tokio::net::TcpStream,
     grant: Admission,
+    read_limit: usize,
 ) -> Result<()> {
     tcp.set_nodelay(true)?;
     let (read, mut write) = tcp.into_split();
@@ -174,32 +183,7 @@ async fn tcp_bridge(
             }
         }
     };
-    let to_mesh = async {
-        let mut buffer = [0u8; 8192];
-        let mut id = [0; 16];
-        getrandom::fill(&mut id).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut offset = 0;
-        loop {
-            read.readable().await?;
-            let permit = grant.current().context("virtual host access ended")?;
-            let n = match read.try_read(&mut buffer) {
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                r => r?,
-            };
-            let ack = if n == 0 {
-                conn.finish(id, offset, permit).await?
-            } else {
-                conn.write_chunk(id, offset, Bytes::copy_from_slice(&buffer[..n]), permit)
-                    .await?
-            };
-            conn.publish_receipt(ack, id, offset, n, || async { Ok(()) })
-                .await?;
-            if n == 0 {
-                return anyhow::Ok(());
-            }
-            offset += n as u64;
-        }
-    };
+    let to_mesh = forward_reads(&conn, &read, &grant, read_limit);
     let renew = async {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -214,6 +198,137 @@ async fn tcp_bridge(
         result=renew=>result?,
     }
     conn.close().await
+}
+/// Bytes read while the preceding TCP window awaits acknowledgement retain
+/// their own original authority. At most one window can wait behind the writer.
+// Growing readers share a process-wide allowance. An idle connection starts
+// with an 8KiB read and the extra capacity stays charged until its bytes retire.
+static READ_CAPACITY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8192);
+struct ReadStorage {
+    data: Vec<u8>,
+    _credit: Option<tokio::sync::SemaphorePermit<'static>>,
+}
+impl AsRef<[u8]> for ReadStorage {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+struct LanRead {
+    storage: ReadStorage,
+    used: usize,
+    eof: bool,
+    permit: Option<SendPermit>,
+}
+
+impl LanRead {
+    fn new(desired: usize) -> Self {
+        let mut size = desired;
+        let credit = loop {
+            if size <= 8192 {
+                break None;
+            }
+            if let Ok(credit) = READ_CAPACITY.try_acquire_many((size / 8192 - 1) as u32) {
+                break Some(credit);
+            }
+            size /= 2;
+        };
+        Self {
+            storage: ReadStorage {
+                data: vec![0; size],
+                _credit: credit,
+            },
+            used: 0,
+            eof: false,
+            permit: None,
+        }
+    }
+
+    fn read_ready(
+        &mut self,
+        socket: &tokio::net::tcp::OwnedReadHalf,
+        grant: &Admission,
+    ) -> Result<()> {
+        let permit = self
+            .permit
+            .clone()
+            .or_else(|| grant.current())
+            .context("virtual host access ended")?;
+        ensure!(permit.valid(), "virtual host LAN read expired");
+        match socket.try_read(&mut self.storage.data[self.used..]) {
+            Ok(n) => {
+                self.eof = n == 0;
+                self.used += n;
+                self.permit = Some(permit);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+}
+
+async fn forward_reads(
+    conn: &tagged::Connection,
+    socket: &tokio::net::tcp::OwnedReadHalf,
+    grant: &Admission,
+    read_limit: usize,
+) -> Result<()> {
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut offset = 0;
+    let mut batch = LanRead::new(8192);
+    let mut prior_ack = Duration::ZERO;
+    loop {
+        while batch.permit.is_none() {
+            socket.readable().await?;
+            batch.read_ready(socket, grant)?;
+        }
+        let permit = batch.permit.take().context("missing LAN admission")?;
+        let n = batch.used;
+        let capacity = batch.storage.data.len();
+        if n == 0 {
+            let ack = conn.finish(id, offset, permit).await?;
+            conn.publish_receipt(ack, id, offset, 0, || async { Ok(()) })
+                .await?;
+            return Ok(());
+        }
+        let next_size = if n == capacity && prior_ack < Duration::from_secs(1) {
+            (capacity * 2).min(read_limit)
+        } else if prior_ack > Duration::from_secs(2) {
+            (capacity / 2).max(8192)
+        } else {
+            capacity
+        };
+        batch.storage.data.truncate(n);
+        let mut next = LanRead::new(next_size);
+        // EOF observed while filling a partial window follows its bytes under
+        // the same immutable admission.
+        if batch.eof {
+            next.eof = true;
+            next.permit = Some(permit.clone());
+        }
+        let bytes = Bytes::from_owner(batch.storage);
+        let started = std::time::Instant::now();
+        let send = async move {
+            let ack = conn.write_window(id, offset, bytes, permit).await?;
+            conn.publish_receipt(ack, id, offset, n, || async { Ok(()) })
+                .await
+        };
+        tokio::pin!(send);
+        loop {
+            tokio::select! {
+                biased;
+                result=&mut send=>{result?;break;}
+                result=socket.readable(), if !next.eof && next.used<next.storage.data.len()=>{
+                    result?;
+                    next.read_ready(socket,grant)?;
+                }
+            }
+        }
+        prior_ack = started.elapsed();
+        offset += n as u64;
+        batch = next;
+    }
 }
 fn udp_payload(bytes: &Bytes) -> Option<(Flow, Bytes)> {
     let ip = Ipv4Packet::new_checked(bytes.as_ref()).ok()?;

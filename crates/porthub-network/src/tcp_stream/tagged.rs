@@ -27,6 +27,12 @@ mod rx;
 const QUEUE: usize = 256;
 const CHUNK: usize = 8192;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Largest contiguous socket read carrying one immutable admission.
+pub const FORWARD_WINDOW: usize = 4 * 1024 * 1024;
+const FORWARD_SOCKET_BUFFER: usize = 1024 * 1024;
+// Limit the aggregate memory added by wide socket windows across all virtual
+// hosts in one agent. Other flows retain the ordinary socket capacities.
+static WIDE_FORWARD_SOCKETS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
     Busy,
@@ -88,24 +94,46 @@ struct Binding {
     alive: Arc<AtomicBool>,
 }
 type Bindings = Arc<RwLock<HashMap<Flow, Binding>>>;
-#[derive(Default)]
-struct Budget(Mutex<usize>);
+struct Budget {
+    used: Mutex<usize>,
+    released: tokio::sync::Notify,
+    capacity: usize,
+}
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new(MAX_BYTES)
+    }
+}
 struct Credit {
     budget: Arc<Budget>,
     bytes: usize,
 }
 impl Drop for Credit {
     fn drop(&mut self) {
-        *self.budget.0.lock().unwrap_or_else(|p| p.into_inner()) -= self.bytes;
+        *self.budget.used.lock().unwrap_or_else(|p| p.into_inner()) -= self.bytes;
+        self.budget.released.notify_waiters();
     }
 }
 impl Budget {
-    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Credit> {
-        if !(1..=CHUNK).contains(&bytes) {
+    fn new(capacity: usize) -> Self {
+        Self {
+            used: Mutex::new(0),
+            released: tokio::sync::Notify::new(),
+            capacity,
+        }
+    }
+
+    fn forwarding() -> &'static Arc<Self> {
+        static SHARED: std::sync::OnceLock<Arc<Budget>> = std::sync::OnceLock::new();
+        SHARED.get_or_init(|| Arc::new(Budget::new(32 * 1024 * 1024)))
+    }
+
+    fn reserve(self: &Arc<Self>, bytes: usize, limit: usize) -> Result<Credit> {
+        if !(1..=limit).contains(&bytes) {
             return Err(AdmissionError::Invalid.into());
         }
-        let mut used = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        if *used + bytes > MAX_BYTES {
+        let mut used = self.used.lock().unwrap_or_else(|p| p.into_inner());
+        if *used + bytes > self.capacity {
             return Err(AdmissionError::Busy.into());
         }
         *used += bytes;
@@ -220,6 +248,7 @@ enum Command {
         reply: oneshot::Sender<Result<u64>>,
         alive: Arc<AtomicBool>,
         syn: Option<Bytes>,
+        direct_carrier: bool,
     },
     Input {
         id: u64,
@@ -414,17 +443,27 @@ impl Handle {
         flow: Flow,
         permit: SendPermit,
     ) -> Result<PendingConnection> {
-        self.prepare(flow, permit, None).await
+        self.prepare(flow, permit, None, false).await
     }
     pub async fn prepare_syn(&self, syn: Bytes, permit: SendPermit) -> Result<PendingConnection> {
+        self.prepare_forward_syn(syn, permit, false).await
+    }
+    pub async fn prepare_forward_syn(
+        &self,
+        syn: Bytes,
+        permit: SendPermit,
+        direct_carrier: bool,
+    ) -> Result<PendingConnection> {
         let incoming = validate_syn(&syn)?;
-        self.prepare(incoming.reverse(), permit, Some(syn)).await
+        self.prepare(incoming.reverse(), permit, Some(syn), direct_carrier)
+            .await
     }
     async fn prepare(
         &self,
         flow: Flow,
         permit: SendPermit,
         syn: Option<Bytes>,
+        direct_carrier: bool,
     ) -> Result<PendingConnection> {
         flow.validate()?;
         ensure!(permit.valid(), "native flow admission retired");
@@ -438,6 +477,7 @@ impl Handle {
             .during(self.commands.send(Command::Connect {
                 alive: alive.clone(),
                 syn,
+                direct_carrier,
                 flow,
                 permit: permit.clone(),
                 reply,
@@ -581,11 +621,55 @@ impl Connection {
         bytes: Bytes,
         permit: SendPermit,
     ) -> Result<NativeAck> {
+        self.validate_write(id, &permit)?;
+        let credit = self.handle.budget.reserve(bytes.len(), CHUNK)?;
+        self.write_admitted(id, offset, bytes, permit, credit).await
+    }
+
+    /// Forward one LAN read across a native TCP window. The original admission
+    /// covers every fragment, retransmission and final ACK while it is in flight.
+    pub async fn write_window(
+        &self,
+        id: [u8; 16],
+        offset: u64,
+        bytes: Bytes,
+        permit: SendPermit,
+    ) -> Result<NativeAck> {
+        let budget = Budget::forwarding();
+        let credit = loop {
+            self.validate_write(id, &permit)?;
+            let available = budget.released.notified();
+            tokio::pin!(available);
+            available.as_mut().enable();
+            match budget.reserve(bytes.len(), FORWARD_WINDOW) {
+                Ok(credit) => break credit,
+                Err(error)
+                    if error.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Busy) =>
+                {
+                    permit.during(available).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        self.write_admitted(id, offset, bytes, permit, credit).await
+    }
+
+    fn validate_write(&self, id: [u8; 16], permit: &SendPermit) -> Result<()> {
         ensure!(
             self.alive.load(Ordering::SeqCst) && id != [0; 16] && permit.valid(),
             "native chunk admission invalid"
         );
-        let credit = self.handle.budget.reserve(bytes.len())?;
+        Ok(())
+    }
+
+    async fn write_admitted(
+        &self,
+        id: [u8; 16],
+        offset: u64,
+        bytes: Bytes,
+        permit: SendPermit,
+        credit: Credit,
+    ) -> Result<NativeAck> {
         let (reply, waiting) = oneshot::channel();
         let write = Write {
             id,
@@ -918,6 +1002,7 @@ impl Device for Packets {
     }
 }
 struct Active {
+    _wide_window: Option<tokio::sync::SemaphorePermit<'static>>,
     id: u64,
     socket: SocketHandle,
     incoming: Flow,
@@ -937,6 +1022,7 @@ struct Active {
     reset: Arc<AtomicBool>,
 }
 pub struct Runner {
+    wide_forwarding: bool,
     stack_scope: Arc<()>,
     commands: mpsc::Receiver<Command>,
     output: PollSender<Packet>,
@@ -950,6 +1036,13 @@ pub struct Runner {
     budget: Arc<Budget>,
 }
 pub fn stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
+    build_stack(false)
+}
+/// Use a wider TCP window for socket forwarding across long-delay links.
+pub fn forwarding_stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
+    build_stack(true)
+}
+fn build_stack(wide_forwarding: bool) -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
     let (commands, input) = mpsc::channel(QUEUE);
     let (output, packets) = mpsc::channel(QUEUE);
     let bindings: Bindings = Default::default();
@@ -974,6 +1067,7 @@ pub fn stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
         },
         packets,
         Runner {
+            wide_forwarding,
             stack_scope,
             commands: input,
             output: PollSender::new(output),
@@ -999,6 +1093,7 @@ impl Runner {
         reply: oneshot::Sender<Result<u64>>,
         alive: Arc<AtomicBool>,
         syn: Option<Bytes>,
+        direct_carrier: bool,
     ) {
         if self.packets.input.len() >= QUEUE
             || !alive.load(Ordering::SeqCst)
@@ -1015,10 +1110,29 @@ impl Runner {
             let _ = reply.send(Err(AdmissionError::Busy.into()));
             return;
         }
+        let wide_window = self
+            .wide_forwarding
+            .then(|| WIDE_FORWARD_SOCKETS.try_acquire().ok())
+            .flatten();
+        let (receive_size, send_size) = if wide_window.is_some() {
+            let send_size = if direct_carrier {
+                FORWARD_SOCKET_BUFFER
+            } else {
+                2 * FORWARD_SOCKET_BUFFER
+            };
+            (FORWARD_SOCKET_BUFFER, send_size)
+        } else {
+            (16 * 1024, super::TCP_SEND_BUFFER)
+        };
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; 16 * 1024]),
-            tcp::SocketBuffer::new(vec![0; super::TCP_SEND_BUFFER]),
+            tcp::SocketBuffer::new(vec![0; receive_size]),
+            tcp::SocketBuffer::new(vec![0; send_size]),
         );
+        socket.set_congestion_control(if self.wide_forwarding && direct_carrier {
+            tcp::CongestionControl::Cubic
+        } else {
+            tcp::CongestionControl::None
+        });
         socket.set_timeout(None);
         socket.set_nagle_enabled(false);
         socket.set_ack_delay(None);
@@ -1052,7 +1166,7 @@ impl Runner {
                     alive: alive.clone(),
                 },
             );
-        let rx: Arc<Mutex<rx::Origins>> = Default::default();
+        let rx = Arc::new(Mutex::new(rx::Origins::with_window(receive_size)));
         let replies = Arc::new(Mutex::new(Replies::default()));
         let reset = Arc::new(AtomicBool::new(false));
         if let Some(bytes) = syn {
@@ -1068,6 +1182,7 @@ impl Runner {
         self.flows.insert(
             flow,
             Active {
+                _wide_window: wide_window,
                 id,
                 socket: self.sockets.add(socket),
                 incoming,
@@ -1148,7 +1263,8 @@ impl Runner {
                             reply,
                             alive,
                             syn,
-                        } => self.create(flow, permit, reply, alive, syn),
+                            direct_carrier,
+                        } => self.create(flow, permit, reply, alive, syn, direct_carrier),
                         Command::Input { id, bytes, permit } => {
                             if permit.valid() && Self::valid_input(&bytes) {
                                 if let Some(incoming) = Flow::from_packet(&bytes) {
@@ -1364,7 +1480,7 @@ impl Runner {
                 let eof = len == 0 && eof_ready;
                 let result = (|| -> Result<NativeRead> {
                     let credit = if len > 0 {
-                        Some(self.budget.reserve(len)?)
+                        Some(self.budget.reserve(len, CHUNK)?)
                     } else {
                         None
                     };
@@ -1628,7 +1744,7 @@ mod tests {
             task.await??;
         }
         ensure!(
-            *rig.handle.budget.0.lock().unwrap() == 0,
+            *rig.handle.budget.used.lock().unwrap() == 0,
             "native chunk credits leaked"
         );
         ensure!(
@@ -1987,6 +2103,7 @@ mod tests {
                 reply,
                 Arc::new(AtomicBool::new(true)),
                 Some(syn),
+                false,
             );
             let active = runner
                 .flows
@@ -2107,7 +2224,7 @@ mod tests {
             "accepted tuple leaked"
         );
         ensure!(
-            *tagged.budget.0.lock().unwrap() == 0,
+            *tagged.budget.used.lock().unwrap() == 0,
             "accepted native credits leaked"
         );
         Ok(())
@@ -2401,7 +2518,7 @@ mod tests {
             "abandoned RX lost owner fence"
         );
         ensure!(
-            *rig.handle.budget.0.lock().unwrap() == 0,
+            *rig.handle.budget.used.lock().unwrap() == 0,
             "abandoned read leaked payload credit"
         );
         ensure!(
