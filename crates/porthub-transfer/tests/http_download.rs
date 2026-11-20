@@ -145,11 +145,14 @@ async fn interrupted_continuous_response_retries_after_durable_checkpoints() -> 
     let ranges = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let recorded = ranges.clone();
     let requests = Arc::new(AtomicUsize::new(0));
+    let outage = Arc::new(tokio::sync::Notify::new());
+    let shutdown = outage.clone();
     let router = server::router(tokio::fs::canonicalize(source.path()).await?).layer(
         axum::middleware::from_fn(
             move |request: Request<Body>, next: axum::middleware::Next| {
                 let recorded = recorded.clone();
                 let requests = requests.clone();
+                let outage = outage.clone();
                 async move {
                     let range = request
                         .headers()
@@ -165,6 +168,7 @@ async fn interrupted_continuous_response_retries_after_durable_checkpoints() -> 
                     if !truncate {
                         return response;
                     }
+                    outage.notify_one();
                     let (parts, body) = response.into_parts();
                     let chunks = body
                         .into_data_stream()
@@ -189,7 +193,20 @@ async fn interrupted_continuous_response_retries_after_durable_checkpoints() -> 
             },
         ),
     );
-    let server = http(router).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = Http {
+        url: format!("http://{addr}"),
+        task: tokio::spawn(async move {
+            axum::serve(listener, router.clone())
+                .with_graceful_shutdown(shutdown.notified_owned()).await.unwrap();
+            // Exceed the previous six-attempt retry window after the first
+            // response has delivered and committed part of the file.
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener, router).await.unwrap();
+        }),
+    };
     let mut settings = options(
         format!("{}/retry.bin", server.url),
         destination.path().into(),
