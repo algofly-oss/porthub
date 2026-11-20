@@ -180,6 +180,11 @@ pub fn validate_signal(
     Ok(())
 }
 
+// These independent random revisions form an opaque change token, never a credential.
+fn notification_cursor(workspace: uuid::Uuid, peer: uuid::Uuid) -> uuid::Uuid {
+    uuid::Uuid::from_u128(workspace.as_u128() ^ peer.as_u128())
+}
+
 async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     #[derive(serde::Deserialize)]
     struct Request { peer_id: String, token: String, instance: String, since: String }
@@ -191,11 +196,16 @@ async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResul
     let busy = || ApiError::new(StatusCode::TOO_MANY_REQUESTS, "Change watcher busy");
     let _permit = app.private_changes.admit(&r.peer_id).ok_or_else(busy)?;
     let mut signal = app.private_changes.subscribe(owner).ok_or_else(busy)?;
-    if *signal.borrow_and_update() == since {
-        let _ = tokio::time::timeout(Duration::from_secs(25), signal.changed()).await;
+    let mut peer_signal = app.private_changes.subscribe_peer(&r.peer_id).ok_or_else(busy)?;
+    if notification_cursor(*signal.borrow_and_update(), *peer_signal.borrow_and_update()) == since {
+        tokio::select! {
+            _ = signal.changed() => {},
+            _ = peer_signal.changed() => {},
+            _ = tokio::time::sleep(Duration::from_secs(25)) => {},
+        }
     }
     if app.private_relay.change_workspace(&r.peer_id, &hash, &r.instance) != Some(owner) {return Err(forbidden("Private sync required"));}
-    let current = *signal.borrow();
+    let current = notification_cursor(*signal.borrow(), *peer_signal.borrow());
     Ok(([(header::CACHE_CONTROL,"no-store")], Json(json!({"cursor":current.to_string()}))).into_response())
 }
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
@@ -225,7 +235,11 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let observed_exit_pairs=if cfg!(feature="private-sparse")&&input.exit_pair_protocol==Some(1){app.private_relay.observe_exit_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
-    let cursor = if raw_watch { peer.get_object_id("workspace_id").ok().and_then(|owner|app.private_changes.subscribe(owner)).map(|rx| rx.borrow().to_string()) } else { None };
+    let cursor = if raw_watch { peer.get_object_id("workspace_id").ok().and_then(|owner|app.private_changes.subscribe(owner)).and_then(|ws| {
+        let peer_cursor = app.private_changes.subscribe_peer(&input.peer_id)?;
+        let combined = notification_cursor(*ws.borrow(), *peer_cursor.borrow());
+        Some(combined.to_string())
+    }) } else { None };
     let mut result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
@@ -712,7 +726,10 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
             let pin=crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),origin_stamp:lease.peer.relay_origin.clone(),generation:None};
-            let private_ok=lease.acl.is_none()||app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&pin);
+            let private_binding = if lease.acl.is_some() {
+                app.private_relay.publish_pair_update(&input.peer_id,epoch,hash,&input.instance,admission,&pin)
+            } else { Some(false) };
+            let private_ok = private_binding.is_some();
             let exit_ok=if let Some(exit)=&lease.exit{
                 let mut pin=pin;pin.epoch=target_exit_epochs.get(id).cloned();
                 app.private_relay.publish_exit_pair_admitted(&input.peer_id,&exit.epoch,hash,&input.instance,admission,&pin)
@@ -721,6 +738,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                 // Backpressure never renews the independently expiring Hub pair authority.
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
+            if private_binding == Some(true) { app.private_changes.peer_ready(id); }
             push_pair_response(&mut pair_responses,&mut pair_response_bytes,value);
         }
     }
