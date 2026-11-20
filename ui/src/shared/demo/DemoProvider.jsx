@@ -28,7 +28,7 @@ export default function DemoProvider({ children }) {
           const data = handleDemoRequest(state, config.method || "get", config.url, config.data);
           sessionStorage.setItem(key, JSON.stringify(state));
           return { data: structuredClone(data), status: 200, statusText: "OK", headers: {}, config };
-        } catch (error) { throw { response: { status: 400, data: { detail: error.message } }, config }; }
+        } catch (error) { throw { response: { status: error.status || 400, data: { detail: error.message } }, config }; }
       };
       return config;
     });
