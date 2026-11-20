@@ -348,6 +348,23 @@ fn rules(book: &Value) -> impl Iterator<Item = Rule> + '_ {
         .flatten()
         .filter_map(|raw| parse_rule(raw.clone()).ok())
 }
+/// Virtual LAN hosts accept inbound TCP/UDP and can reply on an existing flow.
+pub(super) fn grant_protocols<'a>(
+    source: &Value, target: &Value, protocol: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    let protocols = if source["kind"] == "virtual_host" {
+        [None, None]
+    } else if target["kind"] == "virtual_host" {
+        match protocol {
+            "any" => [Some("tcp"), Some("udp")],
+            "tcp" | "udp" => [Some(protocol), None],
+            _ => [None, None],
+        }
+    } else {
+        [Some(protocol), None]
+    };
+    protocols.into_iter().flatten()
+}
 pub fn evaluate(
     source: &Value,
     destination: &Value,
@@ -373,6 +390,9 @@ pub fn evaluate(
     }
     if field(source, "user_id") != field(destination, "user_id") {
         return deny("Machines belong to different workspaces");
+    }
+    if grant_protocols(source, destination, protocol).next().is_none() {
+        return deny("Virtual hosts accept inbound TCP and UDP connections");
     }
     if !["tcp", "udp", "icmp"].contains(&protocol) {
         return deny("Unsupported protocol or invalid port");
@@ -490,18 +510,20 @@ fn compile_inner(
                         }
                         let source = field(left, "_id");
                         let destination = field(right, "_id");
-                        if seen.insert((
-                            source.clone(),
-                            destination.clone(),
-                            rule.protocol.clone(),
-                            rule.ports.clone(),
-                        )) {
-                            grants.push(Grant {
-                                source,
-                                destination,
-                                protocol: rule.protocol.clone(),
-                                ports: ranges.clone(),
-                            });
+                        for protocol in grant_protocols(left, right, &rule.protocol) {
+                            if seen.insert((
+                                source.clone(),
+                                destination.clone(),
+                                protocol.to_owned(),
+                                rule.ports.clone(),
+                            )) {
+                                grants.push(Grant {
+                                    source: source.clone(),
+                                    destination: destination.clone(),
+                                    protocol: protocol.to_owned(),
+                                    ports: ranges.clone(),
+                                });
+                            }
                         }
                     }
                 }

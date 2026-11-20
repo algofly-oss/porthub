@@ -50,10 +50,12 @@ async fn virtual_host_has_a_separate_acl_identity_and_requires_its_enrolled_pare
         ensure!(!granted(&case.status("POST",sync,"",check.clone(),StatusCode::OK).await?));
         let book=ObjectId::new();let group=ObjectId::new();
         case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
-        case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"rules":[{"id":"miro-only","name":"Virtual target only","sources":[{"kind":"machine","id":consumer.to_hex()}],"destinations":[{"kind":"machine","id":id}],"ports":"8000"}]}).await?;
+        case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"rules":[{"id":"miro-only","name":"Virtual target only","bidirectional":true,"sources":[{"kind":"machine","id":consumer.to_hex()}],"destinations":[{"kind":"machine","id":id}],"ports":"8000"}]}).await?;
         let permitted=case.status("POST",sync,"",check.clone(),StatusCode::OK).await?;
         ensure!(granted(&permitted),"virtual host is missing its ACL grant");
         ensure!(!permitted["snapshot"]["grants"].as_array().unwrap().iter().any(|g|g["source"]==condor && g["destination"]==parent));
+        let grants = permitted["snapshot"]["grants"].as_array().unwrap();
+        ensure!(!grants.iter().any(|g|g["source"]==peer || (g["destination"]==peer && g["protocol"]!="tcp" && g["protocol"]!="udp")));
         #[cfg(feature="private-sparse")]
         let lookup = {
             let mut target = child.clone();
@@ -65,6 +67,9 @@ async fn virtual_host_has_a_separate_acl_identity_and_requires_its_enrolled_pare
             let reply = case.status("POST",sync,"",source.clone(),StatusCode::OK).await?;
             let answer = &reply["pair_responses"][0];
             ensure!(answer["status"]=="allowed" && answer["lease"]["peer"]["id"]==peer && answer["lease"]["peer"]["ip"]==added["private_ip"], "virtual DNS lookup returned status {}",answer["status"]);
+            let acl:porthub_network::policy::pair_acl::PairAcl=serde_json::from_value(answer["lease"]["acl"].clone())?;
+            let acl=acl.compile()?;
+            ensure!(acl.allows(false,6,8000) && !acl.allows(false,17,8000) && !acl.allows(false,6,8001) && !acl.allows(false,1,0) && !acl.allows(true,6,8000));
             source
         };
         case.app.collection("access_rulebooks").delete_one(doc!{"_id":book}).await?;
