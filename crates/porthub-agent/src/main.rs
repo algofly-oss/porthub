@@ -1157,6 +1157,14 @@ async fn shutdown_signal() {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let raw_args: Vec<_> = std::env::args_os().collect();
+    // Previously installed systemd and launchd jobs restart their process on
+    // failure. Acknowledge their exact startup prefix and exit before setup.
+    if raw_args.iter().skip(1).take(4).map(OsString::as_os_str)
+        .eq(["terminal", "dashboard", "run", "--owner"].map(OsStr::new))
+    {
+        eprintln!("PortHub browser shell hosting has been retired.");
+        return Ok(());
+    }
     if short_version_requested(&raw_args) {
         println!("porthub {}", porthub_agent::VERSION);
         return Ok(());
