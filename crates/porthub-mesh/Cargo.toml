@@ -9,6 +9,7 @@ publish.workspace = true
 streams = ["dep:quinn", "dep:rustls"]
 
 [dependencies]
+porthub-identity = { path = "../porthub-identity" }
 porthub-io = { path = "../porthub-io" }
 anyhow.workspace = true
 tokio.workspace = true
