@@ -72,8 +72,18 @@ async function pick(page, editor, label, search, option) {
       await editor.getByLabel("Policy name", { exact: true }).fill("Condor to virtual Miro");
       await editor.getByLabel("Rule name", { exact: true }).fill("HTTPS");
       await pick(page, editor, "Policy group", "Development", "Development");
+      const sources = editor.getByLabel("Source entities", { exact: true });
+      await sources.click();
+      await sources.fill("miro-via-luna");
+      await page.getByText("No matching options", { exact: true }).waitFor();
+      await sources.fill("miro");
+      await page.getByRole("option", { name: "Machine · miro", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
       await pick(page, editor, "Source entities", "condor", "Machine · condor");
       await pick(page, editor, "Destination entities", "miro-via-luna", `Machine · miro-via-luna (via ${provider.name})`);
+      await editor.getByLabel("Allow both directions").press("Space");
+      await editor.getByText(/Virtual hosts can only reply/).waitFor();
+      await editor.getByLabel("Allow both directions").press("Space");
       await editor.getByLabel("Rule ports", { exact: true }).fill("443");
       await editor.getByRole("button", { name: "Save Policy", exact: true }).click();
       await editor.waitFor({ state: "hidden" });

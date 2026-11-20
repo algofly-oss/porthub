@@ -41,7 +41,7 @@ export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
       <div className="space-y-5 pb-4">
         <div>
           <p className="text-sm font-medium">Virtual host via {host.via?.name || "serving agent"}</p>
-          <p className="mt-1 text-sm text-muted-foreground">Access rules control connections to the LAN device. Shells, client updates and device metrics require an agent on that device.</p>
+          <p className="mt-1 text-sm text-muted-foreground">This virtual host can accept connections and send replies. Initiating connections, using shells, updating the client and reporting device metrics require an agent on that device.</p>
         </div>
         <Addresses host={{ hostname: privateDomain, private_ip: host.privateIps?.[0], target_ip: host.localIp }} />
         <div className="space-y-1 text-sm text-muted-foreground">
