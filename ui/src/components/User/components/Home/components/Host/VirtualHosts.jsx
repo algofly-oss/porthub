@@ -67,6 +67,8 @@ export default function VirtualHosts({ host, onChanged }) {
   const [loadError, setLoadError] = useState("");
   const [name, setName] = useState("");
   const [targetIp, setTargetIp] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [dnsLabel, setDnsLabel] = useState("");
   const [removing, setRemoving] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -109,6 +111,21 @@ export default function VirtualHosts({ host, onChanged }) {
     finally { setBusy(false); }
   }
 
+  async function rename(event, row) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy || !dnsLabel.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      await axios.put(`/api/access/private/peers/${encodeURIComponent(row.peer_id)}/hostname`, { hostname: dnsLabel.trim() });
+      setEditing(null);
+      reload(value => value + 1);
+      onChanged();
+    } catch (e) { setError(errorText(e)); }
+    finally { setBusy(false); }
+  }
+
   async function remove() {
     if (busy || !removing) return;
     setBusy(true);
@@ -135,9 +152,23 @@ export default function VirtualHosts({ host, onChanged }) {
           {hosts.map(row => <li key={row.id} className="space-y-2 py-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="min-w-0 break-all text-sm font-semibold">{row.name}</h3>
-              {removing !== row.id && <Button type="button" size="sm" variant="ghost" disabled={busy} aria-label={`Remove ${row.name}`} onClick={() => { setRemoving(row.id); setError(""); }}>Remove</Button>}
+              {removing !== row.id && editing !== row.id && <div className="flex gap-2">
+                <Button type="button" size="sm" variant="secondary" disabled={busy || !row.peer_id} aria-label={`Edit private DNS for ${row.name}`} onClick={() => { setEditing(row.id); setRemoving(null); setDnsLabel(row.name); setError(""); }}>Edit</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={busy} aria-label={`Remove ${row.name}`} onClick={() => { setEditing(null); setRemoving(row.id); setError(""); }}>Remove</Button></div>}
             </div>
             <Addresses host={row} />
+            {editing === row.id && <form className="space-y-2" onSubmit={event => rename(event, row)}>
+              <label className="block text-sm font-medium">Private DNS name
+                <span className="mt-1 flex items-center gap-1">
+                  <Input aria-label="Private DNS name" autoFocus required autoComplete="off" maxLength={48} value={dnsLabel} disabled={busy} onChange={event => setDnsLabel(event.target.value)} />
+                  <span className="font-mono text-muted-foreground">{row.hostname.slice(row.hostname.indexOf("."))}</span>
+                </span>
+              </label>
+              <div className="flex gap-2">
+                <Button type="submit" size="sm" disabled={busy || !dnsLabel.trim()}>Save</Button>
+                <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => { setEditing(null); setError(""); }}>Cancel</Button>
+              </div>
+            </form>}
             {removing === row.id && <div className="space-y-2">
               <p className="text-sm">Remove private access to {row.name} through {host.name}?</p>
               <div className="flex gap-2"><Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => setRemoving(null)}>Cancel</Button><Button type="button" variant="destructive" size="sm" disabled={busy} onClick={remove}>Remove virtual host</Button></div>

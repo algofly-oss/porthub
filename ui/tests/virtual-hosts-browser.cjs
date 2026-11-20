@@ -39,6 +39,12 @@ async function pick(page, editor, label, search, option) {
       await panel.getByLabel("LAN IPv4 address").fill("192.168.1.57");
       await panel.getByLabel("LAN IPv4 address").press("Enter");
       await panel.getByText("miro-via-luna.ph.io", { exact: true }).waitFor();
+      for (const [from, to] of [["miro-via-luna", "miro-private"], ["miro-private", "miro-via-luna"]]) {
+        await panel.getByRole("button", { name: `Edit private DNS for ${from}` }).click();
+        await panel.getByLabel("Private DNS name", { exact: true }).fill(to);
+        await panel.getByRole("button", { name: "Save", exact: true }).click();
+        await panel.getByText(`${to}.ph.io`, { exact: true }).waitFor();
+      }
       await panel.getByLabel("Name", { exact: true }).fill("miro-via-luna");
       await panel.getByLabel("LAN IPv4 address").fill("192.168.1.58");
       await panel.getByRole("button", { name: "Add virtual host" }).click();

@@ -54,7 +54,7 @@ async fn provider(app: &App, owner: ObjectId, id: ObjectId) -> ApiResult<Documen
 }
 fn view(peer: &Document, provider: &Document, suffix: &str) -> Value {
     let name = store::string(peer, "hostname");
-    json!({"id":store::id(peer.get("machine_id")),"kind":"virtual_host","name":name,"target_ip":store::string(peer,"target_ip"),
+    json!({"id":store::id(peer.get("machine_id")),"peer_id":store::id(peer.get("_id")),"kind":"virtual_host","name":name,"target_ip":store::string(peer,"target_ip"),
         "private_ip":store::string(peer,"ip"),"hostname":format!("{name}.{suffix}"),"via":{"id":store::id(provider.get("_id")),"name":store::string(provider,"name"),"online":provider.get_bool("provider_online").unwrap_or(false),"supports_virtual_hosts":provider.get_bool("provider_capable").unwrap_or(false)}})
 }
 async fn list(
