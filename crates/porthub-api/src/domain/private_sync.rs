@@ -17,8 +17,9 @@ pub struct Signal {
 }
 #[derive(Serialize)]
 pub struct Sync {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "is_false")]
     pub refresh_clock_origin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub clock_nonce: Option<String>,
     #[serde(skip_serializing_if="is_false")]
     pub virtual_host_provider:bool,
