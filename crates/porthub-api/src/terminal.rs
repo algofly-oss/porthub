@@ -481,7 +481,7 @@ async fn info(
         )
     })?;
     Ok(axum::Json(
-        serde_json::json!({"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
+        serde_json::json!({"id":session.id,"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
     ))
 }
 async fn machine_sessions(
@@ -494,7 +494,7 @@ async fn machine_sessions(
     let machine = crate::domain::workspaces::object_id(&id, "Invalid machine id")?;
     app.collection("machines")
         .find_one(doc! {
-            "_id": machine, "user_id": owner,
+            "_id": machine, "user_id": owner, "kind": {"$ne": "virtual_host"},
             "deletion_pending": {"$ne": true}, "native_deletion": {"$exists": false}
         })
         .projection(doc! {"_id": 1})

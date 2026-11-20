@@ -2159,6 +2159,7 @@ export default function HostConfigPopup({
           !isSavingClientSetup
         }
         closeOnEscape={
+          machineSection !== "shells" &&
           !proxyEditorOpen &&
           !isSaving &&
           !isSavingMachineDetails &&
@@ -2172,7 +2173,7 @@ export default function HostConfigPopup({
             onSubmit={async event => {
               event.preventDefault();
               event.stopPropagation();
-              if (!selectedRule && machineSection === "dns") return;
+              if (!selectedRule && (machineSection === "dns" || machineSection === "shells")) return;
               if (!selectedRule && machineSection === "groups") handleSaveMachineDetails();
               else if (!selectedRule && machineSection === "credentials") handleSaveClientSetup();
               else if (await handleSubmit(event) && selectedRule) handleDoneEditing();
@@ -2906,7 +2907,7 @@ export default function HostConfigPopup({
                       }} containerRef={clientLogsContainerRef} onScroll={handleClientLogsScroll} />
                   </div>
 
-                  {opened && machineSection === "shells" && host?.id && <HostShellSessions key={host.id} machineId={host.id} />}
+                  {opened && machineSection === "shells" && host?.id && host.kind !== "virtual_host" && <HostShellSessions key={host.id} machineId={host.id} />}
                   <div hidden={machineSection !== "usb"}><UsbForwarding machineId={host?.id} active={opened && machineSection === "usb"}/><NativeMediaForwarding machineId={host?.id} active={opened && machineSection === "usb"}/></div>
                   <div hidden={machineSection !== "resources"}><MachineMetrics machineId={host?.id} active={opened && machineSection === "resources"} /></div>
                   <div hidden={machineSection !== "uptime"}>

@@ -13,10 +13,19 @@ if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])a
 },process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked');
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
 const host=await owner.newPage(),watcher=await guest.newPage();let phase="join";const hostEvents=[];let hostConnections=0,directRelay=0,relayInputs=0,relayAcks=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join'){hostConnections++;hostEvents.push({phase,event:"open"});socket.on("close",()=>hostEvents.push({phase,event:"close"}));socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'){directRelay++;if(Buffer.from(frame.packet,'base64')[0]===1)relayInputs++;}}catch{}});socket.on('framereceived',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='closed')hostEvents.push({phase,event:'closed',reason:frame.reason});if(frame.type==='delivery'&&Buffer.from(frame.packet,'base64')[0]===2)relayAcks++;}catch{}});}});host.__transportStats=()=>({hostConnections,relayInputs,relayAcks});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
+const popup = await owner.newPage();
+await popup.goto(`${origin}/home?view=machines&machine=${process.env.PORTHUB_TEST_TERMINAL_MACHINE}&machineTab=shells`);
+await popup.getByRole("button", { name: "amberotter", exact: true }).click({timeout:20000});
+await popup.getByLabel("Invitation for amberotter").fill(`${origin}/terminal#${write}`);
+await popup.getByRole("button", {name:"Connect", exact:true}).click();
+await output(popup,"porthub-test$");
+await type(popup, "SHARED_IN_HOST_POPUP=ok");
+await popup.close();
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
+await type(host, 'printf "HOSTPOPUP-%s\\n" "$SHARED_IN_HOST_POPUP"'); await output(watcher, 'HOSTPOPUP-ok');
 // Opening the same workspace creates an independent viewer; closing it
 // leaves the original connection and shell alive.
 const newTabPromise = owner.waitForEvent('page');

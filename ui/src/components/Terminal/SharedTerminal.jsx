@@ -13,7 +13,7 @@ function bytesToBase64(bytes) {
   return btoa(text);
 }
 
-export default function SharedTerminal() {
+export default function SharedTerminal({ invitation, embedded = false }) {
   const container = useRef(null), terminal = useRef(null), connection = useRef(null);
   const transport = useRef(null);
   const permission = useRef(true), copySelection = useRef(false);
@@ -112,14 +112,14 @@ export default function SharedTerminal() {
   }, []);
 
   useEffect(() => {
-    if (ready && new URLSearchParams(window.location.search).get("connect") === "1") {
+    if (ready && (embedded || new URLSearchParams(window.location.search).get("connect") === "1")) {
       setAttempt(current => current || 1);
     }
-  }, [ready]);
+  }, [ready, embedded]);
 
   useEffect(() => {
     if (!ready || !attempt) return;
-    const token = window.location.hash.slice(1);
+    const token = invitation || window.location.hash.slice(1);
     if (!/^[a-f0-9]{64}$/.test(token)) { setError("This terminal invitation is incomplete or invalid."); return; }
     const storageKey = `porthub:terminal:recovery:${token}`;
     if (recovery.current?.invitation !== token) recovery.current = null;
@@ -232,7 +232,7 @@ export default function SharedTerminal() {
     };
     socket.onerror = () => { if (alive) setError("Could not reach the terminal host. Check the connection and try again."); };
     return () => { alive = false; transport.current?.close(); transport.current = null; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
-  }, [ready, attempt]);
+  }, [ready, attempt, invitation]);
 
   useEffect(()=>{
     const key=event=>{if(event.key==="F7"){event.preventDefault();historyAction.current?.();}};
@@ -261,7 +261,7 @@ export default function SharedTerminal() {
   }
   historyAction.current=()=>{setHistoryOpen(!historyOpen);if(!historyOpen)loadHistory(0);else requestAnimationFrame(()=>terminal.current?.focus());};
   const connected = status === "Connected", connecting = (status === "Connecting…" || status === "Reconnecting…");
-  return <main className="flex h-[100dvh] min-h-0 flex-col bg-background text-foreground" aria-label="Shared terminal">
+  return <main className={`flex ${embedded ? "h-[min(65dvh,48rem)] min-h-80" : "h-[100dvh] min-h-0"} flex-col bg-background text-foreground`} aria-label="Shared terminal">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
       <div className="flex min-w-0 items-center gap-3"><IconTerminal2 size={23} className="shrink-0 text-primary" /><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{session?.name || "PortHub shared terminal"}</h1><p role="status" className="mt-0.5 text-xs text-muted-foreground">{status}{session ? ` · ${session.read_only ? "Read-only" : "Interactive"}` : " · Join with an invitation"}</p></div></div>
       <div className="flex flex-wrap items-center gap-2">
@@ -272,7 +272,7 @@ export default function SharedTerminal() {
             </a>
           </Button>
         )}
-        <Button variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
+        <Button type="button" variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button type="button" variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button type="button" variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button type="button" size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
     </header>
     {error && <p role="alert" className="shrink-0 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
@@ -282,9 +282,9 @@ export default function SharedTerminal() {
         <h2 className="flex items-center gap-2 text-xs font-semibold"><IconUsers size={16} />Participants <span className="ml-auto tabular-nums text-muted-foreground">{members.length}</span></h2>
         <div className="mt-3 min-h-0 flex-1 overflow-auto">{members.length ? <ul className="space-y-3">{members.map(member=><li key={member.id} className="flex items-center justify-between gap-2 text-xs"><span className="min-w-0 truncate" title={`Guest ${member.id}`}>Guest {member.id}{member.id === participant ? " (you)" : ""}</span><span className="shrink-0 rounded bg-muted px-2 py-1 text-muted-foreground">{member.read_only ? "Read-only" : "Interactive"}</span>{management.allowed && <button type="button" aria-label={`Remove Guest ${member.id}`} title="Remove participant" disabled={management.busy} onClick={()=>{setConfirmInvitations(false);setConfirmRemoval(member.id);}} className="shrink-0 rounded p-1 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><IconUserMinus size={15} /></button>}</li>)}</ul> : <p className="text-xs leading-5 text-muted-foreground">{connected ? "Waiting for participant details…" : "Connect to see who is attached."}</p>}</div>
         <details className="mt-3 shrink-0 text-xs"><summary className="cursor-pointer py-1 font-medium">Connection options</summary><label className="mt-2 flex items-center gap-2 text-[11px]"><input type="checkbox" checked={relayOnly} disabled={connected || connecting} onChange={event=>{setRelayOnly(event.target.checked);try{sessionStorage.setItem("porthub:terminal:relay-only:v1",String(event.target.checked));}catch{}}} />Use gateway relay only</label><label htmlFor="terminal-stun-servers" className="mt-2 block text-[11px] font-medium">Optional UDP STUN endpoints</label><textarea id="terminal-stun-servers" rows={2} maxLength={513} value={stunText} onChange={event=>changeStun(event.target.value)} readOnly={connected || connecting} aria-invalid={!!connectivity.error} aria-describedby="terminal-stun-help" placeholder="stun:your-server.example:3478" spellCheck={false} className="mt-1 w-full resize-none rounded-lg border-0 bg-control p-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60" /><p id="terminal-stun-help" className="mt-1 text-[11px] leading-5 text-muted-foreground">Up to two endpoints, separated by lines or commas. Only these servers receive discovery probes. Leave blank for host candidates and gateway fallback. Saved in this tab; applies when you connect.</p>{!relayOnly && connectivity.error && <p role="alert" className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">{connectivity.error}</p>}</details>
-        {management.allowed && <div className="mt-3 space-y-2"><p className="text-[11px] text-muted-foreground">Machine administrator · manage guests</p>{management.invitationsRevoked ? <p role="status" className="text-xs text-amber-600 dark:text-amber-300">New invitation joins blocked</p> : <Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>{setConfirmRemoval(null);setConfirmInvitations(true);}}>Block new joins</Button>}</div>}
-        {management.allowed && confirmInvitations && <div role="alertdialog" aria-label="Block new invitation joins" className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Block new joins through the invitation URLs? Attached guests, their recovery access and the workspace will keep running.</p><div className="mt-2 flex gap-2"><Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmInvitations(false)}>Cancel</Button><Button size="sm" disabled={management.busy} onClick={async()=>{if(await management.revokeInvitations())setConfirmInvitations(false);}}>{management.busy ? "Blocking…" : "Block invitation URLs"}</Button></div></div>}
-        {management.allowed && confirmRemoval!==null && <div role="alertdialog" aria-label={`Remove Guest ${confirmRemoval}`} className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Remove Guest {confirmRemoval}? Their recovery access will be revoked.</p><div className="mt-2 flex gap-2"><Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmRemoval(null)}>Cancel</Button><Button size="sm" disabled={management.busy} onClick={async()=>{const remaining=await management.remove(confirmRemoval);if(remaining){setMembers(remaining);setConfirmRemoval(null);}}}>{management.busy ? "Removing…" : "Remove guest"}</Button></div></div>}
+        {management.allowed && <div className="mt-3 space-y-2"><p className="text-[11px] text-muted-foreground">Machine administrator · manage guests</p>{management.invitationsRevoked ? <p role="status" className="text-xs text-amber-600 dark:text-amber-300">New invitation joins blocked</p> : <Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>{setConfirmRemoval(null);setConfirmInvitations(true);}}>Block new joins</Button>}</div>}
+        {management.allowed && confirmInvitations && <div role="alertdialog" aria-label="Block new invitation joins" className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Block new joins through the invitation URLs? Attached guests, their recovery access and the workspace will keep running.</p><div className="mt-2 flex gap-2"><Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmInvitations(false)}>Cancel</Button><Button type="button" size="sm" disabled={management.busy} onClick={async()=>{if(await management.revokeInvitations())setConfirmInvitations(false);}}>{management.busy ? "Blocking…" : "Block invitation URLs"}</Button></div></div>}
+        {management.allowed && confirmRemoval!==null && <div role="alertdialog" aria-label={`Remove Guest ${confirmRemoval}`} className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Remove Guest {confirmRemoval}? Their recovery access will be revoked.</p><div className="mt-2 flex gap-2"><Button type="button" size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmRemoval(null)}>Cancel</Button><Button type="button" size="sm" disabled={management.busy} onClick={async()=>{const remaining=await management.remove(confirmRemoval);if(remaining){setMembers(remaining);setConfirmRemoval(null);}}}>{management.busy ? "Removing…" : "Remove guest"}</Button></div></div>}
         {management.error && <p role="alert" className="mt-2 text-xs text-amber-600 dark:text-amber-300">{management.error}</p>}
       </aside>
     </div>

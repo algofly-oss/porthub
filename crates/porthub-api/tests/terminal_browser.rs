@@ -182,7 +182,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
     let credential = random_token(32);
     case.app
         .collection("machines")
-        .insert_one(doc! {"_id":machine,"user_id":owner,"enabled":true,"token":&credential})
+        .insert_one(doc! {"_id":machine,"user_id":owner,"name":"Terminal fixture","enabled":true,"token":&credential})
         .await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
@@ -319,6 +319,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .env("PORTHUB_TEST_TERMINAL_WRITE", &hello.write_token)
         .env("PORTHUB_TEST_TERMINAL_READ", &hello.read_token)
         .env("PORTHUB_TEST_TERMINAL_SESSION", &hello.id)
+        .env("PORTHUB_TEST_TERMINAL_MACHINE", machine.to_hex())
         .env("PORTHUB_TEST_TERMINAL_COOKIE", &cookie)
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
