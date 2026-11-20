@@ -29,15 +29,20 @@ impl Drop for Cleanup {
 #[ignore = "requires isolated MongoDB, running UI, bundled runtime and Playwright"]
 async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_and_revocation(
 ) -> Result<()> {
-    exercise(false).await
+    exercise(false, false).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires isolated MongoDB, running UI, bundled runtime and Playwright"]
 async fn ordinary_ssh_and_https_share_one_tls_port_with_real_terminal_participants() -> Result<()> {
-    exercise(true).await
+    exercise(true, false).await
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated MongoDB, running UI, bundled runtime and Playwright"]
+async fn dashboard_owner_opens_a_reserved_nonprivileged_workspace() -> Result<()> {
+    exercise(false, true).await
 }
 static BROWSER_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-async fn exercise(multiplex: bool) -> Result<()> {
+async fn exercise(multiplex: bool, dashboard: bool) -> Result<()> {
     let _exclusive = BROWSER_FIXTURE.lock().await;
     let _ = tracing_subscriber::fmt().with_env_filter("porthub_api::terminal=warn").try_init();
     let ui = std::env::var("PORTHUB_TEST_UI_ORIGIN").context("set isolated UI origin")?;
@@ -182,7 +187,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
     let credential = random_token(32);
     case.app
         .collection("machines")
-        .insert_one(doc! {"_id":machine,"user_id":owner,"enabled":true,"token":&credential})
+        .insert_one(doc! {"_id":machine,"user_id":owner,"name":"Terminal fixture","enabled":true,"token":&credential})
         .await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
@@ -224,6 +229,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: dashboard.then(|| owner.to_hex()),
             name: "amberotter".into(),
             expires_at: 0,
             session_expires_at: None,
@@ -233,7 +239,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
             mouse: true,
             read_only: false,
             size_policy: SizePolicy::Smallest,
-            access: Access::Both,
+            access: if dashboard { Access::Web } else { Access::Both },
             max_viewers: 16,
         },
     };
@@ -300,18 +306,36 @@ async fn exercise(multiplex: bool) -> Result<()> {
                         Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
                     },
                     output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
-                    _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+                    _=tick.tick()=>{if !workspace_state.is_alive(){
+                        socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;
+                        tokio::time::timeout(Duration::from_secs(5),async {
+                            while let Some(Ok(Message::Text(value)))=socket.next().await {
+                                if matches!(serde_json::from_str::<HostEvent>(&value)?,HostEvent::Stop{..}) {return Ok::<_,anyhow::Error>(());}
+                            }
+                            anyhow::bail!("gateway did not acknowledge the terminal end")
+                        }).await??;
+                        break;
+                    }},
                 }
             }
             Ok::<_, anyhow::Error>(())
         }))
     };
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/tests/terminal-live.cjs");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/tests").join(if dashboard { "terminal-owner-workspace.cjs" } else { "terminal-live.cjs" });
     let mut command = tokio::process::Command::new("node");
     if let Some(native) = &native {
         command
             .env("PORTHUB_TEST_NATIVE_CLI", &native.executable)
             .env("XDG_DATA_HOME", &native.data);
+    }
+    if dashboard {
+        let original=cookie.split_once('=').unwrap().1;
+        let new_token=uuid::Uuid::new_v4().to_string();
+        let mut session=case.app.collection("user_sessions").find_one(doc!{"_id":original}).await?.unwrap();
+        session.insert("_id",&new_token);
+        case.app.collection("user_sessions").insert_one(session).await?;
+        let (_,foreign)=case.user("foreign-terminal@example.test","user").await?;
+        command.env("SECOND_COOKIE",format!("porthub_session={new_token}")).env("FOREIGN_COOKIE",foreign);
     }
     command
         .arg(script)
@@ -319,6 +343,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .env("PORTHUB_TEST_TERMINAL_WRITE", &hello.write_token)
         .env("PORTHUB_TEST_TERMINAL_READ", &hello.read_token)
         .env("PORTHUB_TEST_TERMINAL_SESSION", &hello.id)
+        .env("PORTHUB_TEST_TERMINAL_MACHINE", machine.to_hex())
         .env("PORTHUB_TEST_TERMINAL_COOKIE", &cookie)
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
@@ -335,6 +360,13 @@ async fn exercise(multiplex: bool) -> Result<()> {
         );
     }
     if !output.status.success() {
+        if dashboard {
+            eprintln!("Dashboard fixture workspace alive: {}, host task finished: {}",workspace.is_alive(),host.is_finished());
+            if host.is_finished() {
+                eprintln!("Dashboard fixture host result: {:?}",host.await?);
+                anyhow::bail!("dashboard browser fixture failed: {}",String::from_utf8_lossy(&output.stderr));
+            }
+        }
         if let Ok(capture)=workspace.capture("%0",200) {eprintln!("Isolated fixture shell: {capture}");}
     }
     ensure!(
@@ -386,6 +418,132 @@ async fn exercise(multiplex: bool) -> Result<()> {
         ensure!(series["points"].as_array().is_some_and(|points| !points.is_empty() && points.len()<=120));
         println!("PASS authenticated terminal measurements: real host payload, relay/direct scopes, final closed gauges and bounded account graph");
     }
+    case.db.drop().await?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated MongoDB, enrolled broker, candidate CLI and terminal component"]
+async fn local_dashboard_pool_replenishes_and_withdraws_enrolled_shells() -> Result<()> {
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::Builder::new()
+        .prefix("ph-pool-")
+        .tempdir_in("/tmp")?;
+    std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700))?;
+    let case = Case::new(Config::default()).await?;
+    let (owner, cookie) = case.user("pool-owner@example.test", "user").await?;
+    let machine = ObjectId::new();
+    let credential = random_token(32);
+    case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":"Terminal pool","enabled":true,"token":&credential}).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let router = case.router.clone();
+    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, router).await
+    }));
+    let enrollment =
+        native::registration(fixture.path(), &origin, &machine.to_hex(), &credential).await?;
+    let executable =
+        std::env::var_os("PORTHUB_TEST_AGENT_EXECUTABLE").context("candidate CLI required")?;
+    let command = || {
+        let mut command = tokio::process::Command::new(&executable);
+        command
+            .env("XDG_DATA_HOME", &enrollment.data)
+            .env("XDG_CONFIG_HOME", &enrollment.config)
+            .env("HOME", fixture.path())
+            .env("PORTHUB_COMPONENT_GATEWAY", "https://fixture.invalid")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        command
+    };
+    let mut host = command()
+        .args([
+            "terminal",
+            "dashboard",
+            "--user",
+            "--registration",
+            &enrollment.id,
+            "--owner",
+            &owner.to_hex(),
+            "--slots",
+            "2",
+        ])
+        .kill_on_drop(true)
+        .spawn()?;
+    let path = format!("/api/machines/{machine}/terminal-sessions");
+    let client = reqwest::Client::new();
+    async fn claim(
+        client: &reqwest::Client,
+        origin: &str,
+        path: &str,
+        cookie: &str,
+    ) -> Result<String> {
+        let request = random_token(16);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let response = client
+                    .post(format!("{origin}{path}"))
+                    .header("Origin", origin)
+                    .header("Cookie", cookie)
+                    .json(&json!({"request_id":request}))
+                    .send()
+                    .await?;
+                if response.status() == StatusCode::OK {
+                    return Ok(response.json::<Value>().await?["id"]
+                        .as_str()
+                        .unwrap()
+                        .into());
+                }
+                ensure!(
+                    response.status() == StatusCode::CONFLICT,
+                    "unexpected claim status {}",
+                    response.status()
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await?
+    }
+    let first = claim(&client, &origin, &path, &cookie).await?;
+    let second = claim(&client, &origin, &path, &cookie).await?;
+    ensure!(first != second);
+    let full = case
+        .status("GET", &path, &cookie, Value::Null, StatusCode::OK)
+        .await?;
+    ensure!(full["can_open"] == false && full["sessions"].as_array().unwrap().len() == 2);
+    let stopped = command()
+        .args(["terminal", "stop", &first])
+        .output()
+        .await?;
+    ensure!(
+        stopped.status.success(),
+        "could not close first pool workspace"
+    );
+    let third = claim(&client, &origin, &path, &cookie).await?;
+    ensure!(
+        third != first && third != second,
+        "replenishment reused an existing workspace"
+    );
+    unsafe {
+        libc::kill(host.id().unwrap() as i32, libc::SIGTERM);
+    }
+    let status = tokio::time::timeout(Duration::from_secs(45), host.wait()).await??;
+    ensure!(status.success(), "pool host did not withdraw cleanly");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let listing = case
+                .status("GET", &path, &cookie, Value::Null, StatusCode::OK)
+                .await?;
+            if listing["sessions"] == json!([]) && listing["can_open"] == false {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await??;
     case.db.drop().await?;
     Ok(())
 }

@@ -110,6 +110,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: None,
             name: "amberotter".into(),
             expires_at: now() + 2,
             session_expires_at: None,
@@ -379,6 +380,7 @@ async fn nonresponsive_peers_release_live_slots_but_keep_bounded_recovery() -> R
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: None,
             name: "amberotter".into(),
             expires_at: 0,
             session_expires_at: None,
@@ -484,6 +486,7 @@ async fn host_rotates_public_links_without_interrupting_attached_guests() -> Res
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: None,
             name: "quietotter".into(),
             expires_at: 0,
             session_expires_at: None,
