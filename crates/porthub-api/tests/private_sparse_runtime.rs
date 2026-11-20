@@ -124,12 +124,21 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
         for(own,other,mut packets)in[(a.clone(),b.clone(),pa),(b.clone(),a.clone(),pb)]{
             let cancel=stop.child_token();tasks.spawn(async move{loop{tokio::select!{_=cancel.cancelled()=>{while packets.recv().await.is_some(){}break;},packet=packets.recv()=>{let Some(packet)=packet else{break};if own.policy.lock().await.check(&packet,&other.id,false){ensure!(own.node.kernel_packet(&other.id,packet,true),"admitted native flow unexpectedly fell through raw path");}}}}Ok(())});
         }
-        timeout(Duration::from_secs(20),async{loop{
-            ha.request_peer(&bid);hb.request_peer(&aid);
-            if ha.by_id(&bid).is_some()&&hb.by_id(&aid).is_some(){break;}
-            if tasks.is_empty(){anyhow::bail!("private control owners stopped");}
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }Ok::<_,anyhow::Error>(())}).await??;
+        timeout(Duration::from_secs(20), async {
+            while !ha.enabled() || !hb.enabled() { tokio::time::sleep(Duration::from_millis(20)).await; }
+        }).await?;
+        // Let the receivers enter their idle sync wait, then create demand on
+        // one side only. The passive receiver must learn its incident peer.
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let cold_started = std::time::Instant::now();
+        ha.request_peer(&bid);
+        timeout(Duration::from_secs(15), async {
+            while ha.by_id(&bid).is_none() || hb.by_id(&aid).is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await?;
+        println!("passive_receiver_cold_pair_ms={}", cold_started.elapsed().as_millis());
+        ensure!(cold_started.elapsed() < Duration::from_secs(3), "idle receiver waited for periodic sync");
         ensure!(ha.peers().len()==1&&hb.peers().len()==1&&a.node.counts()==(0,0)&&b.node.counts()==(0,0),"4097 registrations allocated full-mesh flow resources");
         for id in [&aid,&bid] {let row=case.app.collection("private_peers").find_one(doc!{"_id":id}).await?.ok_or_else(||anyhow::anyhow!("controller publication absent"))?;ensure!(row.get_str("stream_transport").unwrap_or_default().is_empty(),"unproven native lifecycle unexpectedly advertised origin mode");}
 

@@ -149,12 +149,42 @@ fn launcher(
     } else {
         "setup $porthub_bootstrap_adopt"
     };
+    let shells = if enrollment.private.is_none() {
+        let owner = enrollment.machine.get_object_id("user_id").map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Missing registration owner",
+            )
+        })?;
+        let machine = enrollment
+            .machine
+            .get_object_id("_id")
+            .expect("resolved machine id");
+        format!(
+            r#"
+if [ "$(id -u)" != 0 ]; then
+  if [ "$PORTHUB_BROWSER_SHELLS" = on ]; then
+    if [ "$porthub_bootstrap_user" = true ]; then set -- --user; else set --; fi
+    "$porthub_bootstrap_bin_dir/porthub" terminal dashboard enable-default --owner {owner} --registration {machine} "$@" ||
+      echo 'PortHub is installed. Browser shell setup could not finish. Check Shells in the dashboard.' >&2
+  fi
+else
+  echo 'Browser shell hosting needs a non-root login. See Shells in the dashboard.' >&2
+fi
+"#
+        )
+    } else {
+        String::new()
+    };
     // First-download compatibility only. The binary performs credential file,
     // release and service operations natively; nothing tails or supervises it here.
     Ok(format!(
         r#"#!/bin/sh
 set -eu
 porthub_bootstrap_url={url}
+PORTHUB_BROWSER_SHELLS=${{PORTHUB_BROWSER_SHELLS:-on}}
+case "$PORTHUB_BROWSER_SHELLS" in on|off) ;; *) echo 'PORTHUB_BROWSER_SHELLS must be on or off.' >&2; exit 1 ;; esac
+
 case "$(uname -s)" in
   Linux) porthub_bootstrap_os=linux ;;
   Darwin) porthub_bootstrap_os=darwin ;;
@@ -204,12 +234,16 @@ porthub_bootstrap_adopt=
 if [ -e "$porthub_bootstrap_bin_dir/porthub" ] || [ -L "$porthub_bootstrap_bin_dir/porthub" ]; then
   porthub_bootstrap_adopt=--adopt-existing-cli
 fi
+if [ '{shell_notice}' = yes ] && [ "$PORTHUB_BROWSER_SHELLS" = on ] && [ "$(id -u)" != 0 ]; then
+  echo 'Enrollment enables dashboard browser shells as your current OS user. To skip, run the installer with PORTHUB_BROWSER_SHELLS=off.' >&2
+fi
 if [ "$porthub_bootstrap_user" = true ] || [ "$(id -u)" = 0 ]; then
   "$porthub_bootstrap_dir/porthub" {action} --ticket "$porthub_bootstrap_url" "$@"
 else
   sudo -- "$porthub_bootstrap_dir/porthub" {action} --ticket "$porthub_bootstrap_url" "$@"
 fi
-"#
+{shells}"#,
+        shell_notice = if shells.is_empty() { "no" } else { "yes" }
     ))
 }
 fn wants_json(request_headers: &HeaderMap) -> bool {

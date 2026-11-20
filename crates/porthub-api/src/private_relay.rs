@@ -75,7 +75,7 @@ impl ForwardReceipt {
         if self.expires<=now || !hub.allowed_scope(&self.source,&self.target,now,self.exit){return false;}
         let (Some(a),Some(b))=(hub.leases.get(&self.source),hub.leases.get(&self.target))else{return false;};
         if a.credential_hash!=self.source_hash||b.credential_hash!=self.target_hash||a.instance!=self.source_instance||b.instance!=self.target_instance||a.identity_generation!=self.source_generation||b.identity_generation!=self.target_generation{return false;}
-        let key=if self.source<self.target{(self.source.clone(),self.target.clone())}else{(self.target.clone(),self.source.clone())};
+        let key = PairLookup::new(&self.source, &self.target);
         self.owner.is_none_or(|owner|(if self.exit{&hub.exit_pairs}else{&hub.pairs}).get(&key).is_some_and(|p|p.owner_generation==owner))
     }
 }
@@ -101,14 +101,32 @@ impl Forward<'_> {
     }
 }
 struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
+type PairTable = hashbrown::HashMap<(String, String), PairAuthority, std::collections::hash_map::RandomState>;
+
+// Hash the same two strings, in the same order, as the owned tuple on insertion.
+#[derive(Hash)]
+struct PairLookup<'a>(&'a str, &'a str);
+
+impl<'a> PairLookup<'a> {
+    fn new(a: &'a str, b: &'a str) -> Self {
+        if a <= b { Self(a, b) } else { Self(b, a) }
+    }
+}
+
+impl hashbrown::Equivalent<(String, String)> for PairLookup<'_> {
+    fn equivalent(&self, key: &(String, String)) -> bool {
+        self.0 == key.0 && self.1 == key.1
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     leases: HashMap<String, Lease>,
     revoked: HashMap<String, Instant>,
     revoked_cleanup_at: Option<Instant>,
     connections: HashMap<String, HashMap<u8, Connection>>,
-    pairs: HashMap<(String,String), PairAuthority>,
-    exit_pairs: HashMap<(String,String), PairAuthority>,
+    pairs: PairTable,
+    exit_pairs: PairTable,
     generation: u64,
     admissions: HashMap<String, Admission>,
     workspace_generations: HashMap<String, (u64, bool)>,
@@ -154,7 +172,7 @@ impl Inner {
         let (Some(a),Some(b))=(self.leases.get(source),self.leases.get(target)) else{return false;};
         if a.expires<=now || b.expires<=now {return false;}
         if a.sparse_epoch.is_none() && b.sparse_epoch.is_none() {return a.allowed.contains(target)&&b.allowed.contains(source);}
-        let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
+        let key = PairLookup::new(source, target);
         let Some(pair)=(if exit{&self.exit_pairs}else{&self.pairs}).get(&key).filter(|p|p.expires>now) else{return false;};
         let (Some(left),Some(right))=(self.leases.get(&pair.left),self.leases.get(&pair.right)) else{return false;};
         left.credential_hash==pair.left_hash && right.credential_hash==pair.right_hash
@@ -370,30 +388,35 @@ impl Hub {
     /// Coarse relay eligibility is reciprocal; the endpoint engines still enforce packet ACLs.
     pub(crate) fn publish_pair(&self,source:&str,target:&str,epoch:&str)->bool{self.publish_pair_epochs(source,target,epoch,epoch)}
     pub(crate) fn publish_pair_epochs(&self, source:&str, target:&str, epoch:&str,target_epoch:&str)->bool {
-        self.publish_pair_checked(source,target,epoch,target_epoch,None,false)
+        self.publish_pair_checked(source,target,epoch,target_epoch,None,false).is_some()
     }
+    #[cfg(test)]
     pub(crate) fn publish_pair_admitted(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
+        self.publish_pair_update(source,epoch,hash,instance,generation,target).is_some()
+    }
+    /// None for denied or stale authority, Some(true) for a new receiver binding.
+    pub(crate) fn publish_pair_update(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->Option<bool>{
         self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)),false)
     }
     pub(crate) fn publish_exit_pair_admitted(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
-        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)),true)
+        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)),true).is_some()
     }
-    fn publish_pair_checked(&self,source:&str,target:&str,epoch:&str,target_epoch:&str,request:Option<(&str,&str,u64,&PairPeerPin)>,exit:bool)->bool{
-        if source==target {return false;}
+    fn publish_pair_checked(&self,source:&str,target:&str,epoch:&str,target_epoch:&str,request:Option<(&str,&str,u64,&PairPeerPin)>,exit:bool)->Option<bool>{
+        if source==target {return None;}
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         hub.pairs.retain(|_,p|p.expires>now);
         hub.exit_pairs.retain(|_,p|p.expires>now);
-        let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return false;};
-        if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return false;}
-        if request.is_some_and(|(_,_,_,pin)| a.origin.is_some() && pin.origin_stamp.as_deref()!=b.origin.as_ref().map(|origin|origin.stamp.as_str())){return false;}
+        let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return None;};
+        if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return None;}
+        if request.is_some_and(|(_,_,_,pin)| a.origin.is_some() && pin.origin_stamp.as_deref()!=b.origin.as_ref().map(|origin|origin.stamp.as_str())){return None;}
         if a.expires<=now || b.expires<=now || (if exit{a.exit_epoch.as_deref()}else{a.sparse_epoch.as_deref()})!=Some(epoch)
             || (if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()}).is_some_and(|e|e!=target_epoch)
             || (exit&&b.exit_epoch.is_none())
-            || (!exit&&b.sparse_epoch.is_none() && !b.allowed.contains(source)) {return false;}
+            || (!exit&&b.sparse_epoch.is_none() && !b.allowed.contains(source)) {return None;}
         let key=if source<target {(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
         let selected=if exit{&hub.exit_pairs}else{&hub.pairs};
-        if !selected.contains_key(&key) && (hub.pairs.len()+hub.exit_pairs.len()>=8192 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==source||p.right==source).count()>=256 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==target||p.right==target).count()>=256) {return false;}
-        let Some(generation)=hub.pair_generation.checked_add(1)else{return false;};
+        if !selected.contains_key(&key) && (hub.pairs.len()+hub.exit_pairs.len()>=8192 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==source||p.right==source).count()>=256 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==target||p.right==target).count()>=256) {return None;}
+        let Some(generation)=hub.pair_generation.checked_add(1)else{return None;};
         let previous=selected.get(&key);
         let owner_generation=previous.filter(|p|{
             let (l,r,le,re)=if p.left==source{(a,b,Some(epoch),if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()})}else{(b,a,if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()},Some(epoch))};
@@ -401,7 +424,7 @@ impl Hub {
         }).map(|p|p.owner_generation).unwrap_or(generation);
         let pair=PairAuthority{generation,owner_generation,left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:if exit{a.exit_epoch.clone()}else{a.sparse_epoch.clone()},right_epoch:if exit{b.exit_epoch.clone()}else{b.sparse_epoch.clone()},expires:now+Duration::from_secs(15)};
         hub.pair_generation=generation;
-        (if exit{&mut hub.exit_pairs}else{&mut hub.pairs}).insert(key,pair);true
+        (if exit{&mut hub.exit_pairs}else{&mut hub.pairs}).insert(key,pair);Some(owner_generation==generation)
     }
     /// Capture existing incident authority before any target/ACL reads. Epochs here
     /// describe the authority being retired, not the newly-denied policy state.
@@ -638,7 +661,7 @@ impl Hub {
             _=>false,
         };
         if !hub.allowed_scope(source,target,now,exit) {return None;}
-        let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
+        let key = PairLookup::new(source, target);
         let pair=(if exit{&hub.exit_pairs}else{&hub.pairs}).get(&key);
         let expires=a.expires.min(b.expires).min(pair.map(|p|p.expires).unwrap_or(a.expires));
         let receipt=ForwardReceipt{source:source.into(),target:target.into(),source_hash:a.credential_hash.clone(),target_hash:b.credential_hash.clone(),source_instance:a.instance.clone(),target_instance:b.instance.clone(),source_generation:a.identity_generation,target_generation:b.identity_generation,exit,owner:pair.map(|p|p.owner_generation),expires};
@@ -1004,15 +1027,15 @@ mod tests {
         hub.publish_sparse_admitted("b","hash-b","instance-b",remote,&b,Some(target_read));
         hub.publish_sparse("c","hash-c","instance-c",Ipv4Addr::new(10,0,0,3),&c);
         let old=PairPeerPin{id:"b".into(),hash:"hash-b".into(),instance:"instance-b".into(),ip:remote,epoch:Some(b.clone()),origin_stamp:None,generation:None};
-        assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",first,&old));
+        assert_eq!(hub.publish_pair_update("a",&a,"hash-a","instance-a",first,&old),Some(true));
         let observed_first=hub.observe_pairs("a","hash-a","instance-a",first).remove("b").unwrap();
         let later=hub.begin_admission("a","hash-a","instance-a").unwrap();
         hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&a,Some(later));
-        assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&old));
+        assert_eq!(hub.publish_pair_update("a",&a,"hash-a","instance-a",later,&old),Some(false));
         assert!(hub.publish_pair_epochs("a","c",&a,&c));
         let key=("a".to_owned(),"b".to_owned());let deadline=hub.0.lock().unwrap().pairs[&key].expires;
         assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",first,&observed_first));
-        assert!(!hub.publish_pair_admitted("a",&a,"hash-a","instance-a",first,&old));
+        assert_eq!(hub.publish_pair_update("a",&a,"hash-a","instance-a",first,&old),None);
         assert_eq!(hub.0.lock().unwrap().pairs[&key].expires,deadline);
         let observed=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
         // A newer committed target decision is protected even when bindings and
