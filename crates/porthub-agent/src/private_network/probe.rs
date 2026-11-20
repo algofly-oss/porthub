@@ -281,6 +281,9 @@ impl Quality {
         let (Some(peer), Some(gateway)) = (fresh(scores[1]), fresh(scores[0])) else {
             return default;
         };
+        if peer.bits_per_second == 0 && gateway.bits_per_second == 0 {
+            return default;
+        }
         if peer.bits_per_second >= gateway.bits_per_second.saturating_mul(6) / 5 {
             return true;
         }
@@ -298,13 +301,19 @@ impl Quality {
 
     fn observe(&mut self, peer: &str, direct: bool, next: Score) {
         let scores = self.scores.entry(peer.to_owned()).or_insert([None, None]);
-        let score = scores[direct as usize].get_or_insert(next);
-        // Smooth brief queue spikes without making a real sustained change
-        // take many minutes to influence new flows.
-        score.bits_per_second =
-            score.bits_per_second.saturating_mul(3) / 4 + next.bits_per_second / 4;
-        score.rtt = score.rtt.mul_f64(0.75) + next.rtt.mul_f64(0.25);
-        score.measured_at = next.measured_at;
+        let slot = &mut scores[direct as usize];
+        // A timeout has no measured rate or RTT. Smooth only consecutive live
+        // samples so the first successful retry can select the recovered path.
+        let mut score = next;
+        if let Some(previous) = slot.filter(|p| {
+            p.bits_per_second > 0 && next.bits_per_second > 0
+                && next.measured_at.saturating_duration_since(p.measured_at) <= SCORE_TTL
+        }) {
+            score.bits_per_second =
+                previous.bits_per_second.saturating_mul(3) / 4 + next.bits_per_second / 4;
+            score.rtt = previous.rtt.mul_f64(0.75) + next.rtt.mul_f64(0.25);
+        }
+        *slot = Some(score);
         tracing::debug!(
             peer,
             direct,
@@ -503,6 +512,37 @@ mod tests {
         quality.prune(now + SCORE_TTL + Duration::from_secs(1));
         assert!(quality.scores.is_empty());
         assert!(Frame::decode(b"not a path probe").is_none());
+    }
+
+    #[test]
+    fn first_success_after_timeout_replaces_the_failure_estimate() {
+        let mut quality = Quality::default();
+        let now = Instant::now();
+        let recovered = now + Duration::from_secs(22);
+        quality.start("peer", true, 1, now);
+        quality.prune(now + Duration::from_secs(6));
+        for (direct, rate, millis) in [(false, 120_000_000, 100), (true, 200_000_000, 4)] {
+            quality.observe("peer", direct, Score {
+                bits_per_second: rate,
+                rtt: Duration::from_millis(millis),
+                measured_at: recovered,
+            });
+        }
+        assert!(quality.prefer_peer("peer", false, recovered));
+    }
+
+    #[test]
+    fn two_failed_probes_preserve_the_callers_default() {
+        let mut quality = Quality::default();
+        let now = Instant::now();
+        for direct in [true, false] {
+            quality.start("peer", direct, 1, now);
+        }
+        let expired = now + Duration::from_secs(6);
+        quality.prune(expired);
+        for default in [true, false] {
+            assert_eq!(quality.prefer_peer("peer", default, expired), default);
+        }
     }
 
     #[test]
