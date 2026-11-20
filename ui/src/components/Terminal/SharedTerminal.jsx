@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { IconCopy, IconExternalLink, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
+import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { IconCheck, IconChevronDown, IconCopy, IconExternalLink, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
+import { Menu } from "@/components/ui/menu";
 import HistoryPanel from "./HistoryPanel";
 import DashboardGuestLinks from "./DashboardGuestLinks";
 import useTerminalManagement from "./useTerminalManagement";
 import { terminalStunServers } from "@/lib/terminalConnectivity.mjs";
 import { TerminalTransport } from "@/lib/terminalTransport";
+
+const ClipboardMenuCheckbox = forwardRef(function ClipboardMenuCheckbox(props, ref) {
+  return <button {...props} ref={ref} role="menuitemcheckbox" />;
+});
 
 const MAX_PENDING = 1024 * 1024;
 function bytesToBase64(bytes) {
@@ -31,6 +36,15 @@ export default function SharedTerminal({ invitation, embedded = false, machineId
   const [status, setStatus] = useState("Not connected"), [error, setError] = useState("");
   const [session, setSession] = useState(null), [members, setMembers] = useState([]);
   const [autoCopy, setAutoCopy] = useState(false);
+  const [clipboardMenuOpen, setClipboardMenuOpen] = useState(false);
+  const clipboardTrigger = useRef(null);
+  function dismissClipboardMenu(event) {
+    if (event.key === "Escape" && clipboardMenuOpen) {
+      event.stopPropagation();
+      setClipboardMenuOpen(false);
+      clipboardTrigger.current?.focus();
+    }
+  }
   const [clipboardStatus, setClipboardStatus] = useState("");
   const [stunText,setStunText]=useState("");
   const stun=useRef([]),relayOnlyChoice=useRef(false);
@@ -291,7 +305,29 @@ export default function SharedTerminal({ invitation, embedded = false, machineId
             </a>
           </Button>
         )}
-        <Button type="button" variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button type="button" variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button type="button" variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button type="button" size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
+        <Button type="button" variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button>
+        <div role="group" aria-label="Clipboard" className="inline-flex shrink-0 items-center">
+          <Button type="button" variant="secondary" size="sm" className="rounded-r-none" onClick={copy}>
+            <IconCopy size={15} aria-hidden="true" />Copy selection
+          </Button>
+          <Menu position="bottom-end" withinPortal opened={clipboardMenuOpen} onChange={setClipboardMenuOpen}>
+            <Menu.Target>
+              <Button type="button" variant="secondary" size="sm" ref={clipboardTrigger} onKeyDownCapture={dismissClipboardMenu} aria-label="Clipboard options" title="Clipboard options" className="w-10 rounded-l-none border-l-0 px-0 md:w-9">
+                <IconChevronDown size={15} aria-hidden="true" />
+              </Button>
+            </Menu.Target>
+            <Menu.Dropdown onKeyDownCapture={dismissClipboardMenu}>
+              <Menu.Item component={ClipboardMenuCheckbox} aria-checked={autoCopy} icon={<IconCheck size={15} aria-hidden="true" className={autoCopy ? "" : "invisible"} />}
+                onClick={() => {
+                  copySelection.current = !autoCopy;
+                  setAutoCopy(!autoCopy);
+                }}>
+                Copy selected text automatically
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </div>
+        {connected || connecting ? <Button type="button" variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button type="button" size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
     </header>
     {error && <p role="alert" className="shrink-0 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
@@ -308,6 +344,6 @@ export default function SharedTerminal({ invitation, embedded = false, machineId
         {management.error && <p role="alert" className="mt-2 text-xs text-amber-600 dark:text-amber-300">{management.error}</p>}
       </aside>
     </div>
-    <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2 text-[11px] text-muted-foreground"><span>{session?.read_only ? "Read-only viewing · F7 history" : "Ctrl+A prefix · F7 history"} · Disconnect leaves the workspace running</span><label className="flex items-center gap-2"><input type="checkbox" checked={autoCopy} onChange={event=>{setAutoCopy(event.target.checked);copySelection.current=event.target.checked;}} />Copy selected text automatically</label><span role="status" aria-live="polite">{clipboardStatus}</span></footer>
+    <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2 text-[11px] text-muted-foreground"><span>{session?.read_only ? "Read-only viewing · F7 history" : "Ctrl+A prefix · F7 history"} · Disconnect leaves the workspace running</span><span role="status" aria-live="polite">{clipboardStatus}</span></footer>
   </main>;
 }
