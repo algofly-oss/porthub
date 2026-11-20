@@ -140,7 +140,7 @@ async fn linux_owned_capture_overlap_withdrawal_connected_socket_and_drop_bounda
     match std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW|libc::O_NONBLOCK).open("/dev/net/tun"){
         Ok(probe)=>drop(probe),Err(error)=>{println!("fixture_tun_open_errno={:?}",error.raw_os_error());return Err(error.into());}
     }
-    let source_name = format!("ph{}", &spec.nonce[..8]);
+    let source_name = format!("tun0ph{}", &spec.nonce[..8]);
     let foreign_name = format!("ph{}", &spec.nonce[8..16]);
     ensure!(source_name != foreign_name, "fixture names collide");
     let names = [source_name.clone(), foreign_name.clone()];

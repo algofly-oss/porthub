@@ -25,6 +25,7 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         .filter(|link| {
             let name = link.name().unwrap_or("");
             link.is_up()
+                && !porthub_mesh::underlay::overlay_interface(name, link.kind().unwrap_or(""))
                 && ![
                     "lo", "ph", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "lxc",
                 ]
@@ -38,11 +39,6 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
                 .any(|prefix| name.starts_with(prefix))
             {
                 0
-            } else if ["zt", "wg", "tun", "tap", "tailscale"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-            {
-                2
             } else {
                 1
             };
@@ -186,11 +182,10 @@ mod tests {
         );
         let connection = Connection::<Route>::new()?;
         let underlay = "enphverify0";
-        let overlay = "phverify0";
-        anyhow::ensure!(
-            connection.get_link_by_name(underlay).await?.is_none()
-                && connection.get_link_by_name(overlay).await?.is_none()
-        );
+        let overlays = ["phverify0", "tun0ph1234abcd", "tailscale0", "wt0", "zt01234567"];
+        for name in std::iter::once(underlay).chain(overlays) {
+            anyhow::ensure!(connection.get_link_by_name(name).await?.is_none());
+        }
         let (output, mut input) = watch::channel(vec!["127.0.0.1:1".parse()?]);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(watch(output, cancel.clone()));
@@ -214,16 +209,16 @@ mod tests {
                 .add_address_by_index(underlay_index, "192.0.2.11".parse()?, 32)
                 .await?;
             wait_snapshot(&mut input, &["192.0.2.11:0".parse()?]).await?;
-            connection.add_link(DummyLink::new(overlay)).await?;
-            let overlay_index = connection
-                .get_link_by_name(overlay)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("test overlay missing"))?
-                .ifindex();
-            connection
-                .add_address_by_index(overlay_index, "10.203.251.1".parse()?, 32)
-                .await?;
-            connection.set_link_up(overlay).await?;
+            for (i, overlay) in overlays.into_iter().enumerate() {
+                connection.add_link(DummyLink::new(overlay)).await?;
+                let index = connection.get_link_by_name(overlay).await?
+                    .ok_or_else(|| anyhow::anyhow!("test tunnel missing"))?.ifindex();
+                let ip = std::net::Ipv4Addr::new(10, 203, 0, i as u8 + 1);
+                connection.add_address_by_index(index, ip.into(), 32).await?;
+                connection.set_link_up(overlay).await?;
+            }
+            anyhow::ensure!(current().await? == vec!["192.0.2.11:0".parse::<SocketAddr>()?],
+                "VPN addresses entered the physical candidate list");
             tokio::time::sleep(Duration::from_millis(600)).await;
             anyhow::ensure!(
                 !input.has_changed()?,
@@ -237,7 +232,9 @@ mod tests {
         cancel.cancel();
         let stopped = tokio::time::timeout(Duration::from_secs(1), task).await;
         let _ = connection.del_link_if_exists(underlay).await;
-        let _ = connection.del_link_if_exists(overlay).await;
+        for overlay in overlays {
+            let _ = connection.del_link_if_exists(overlay).await;
+        }
         result?;
         stopped???;
         Ok(())

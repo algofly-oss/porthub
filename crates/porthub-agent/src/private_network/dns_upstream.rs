@@ -213,7 +213,7 @@ async fn resolved_servers() -> Result<Vec<SocketAddr>> {
     use nlink::netlink::{Connection, Route};
     let links = Connection::<Route>::new()?.get_links().await?;
     let owned: std::collections::HashSet<_> = links.iter()
-        .filter(|link| link.name().is_some_and(|name| name.starts_with("ph")))
+        .filter(|link| link.name().is_some_and(|name| (name.starts_with("ph") || porthub_mesh::underlay::porthub_tun_name(name))))
         .map(|link| link.ifindex() as i32).collect();
     let connection = zbus::Connection::system().await?;
     let manager = zbus::Proxy::new(&connection, "org.freedesktop.resolve1",

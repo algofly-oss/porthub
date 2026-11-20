@@ -4,6 +4,118 @@ use anyhow::{ensure, Result};
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
 
+/// Legacy Linux devices used ph + eight hexadecimal digits. Keep recognizing
+/// those names when reading retained route, DNS and exit ownership journals.
+pub fn porthub_tun_name(name: &str) -> bool {
+    name.strip_prefix("tun0ph")
+        .or_else(|| name.strip_prefix("ph"))
+        .is_some_and(|hash| hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A VPN interface is never a physical ICE candidate, even when the OS makes
+/// it the default route. Publishing a tunnel address as a physical candidate
+/// can make two overlay transports depend on one another.
+pub fn overlay_interface(name: &str, driver: &str) -> bool {
+    let driver = driver.to_ascii_lowercase();
+    if matches!(
+        driver.as_str(),
+        "tun"
+            | "wireguard"
+            | "xfrm"
+            | "ipip"
+            | "ip6tnl"
+            | "gre"
+            | "gretap"
+            | "erspan"
+            | "vti"
+            | "vti6"
+    ) {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    let products = [
+        "netbird",
+        "tailscale",
+        "zerotier",
+        "wireguard",
+        "wintun",
+        "porthub",
+    ];
+    let branded = products.iter().any(|product| {
+        driver.contains(product)
+            || name == *product
+            || name.strip_prefix(product).is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+            })
+    });
+    let zerotier = name.strip_prefix("zt").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+    });
+    if porthub_tun_name(&name) || zerotier || branded {
+        return true;
+    }
+    ["utun", "tun", "tap", "wg", "wt", "feth"]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn foreign_tunnels_are_excluded_even_with_an_ethernet_label_or_custom_name() {
+    for (name, driver) in [
+        ("ph1234abcd", ""),
+        ("tun0ph1234abcd", ""),
+        ("ztabcdef12", ""),
+        ("feth12", ""),
+        ("wt0", ""),
+        ("wt0", "wireguard"),
+        ("custom", "tun"),
+        ("utun100", ""),
+        ("tap2", ""),
+        ("Ethernet 4", "ZeroTier Virtual Port"),
+        ("Work", "NetBird Tunnel"),
+        ("Ethernet", "Tailscale Tunnel"),
+        ("custom", "WireGuard Tunnel"),
+        ("Work", "Wintun Userspace Tunnel"),
+    ] {
+        assert!(overlay_interface(name, driver), "{name} {driver}");
+    }
+    for (name, driver) in [
+        ("enp6s0", ""),
+        ("en0", ""),
+        ("Wi-Fi", "Intel Wi-Fi"),
+        ("Ethernet", "Realtek Ethernet"),
+        ("bond0", "bond"),
+        ("wan.10", "vlan"),
+        ("tunnel-lab-wifi", ""),
+        ("test-netbird-wifi", "Intel Ethernet"),
+    ] {
+        assert!(!overlay_interface(name, driver), "{name} {driver}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn only_exact_new_and_legacy_porthub_names_are_valid_for_journals() {
+    for name in ["phc049a2a9", "tun0phc049a2a9"] {
+        assert!(porthub_tun_name(name));
+    }
+    for name in [
+        "tun0",
+        "tun0ph",
+        "ph123",
+        "ph0123456x",
+        "tun0ph123456789",
+        "tun0ph1234567/",
+    ] {
+        assert!(!porthub_tun_name(name));
+    }
+}
+
 /// Addresses suitable for exchanging unscoped ICE candidates. Link-local IPv6
 /// needs an interface scope meaningful only on its own host and is not shared.
 pub fn candidate_ip(ip: IpAddr) -> bool {
@@ -239,6 +351,6 @@ pub fn interface_name(source: IpAddr) -> std::io::Result<String> {
 
 /// Pin an already-bound async UDP socket to its physical macOS interface.
 #[cfg(target_os = "macos")]
-pub fn bind_udp_interface(socket:&tokio::net::UdpSocket,source:IpAddr)->std::io::Result<()> {
-    bind_interface(&socket2::SockRef::from(socket),source)
+pub fn bind_udp_interface(socket: &tokio::net::UdpSocket, source: IpAddr) -> std::io::Result<()> {
+    bind_interface(&socket2::SockRef::from(socket), source)
 }
