@@ -453,7 +453,13 @@ impl Peer {
         Ok(())
     }
     pub fn state(&self) -> State {
-        self.state
+        // ICE can lose reachability while the authenticated DTLS session is
+        // still intact. Stop routing packets here until ICE recovers.
+        if self.state == State::Ready && self.ice.state() == ConnectionState::Disconnected {
+            State::Connecting
+        } else {
+            self.state
+        }
     }
     pub fn description(&self) -> Description {
         let credentials = self.ice.get_local_credentials();
@@ -713,7 +719,7 @@ impl Peer {
         Ok(())
     }
     pub fn send(&mut self, now: Instant, packet: &[u8]) -> Result<()> {
-        ensure!(self.state == State::Ready, "private peer is not ready");
+        ensure!(self.state() == State::Ready, "private peer is not ready");
         ensure!(
             (20..=crate::MAX_PACKET).contains(&packet.len()),
             "invalid private packet size"
