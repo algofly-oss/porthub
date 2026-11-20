@@ -590,21 +590,47 @@ async fn connect_lane(
     }))
 }
 
-#[derive(Clone,Copy)]
-struct HeartbeatTiming { ping:Duration, response:Duration, check:Duration }
-const HEARTBEAT:HeartbeatTiming=HeartbeatTiming{ping:Duration::from_secs(25),response:Duration::from_secs(15),check:Duration::from_secs(1)};
-struct LaneProbe { nonce:[u8;16], state:std::sync::Mutex<(u64,Option<(Bytes,tokio::time::Instant)>)> }
+#[derive(Clone, Copy)]
+struct HeartbeatTiming {
+    ping: Duration,
+    response: Duration,
+}
+const HEARTBEAT: HeartbeatTiming = HeartbeatTiming {
+    ping: Duration::from_secs(25),
+    response: Duration::from_secs(15),
+};
+
+struct LaneProbe {
+    nonce: [u8; 16],
+    sequence: u64,
+    pending: Option<Bytes>,
+}
+
 impl LaneProbe {
-    fn new()->Result<Self>{let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|anyhow::anyhow!("relay heartbeat nonce unavailable"))?;Ok(Self{nonce,state:std::sync::Mutex::new((0,None))})}
-    fn challenge(&self,now:tokio::time::Instant,response:Duration)->Result<Option<Bytes>>{
-        let mut state=self.state.lock().unwrap_or_else(|p|p.into_inner());
-        if let Some((_,deadline))=&state.1 {ensure!(now<*deadline,"relay heartbeat response expired");return Ok(None);}
-        state.0=state.0.checked_add(1).ok_or_else(||anyhow::anyhow!("relay heartbeat sequence exhausted"))?;
-        let mut bytes=self.nonce.to_vec();bytes.extend_from_slice(&state.0.to_be_bytes());let bytes=Bytes::from(bytes);
-        state.1=Some((bytes.clone(),now+response));Ok(Some(bytes))
+    fn new() -> Result<Self> {
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("relay heartbeat nonce unavailable"))?;
+        Ok(Self { nonce, sequence: 0, pending: None })
     }
-    fn pong(&self,bytes:&Bytes,now:tokio::time::Instant){let mut state=self.state.lock().unwrap_or_else(|p|p.into_inner());if state.1.as_ref().is_some_and(|(expected,deadline)|expected==bytes&&now<*deadline){state.1=None;}}
-    fn expired(&self,now:tokio::time::Instant)->bool{self.state.lock().unwrap_or_else(|p|p.into_inner()).1.as_ref().is_some_and(|(_,deadline)|now>=*deadline)}
+
+    fn challenge(&mut self) -> Result<Bytes> {
+        ensure!(self.pending.is_none(), "private relay missed heartbeat response");
+        self.sequence = self.sequence.checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("relay heartbeat sequence exhausted"))?;
+        let mut bytes = self.nonce.to_vec();
+        bytes.extend_from_slice(&self.sequence.to_be_bytes());
+        let bytes = Bytes::from(bytes);
+        self.pending = Some(bytes.clone());
+        Ok(bytes)
+    }
+
+    fn acknowledge(&mut self, bytes: &Bytes) -> bool {
+        if self.pending.as_ref() != Some(bytes) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
 }
 
 async fn serve_lanes(
@@ -615,37 +641,37 @@ async fn serve_lanes(
     events: &mpsc::Sender<Event>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    serve_lanes_with_heartbeat(connections,packets,sender,config,events,cancel,HEARTBEAT).await
+    serve_lanes_with_heartbeat(connections,packets,sender,config,events,cancel,HEARTBEAT,crate::unified::suspend_aware_delay).await
 }
-async fn serve_lanes_with_heartbeat(
+async fn serve_lanes_with_heartbeat<F, Fut>(
     connections:Vec<ConnectedLane>,packets:&mut[mpsc::Receiver<Queued>;RELAY_LANES],sender:&Sender,
-    config:&mut watch::Receiver<Option<Config>>,events:&mpsc::Sender<Event>,cancel:&CancellationToken,timing:HeartbeatTiming,
-)->Result<bool>{
+    config:&mut watch::Receiver<Option<Config>>,events:&mpsc::Sender<Event>,cancel:&CancellationToken,timing:HeartbeatTiming, wait:F,
+)->Result<bool> where F:Fn(Duration)->Fut+Clone, Fut:std::future::Future<Output=()> {
     let reading = cancel.child_token();
     let mut readers = tokio::task::JoinSet::new();
     let mut writers = futures_util::stream::FuturesUnordered::new();
-    let probes=connections.iter().map(|_|LaneProbe::new().map(Arc::new)).collect::<Result<Vec<_>>>()?;
+    let probes=connections.iter().map(|_|LaneProbe::new()).collect::<Result<Vec<_>>>()?;
     for ((connection, input),probe) in connections.into_iter().zip(packets.iter_mut()).zip(probes) {
         let lane = connection.lane;
         let (writer, mut incoming) = connection.socket.split();
-        let (pongs, pong_rx) = mpsc::channel::<Bytes>(4);
-        let reader_probe=probe.clone();
+        let (control, control_rx) = mpsc::channel::<Message>(4);
         sender.set_ready(lane, true);
         let reader_sender=sender.clone();
         let read_events = events.clone();
         let read_cancel = reading.clone();
         let origins=connection.origins;
         readers.spawn(async move {
-            let mut check=tokio::time::interval(timing.check);
-            check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _=read_cancel.cancelled()=>break,
-                    _=check.tick()=>if reader_probe.expired(tokio::time::Instant::now()) {tracing::warn!(lane,"private relay lane missed matched heartbeat response");break;},
                     frame=incoming.next()=>match frame {
                         Some(Ok(Message::Binary(frame)))=>tokio::select! {_=read_cancel.cancelled()=>break,_=dispatch_downstream(frame,origins,&read_events)=>{}},
-                        Some(Ok(Message::Ping(bytes)))=>if pongs.try_send(bytes).is_err(){break;},
-                        Some(Ok(Message::Pong(bytes)))=>reader_probe.pong(&bytes,tokio::time::Instant::now()),
+                        Some(Ok(frame @ Message::Ping(_))) => {
+                            if control.try_send(frame).is_err() { break; }
+                        }
+                        Some(Ok(frame @ Message::Pong(_))) => {
+                            if control.send(frame).await.is_err() { break; }
+                        }
                         _=>break,
                     }
                 }
@@ -654,9 +680,10 @@ async fn serve_lanes_with_heartbeat(
         });
         // Each socket has its own writer. A full TCP send buffer on one lane
         // must not prevent the other lanes from making progress.
-        writers.push(write_lane_probed(
-            writer,input,pong_rx,connection.batch,connection.prefixes,Some(probe),timing,
-        ));
+        let output = write_lane(
+            writer,input,control_rx,connection.batch,connection.prefixes,probe,timing,wait.clone(),
+        );
+        writers.push(async move { (lane, output.await) });
     }
     let mut heartbeat = tokio::time::interval(Duration::from_secs(25));
     heartbeat.tick().await;
@@ -665,7 +692,12 @@ async fn serve_lanes_with_heartbeat(
             changed=config.changed()=>break changed.is_err(),
             _=cancel.cancelled()=>break true,
             _=readers.join_next()=>break false,
-            _=writers.next()=>break false,
+            writer=writers.next()=>{
+                if let Some((lane, Err(error))) = writer {
+                    tracing::warn!(lane, %error, "private relay writer stopped");
+                }
+                break false;
+            },
             _=heartbeat.tick()=>{
                 let dropped = sender.take_dropped_packets();
                 if dropped > 0 {
@@ -685,40 +717,61 @@ async fn serve_lanes_with_heartbeat(
     Ok(stop)
 }
 
-#[cfg(test)]
-async fn write_lane(
-    socket: RelaySink,
+enum LaneInput {
+    Heartbeat,
+    Control(Message),
+    Packet(Queued),
+}
+
+async fn write_lane<F, Fut>(
+    mut socket: RelaySink,
     packets: &mut mpsc::Receiver<Queued>,
-    pongs: mpsc::Receiver<Bytes>,
+    mut control: mpsc::Receiver<Message>,
     batch: bool,
     prefixes: bool,
-) -> Result<()> {
-    write_lane_probed(socket,packets,pongs,batch,prefixes,None,HEARTBEAT).await
-}
-async fn write_lane_probed(
-    mut socket:RelaySink,packets:&mut mpsc::Receiver<Queued>,mut pongs:mpsc::Receiver<Bytes>,batch:bool,prefixes:bool,
-    probe:Option<Arc<LaneProbe>>,timing:HeartbeatTiming,
-)->Result<()>{
-    let mut heartbeat = tokio::time::interval(timing.ping);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    heartbeat.tick().await;
+    mut probe: LaneProbe,
+    timing: HeartbeatTiming,
+    wait: F,
+) -> Result<()>
+where
+    F: Fn(Duration) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut timer = Box::pin(wait(timing.ping));
     loop {
-        let (message,authority) = tokio::select! {
-            packet=packets.recv()=>{
-                let Some(packet)=packet else {return Ok(());};
+        // A Pong queued before resume cannot renew an already expired challenge.
+        // The inner select gives ordinary traffic and peer control frames a fair turn.
+        let input = tokio::select! {
+            biased;
+            _ = &mut timer => Some(LaneInput::Heartbeat),
+            input = async {
+                tokio::select! {
+                    message = control.recv() => message.map(LaneInput::Control),
+                    packet = packets.recv() => packet.map(LaneInput::Packet),
+                }
+            } => input,
+        };
+        let (message, authority) = match input {
+            Some(LaneInput::Heartbeat) => {
+                let bytes = probe.challenge()?;
+                timer.set(wait(timing.response));
+                (Message::Ping(bytes), Bytes::new().into())
+            }
+            Some(LaneInput::Control(Message::Ping(bytes))) => (Message::Pong(bytes), Bytes::new().into()),
+            Some(LaneInput::Control(Message::Pong(bytes))) => {
+                if probe.acknowledge(&bytes) {
+                    timer.set(wait(timing.ping));
+                }
+                continue;
+            }
+            Some(LaneInput::Control(_)) => continue,
+            None => return Ok(()),
+            Some(LaneInput::Packet(packet)) => {
                 if packet.check().is_err(){continue;}
                 let mut records=vec![packet.bytes.clone()];let mut guards=packet.guards;let mut permits=packet.permits;
                 if batch {for _ in 1..32 {match packets.try_recv(){Ok(next)=>{if next.check().is_ok(){records.push(next.bytes);guards.extend(next.guards);permits.extend(next.permits);}},Err(_)=>break}}}
                 let message=if batch {Message::Binary(porthub_mesh::batch::encode(&records,prefixes)?.into())}else{Message::Binary(records.pop().unwrap())};
                 (message,Queued{bytes:Bytes::new(),guards,permits})
-            },
-            pong=pongs.recv()=>{
-                let Some(pong)=pong else {return Ok(());};
-                (Message::Pong(pong),Bytes::new().into())
-            },
-            _=heartbeat.tick()=>{
-                let bytes=match &probe {Some(probe)=>{let Some(bytes)=probe.challenge(tokio::time::Instant::now(),timing.response)? else{continue;};bytes},None=>Bytes::new()};
-                (Message::Ping(bytes),Bytes::new().into())
             },
         };
         authority.during(async {tokio::time::timeout(Duration::from_secs(5),socket.send(message)).await??;Ok(())}).await?;
@@ -731,15 +784,17 @@ mod tests {
 
     #[test]
     fn only_current_on_time_pong_retires_pending_probe() -> Result<()> {
-        let probe=LaneProbe::new()?;let now=tokio::time::Instant::now();
-        let first=probe.challenge(now,Duration::from_secs(15))?.unwrap();
-        probe.pong(&Bytes::from_static(b"foreign"),now);
-        assert!(probe.challenge(now+Duration::from_secs(5),Duration::from_secs(15))?.is_none());
-        assert!(probe.expired(now+Duration::from_secs(15)));
-        probe.pong(&first,now+Duration::from_secs(15));assert!(probe.expired(now+Duration::from_secs(15)));
-        let live=LaneProbe::new()?;let first=live.challenge(now,Duration::from_secs(15))?.unwrap();
-        live.pong(&first,now+Duration::from_secs(1));let second=live.challenge(now+Duration::from_secs(2),Duration::from_secs(15))?.unwrap();
-        assert_ne!(first,second);live.pong(&first,now+Duration::from_secs(3));assert!(live.expired(now+Duration::from_secs(17)));Ok(())
+        let mut probe = LaneProbe::new()?;
+        let first = probe.challenge()?;
+        assert!(!probe.acknowledge(&Bytes::from_static(b"foreign")));
+        assert!(probe.challenge().is_err());
+        assert!(probe.acknowledge(&first));
+        let second = probe.challenge()?;
+        assert_ne!(first, second);
+        assert!(!probe.acknowledge(&first));
+        assert!(probe.challenge().is_err());
+        assert!(probe.acknowledge(&second));
+        Ok(())
     }
 
     #[tokio::test]
@@ -805,7 +860,7 @@ mod tests {
         let owner_sender=sender.clone();let owner_stop=stop.clone();
         let owner=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{
             serve_lanes_with_heartbeat(vec![connection],&mut inputs,&owner_sender,&mut config,&events,&owner_stop,
-                HeartbeatTiming{ping:Duration::from_millis(30),response:Duration::from_millis(100),check:Duration::from_millis(10)}).await
+                HeartbeatTiming{ping:Duration::from_millis(30),response:Duration::from_millis(100)},crate::unified::suspend_aware_delay).await
         }));
         tokio::time::timeout(Duration::from_secs(1),async{while !sender.is_ready(){tokio::task::yield_now().await;}}).await?;
         if responsive {
@@ -820,6 +875,98 @@ mod tests {
         }
         tokio::time::timeout(Duration::from_secs(1),peer).await???;Ok(())
     }
+    #[tokio::test]
+    async fn relay_uses_elapsed_sleep_to_probe_and_retire_a_half_open_tcp_connection() -> Result<()> {
+        use tokio::sync::oneshot;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let cancel = CancellationToken::new();
+        let _stop = cancel.clone().drop_guard();
+        let (seen, mut seen_rx) = mpsc::channel(1);
+        let peer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (stream, _) = listener.accept().await?;
+            let wire = tokio_tungstenite::accept_async(stream).await?;
+            // Read the TCP bytes without allowing the WebSocket library to answer the Ping.
+            let mut raw = wire.into_inner();
+            let mut header = [0; 2];
+            raw.read_exact(&mut header).await?;
+            ensure!(header[0] & 0x0f == 9);
+            seen.send(()).await?;
+            std::future::pending::<()>().await;
+            Ok::<(), anyhow::Error>(())
+        }));
+        let lane = connect_lane(&url,None,None,"fixture","peer","instance",0,1,&[],&cancel)
+            .await?.ok_or_else(|| anyhow::anyhow!("no test lane"))?;
+        let (sender, mut inputs) = channel();
+        let (_cfg, mut config) = watch::channel(None);
+        let (events, _events_rx) = mpsc::channel(8);
+        let (armed, mut alarms) = mpsc::unbounded_channel::<(Duration, oneshot::Sender<()>)>();
+        let wait = move |duration| {
+            let (fire, fired) = oneshot::channel();
+            let _ = armed.send((duration, fire));
+            async move { let _ = fired.await; }
+        };
+        let ready = sender.clone();
+        let owner = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            serve_lanes_with_heartbeat(vec![lane],&mut inputs,&sender,&mut config,&events,&cancel,HEARTBEAT,wait).await
+        }));
+        let limit = Duration::from_secs(2);
+        let (idle, resume) = tokio::time::timeout(limit, alarms.recv()).await?
+            .ok_or_else(|| anyhow::anyhow!("idle timer closed"))?;
+        assert_eq!(idle, HEARTBEAT.ping);
+        assert!(ready.is_ready());
+        resume.send(()).unwrap();
+        assert_eq!(tokio::time::timeout(limit, seen_rx.recv()).await?, Some(()));
+        let (response, expire) = tokio::time::timeout(limit, alarms.recv()).await?
+            .ok_or_else(|| anyhow::anyhow!("response timer closed"))?;
+        assert_eq!(response, HEARTBEAT.response);
+        expire.send(()).unwrap();
+        assert!(!tokio::time::timeout(limit, owner).await???);
+        assert!(!ready.is_ready());
+        drop(peer);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn buffered_matching_pong_cannot_revive_a_response_deadline_that_elapsed_in_sleep() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}/", listener.local_addr()?);
+        let (client, peer) = tokio::join!(tokio_tungstenite::connect_async(url), async {
+            let (tcp, _) = listener.accept().await?;
+            Ok::<_, anyhow::Error>(tokio_tungstenite::accept_async(tcp).await?)
+        });
+        let (sink, _) = client?.0.split();
+        let mut peer = peer?;
+        let (_data_tx, mut data) = mpsc::channel(1);
+        let (control, controls) = mpsc::channel(1);
+        let (armed, mut alarms) = mpsc::unbounded_channel();
+        let wait = move |duration| {
+            let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+            armed.send((duration, fire)).unwrap();
+            async move { let _ = fired.await; }
+        };
+        let probe = LaneProbe::new()?;
+        let writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            write_lane(sink,&mut data,controls,false,false,probe,HEARTBEAT,wait).await
+        }));
+        let limit = Duration::from_secs(2);
+        let (_, ping) = tokio::time::timeout(limit, alarms.recv()).await?.unwrap();
+        ping.send(()).unwrap();
+        let challenge = match tokio::time::timeout(limit, peer.next()).await?.unwrap()? {
+            Message::Ping(bytes) => bytes,
+            _ => anyhow::bail!("expected a heartbeat"),
+        };
+        let (delay, expire) = tokio::time::timeout(limit, alarms.recv()).await?.unwrap();
+        assert_eq!(delay, HEARTBEAT.response);
+        // The current-thread runtime cannot poll the writer between these two operations.
+        control.try_send(Message::Pong(challenge)).unwrap();
+        expire.send(()).unwrap();
+        let result = tokio::time::timeout(limit, writer).await??;
+        assert!(result.unwrap_err().to_string().contains("missed heartbeat"));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn real_tcp_accepting_writes_without_pong_retires_ready_lane()->Result<()>{real_lane_heartbeat(false).await}
     #[tokio::test]
@@ -885,7 +1032,7 @@ mod tests {
         let (sink,_)=client?.0.split();let mut server=server?;
         let (_pong_send,pongs)=mpsc::channel(1);let (_unused,replacement)=mpsc::channel(1);
         let mut input=std::mem::replace(&mut lanes[0],replacement);
-        let task=tokio::spawn(async move {write_lane(sink,&mut input,pongs,false,false).await});
+        let task=tokio::spawn(async move {write_lane(sink,&mut input,pongs,false,false,LaneProbe::new()?,HEARTBEAT,tokio::time::sleep).await});
         assert!(tokio::time::timeout(Duration::from_millis(50),server.next()).await.is_err());
         sender.send("p",&record()[2..])?;
         let frame=tokio::time::timeout(Duration::from_secs(1),server.next()).await?.unwrap()?;
