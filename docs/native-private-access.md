@@ -7,6 +7,7 @@ collections:
 | --- | --- |
 | `GET /api/access/snapshot` | Workspace machines, members, groups, rule books, private peers, network preferences and administrator-visible invitations |
 | `PUT /api/access/network` | Administrator-only validated CIDR and DNS suffix settings |
+| `PUT /api/access/network/renumber-hold` | Workspace administrator sets `{"held": true}` to suspend automatic collision-driven renumbering. Pending reports survive restarts. Setting `false` resumes processing. An active migration returns HTTP 409. Available with native sparse recovery enabled. |
 | `PUT /api/access/private/peers/{id}` | Administrator-only private enable/disable |
 | `DELETE /api/access/private/peers/{id}` | Owner/admin revocation, or a member revoking their own private peer |
 | `POST /api/access/groups` | Administrator-only named group creation with workspace duplicate detection |

@@ -45,10 +45,19 @@ pub fn describe(document: &Document) -> ApiResult<serde_json::Value> {
         })
         .map(|range| u64::from(range.capacity()))
         .sum();
-    Ok(
-        serde_json::json!({"cidr":primary.cidr(),"dns_suffix":suffix,"auto_expand":true,
-        "cidrs":ranges.iter().map(|range| range.cidr()).collect::<Vec<_>>(),"address_capacity":capacity}),
-    )
+    let settings = serde_json::json!({"cidr":primary.cidr(),"dns_suffix":suffix,"auto_expand":true,
+        "cidrs":ranges.iter().map(|range| range.cidr()).collect::<Vec<_>>(),"address_capacity":capacity});
+    #[cfg(feature = "private-sparse")]
+    let settings = {
+        let mut settings = settings;
+        let held = match document.get("native_renumber_held") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| ApiError::bad_request("Invalid private workspace renumber hold"))?,
+        };
+        settings["native_renumber_held"] = held.into();
+        settings
+    };
+    Ok(settings)
 }
 
 fn overflow_candidates() -> impl Iterator<Item = Network> {

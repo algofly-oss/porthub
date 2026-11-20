@@ -68,7 +68,7 @@ function sampleAccess(state) {
         expires_at: new Date(Date.now() + 3 * 86400000).toISOString(),
       },
     ],
-    network: { cidr: "10.203.0.0/24", dns_suffix: "phub", auto_expand: true, cidrs: ["10.203.0.0/24"], address_capacity: 254 },
+    network: { native_renumber_held: false, cidr: "10.203.0.0/24", dns_suffix: "phub", auto_expand: true, cidrs: ["10.203.0.0/24"], address_capacity: 254 },
   };
 }
 export function demoAccess(state, method, path, body, id) {
@@ -214,8 +214,12 @@ export function demoAccess(state, method, path, body, id) {
       : [...access.books, book];
     return { data: book };
   }
+  if (path === "/access/network/renumber-hold" && method === "put") {
+    access.network.native_renumber_held = body.held;
+    return { native_renumber_held: body.held };
+  }
   if (path === "/access/network") {
-    access.network = body;
+    access.network = { ...access.network, ...body };
     return { data: body, transport_ready: false };
   }
   if (path === "/access/invitations") {
