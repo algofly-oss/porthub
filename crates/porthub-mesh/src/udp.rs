@@ -62,6 +62,23 @@ impl SendPermit {
             (original.observe)()
         }) }
     }
+    /// Retire a flow once any original native byte or control authority expires.
+    /// Return the bound from the same observation that validated it.
+    pub fn retire_owner_on_expiry(self, alive: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        use std::sync::atomic::Ordering;
+        Self {
+            observe: Arc::new(move || {
+                if !alive.load(Ordering::SeqCst) {
+                    return None;
+                }
+                let bound = (self.observe)();
+                if bound.is_none() {
+                    alive.store(false, Ordering::SeqCst);
+                }
+                bound
+            }),
+        }
+    }
     /// Evaluate each independent origin once per observation. No observation
     /// is cached across polls or emissions: revocation and clocks stay live.
     /// Unknown bounds remain unknown; control vetoes never provide a lease.
@@ -118,6 +135,23 @@ mod permit_observation_tests {
         alive.store(false, Ordering::SeqCst);
         assert!(!permit.valid());
         assert_eq!(permit.remaining(), None);
+    }
+
+    #[test]
+    fn native_owner_retires_on_the_first_invalid_observation() {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let witness = checks.clone();
+        let owner = Arc::new(AtomicBool::new(true));
+        let permit = SendPermit::bounded(
+            move || witness.fetch_add(1, Ordering::SeqCst) != 1,
+            || Some(Duration::from_secs(1)),
+        )
+        .retire_owner_on_expiry(owner.clone());
+        assert_eq!(permit.remaining(), Some(Duration::from_secs(1)));
+        assert!(!permit.valid());
+        assert!(!owner.load(Ordering::SeqCst));
+        assert!(!permit.valid());
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
     }
 
     #[test]

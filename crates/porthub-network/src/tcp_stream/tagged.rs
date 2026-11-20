@@ -911,7 +911,11 @@ impl TxToken for Transmit<'_> {
                 if !has_fin {
                     context.fin = None;
                 }
-                let mut origins = vec![context.control.clone()];
+                let mut native = vec![context.control.clone()];
+                native.extend(context.data.iter().cloned());
+                native.extend(context.fin.iter().cloned());
+                let mut origins = vec![SendPermit::combine(native)
+                    .retire_owner_on_expiry(context.alive.clone())];
                 // The receive companion can immediately ACK an old input. Keep
                 // that exact input's origin on the queued reply, not as the
                 // established connection's renewable control authority.
@@ -930,21 +934,10 @@ impl TxToken for Transmit<'_> {
                         );
                     }
                 }
-                origins.extend(context.data.iter().cloned());
-                origins.extend(context.fin.iter().cloned());
                 let stack_scope = context.stack_scope.clone();
                 let owner = context.owner;
                 let alive = context.alive.clone();
-                let permit = SendPermit::combine(origins).constrain(move || {
-                    let valid = context.alive.load(Ordering::SeqCst)
-                        && context.control.valid()
-                        && context.data.as_ref().is_none_or(|p| p.valid())
-                        && context.fin.as_ref().is_none_or(|p| p.valid());
-                    if !valid {
-                        context.alive.store(false, Ordering::SeqCst);
-                    }
-                    valid
-                });
+                let permit = SendPermit::combine(origins);
                 if permit.valid() {
                     self.output.push_back(Packet {
                         stack_scope,

@@ -70,17 +70,17 @@ impl Parent {
         }
         let list = self.assignments.borrow();
         let authority = list.as_ref()?;
-        let hosts = authority.accepted().ok()?;
+        // remaining() checks the same live witness and retirement domain as
+        // accepted(), and also requires a bounded assignment.
         (authority.remaining().ok()?? > Duration::ZERO
-            && hosts.iter().any(|h| h == self.spec.as_ref()))
+            && authority.value.iter().any(|h| h == self.spec.as_ref()))
         .then(|| authority.retained())
     }
     fn permit(&self) -> Option<SendPermit> {
-        let a = self.authority()?;
-        let bound = a.clone();
+        let bound = self.authority()?;
         let parent = self.clone();
         Some(SendPermit::bounded(
-            move || parent.authority().is_some() && a.check().is_ok(),
+            move || parent.authority().is_some(),
             move || bound.remaining().ok().flatten(),
         ))
     }
