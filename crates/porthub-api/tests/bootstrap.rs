@@ -86,6 +86,8 @@ async fn unchanged_bootstrap_previews_reuse_code_and_different_cached_previews_r
         let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}")).body(Body::empty())?).await?;
         ensure!(response.headers()["vary"]=="Accept" && response.headers()["content-type"]=="text/plain; charset=utf-8");
         let launcher=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
+        ensure!(launcher.contains(&format!("enable-default --owner {owner} --registration {id}")));
+        ensure!(launcher.contains("PORTHUB_BROWSER_SHELLS") && !launcher.contains("sudo -- \"$porthub_bootstrap_bin_dir/porthub\" terminal"));
         ensure!(launcher.contains("setup $porthub_bootstrap_adopt --ticket ") && launcher.contains("-e \"$porthub_bootstrap_bin_dir/porthub\"") && launcher.contains("--proto '=https'") && !launcher.contains(TOKEN));
         let mut syntax=std::process::Command::new("sh").arg("-n").stdin(std::process::Stdio::piped()).spawn()?;
         use std::io::Write;syntax.stdin.take().unwrap().write_all(launcher.as_bytes())?;ensure!(syntax.wait()?.success());

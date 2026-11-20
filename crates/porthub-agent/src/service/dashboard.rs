@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub enum Action {
     Run,
     Enable,
+    /// Apply the enrollment default while preserving a local disable or custom service.
+    EnableDefault,
     Status,
     Disable,
 }
@@ -94,6 +96,19 @@ pub(crate) async fn service(
     let bytes = render(&spec, owner, &registration, slots, user)?;
     let _lock =
         crate::profile::Lease::acquire(&root.join(format!("dashboard-config-{}", spec.identity)))?;
+    let disabled = root.join(format!("dashboard-disabled-{}", spec.identity));
+    if matches!(action, Action::Disable) && !disabled.try_exists()? {
+        super::atomic(&disabled, b"disabled\n", true)?;
+    }
+    if matches!(action, Action::EnableDefault) {
+        if disabled.try_exists()? || super::owned_unit(&spec)?.is_some() {
+            return Ok(());
+        }
+    }
+    let action = match action {
+        Action::EnableDefault => Action::Enable,
+        other => other,
+    };
     if matches!(action, Action::Enable) {
         super::directory(&layout.units, false)?;
     }
@@ -111,6 +126,9 @@ pub(crate) async fn service(
         crate::terminal_cli::withdraw_dashboard(root, owner, &registration, user).await?;
     }
     if matches!(action, Action::Enable) {
+        if disabled.try_exists()? {
+            std::fs::remove_file(disabled)?;
+        }
         println!("Dashboard shell hosting enabled for this OS user's login. Registration: {registration}");
     }
     Ok(())
@@ -183,7 +201,9 @@ async fn apply(
                 return Err(error);
             }
         }
-        Action::Run => anyhow::bail!("foreground hosting does not use the service manager"),
+        Action::EnableDefault | Action::Run => {
+            anyhow::bail!("foreground hosting does not use the service manager")
+        }
     }
     Ok(())
 }

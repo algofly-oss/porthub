@@ -1,6 +1,6 @@
 # Browser shells on an enrolled machine
 
-On the dashboard, open the machine and choose **Shells**. The setup disclosure shows the command for the machine and its owner account. Run it once as the nonprivileged OS user whose shell you want to offer.
+On the dashboard, open the machine and choose **Shells**. When you run the dashboard installer as your Linux or macOS login user, enrollment sets up browser shells for the machine owner. The installer can elevate to install the agent while the shells run as your login user. To skip shell setup for an installation, set `PORTHUB_BROWSER_SHELLS=off` on the shell that executes the installer. Running the installer directly as root or enrolling a private-only peer skips automatic shell hosting. For an existing registration, the Shells tab shows the following manual setup command.
 
 ```sh
 porthub terminal dashboard enable --owner ACCOUNT_ID --registration MACHINE_ID

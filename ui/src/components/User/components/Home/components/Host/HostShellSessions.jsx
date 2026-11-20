@@ -147,10 +147,10 @@ export default function HostShellSessions({ machineId, platform }) {
       {sessions ? "No active shell sessions." : "Loading sessions…"}
     </p>}
     {!canOpen && !hasDashboardShells && owner && /^[a-f0-9]{24}$/.test(machineId) && <details className="rounded-md border border-border px-3 py-2 text-sm">
-      <summary className="cursor-pointer font-medium">Enable browser shells on this machine</summary>
+      <summary className="cursor-pointer font-medium">Browser shell availability</summary>
       {String(platform || "").toLowerCase() === "windows"
         ? <p className="mt-2">The native Windows agent does not host interactive shells. Install PortHub in a WSL distribution, enroll that Linux agent, then enable browser shells on its registration.</p>
-        : <><p className="mt-2">Run this once as the local user whose shell you want to open. PortHub starts the shell service when that user logs in.</p>
+        : <><p className="mt-2">No shell is available right now. If the machine just reconnected, wait for its shell service to reconnect. To enable hosting manually, run this as the OS user whose shell you want to open.</p>
           <code className="mt-2 block select-all break-all rounded bg-muted p-2">porthub terminal dashboard enable --owner {owner} --registration {machineId}</code>
           <p className="mt-2 text-muted-foreground">Replace <code>enable</code> with <code>status</code> to check hosting or <code>disable</code> to close its workspaces and remove the service. For a user-installed agent, add <code>--user</code>. If the dashboard command is missing, update PortHub first.</p></>}
     </details>}
