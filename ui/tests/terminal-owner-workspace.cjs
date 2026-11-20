@@ -68,6 +68,8 @@ async function exercise() {
     await page.getByRole("button",{name:"Create guest links"}).click();
     const readLink = await page.getByLabel("Read-only link").inputValue();
     const writeLink = await page.getByLabel("Interactive link").inputValue();
+    const publicInfo=await (await foreign.request.post(origin+"/api/terminal/info",{data:{token:new URL(readLink).hash.slice(1)}})).json();
+    assert.ok(publicInfo.read_only && publicInfo.expires_at>Math.floor(Date.now()/1000) && publicInfo.expires_at<=Math.floor(Date.now()/1000)+901);
     const readGuest = await foreign.newPage();
     await readGuest.goto(readLink);
     await readGuest.getByRole("button",{name:"Connect",exact:true}).click();

@@ -486,7 +486,7 @@ async fn info(
     })?;
     if !dashboard::guest_join_enabled(&session) { return Err(bad("This workspace requires dashboard authorization")); }
     Ok(axum::Json(
-        serde_json::json!({"id":session.id,"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
+        serde_json::json!({"id":session.id,"name":session.options.name,"read_only":read_only,"expires_at":session.invitation_expires_at(),"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
     ))
 }
 async fn machine_sessions(
