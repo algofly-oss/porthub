@@ -151,6 +151,11 @@ impl RouteMessage {
         self.header.rtm_dst_len
     }
 
+    /// IPv4 traffic class selector. Zero applies to all traffic classes.
+    pub fn tos(&self) -> u8 {
+        self.header.rtm_tos
+    }
+
     /// Get the source prefix length.
     pub fn src_len(&self) -> u8 {
         self.header.rtm_src_len

@@ -23,6 +23,70 @@ pub struct Tun {
 fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Result<T> {
     result.map_err(|_| anyhow::anyhow!(message))
 }
+/// Some VPNs implement the default route as two /1s. Treat only an
+/// unambiguous, equivalent pair on one kernel VPN device like a /0. This
+/// filters a copy used for overlap checks; the native routes remain installed.
+async fn conflict_inventory(
+    netlink: &Connection<Route>,
+) -> Result<Vec<nlink::netlink::messages::RouteMessage>> {
+    use nlink::netlink::messages::RouteMessage;
+
+    let mut routes = netlink.get_routes().await?;
+    let mut halves = routes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.is_ipv4() && r.dst_len() == 1);
+    let (Some((i, left)), Some((j, right)), None) = (halves.next(), halves.next(), halves.next())
+    else {
+        return Ok(routes);
+    };
+    let eligible = |r: &RouteMessage| {
+        r.table_id() == 254
+            && r.route_type() == 1.into()
+            && r.tos() == 0
+            && r.src_len() == 0
+            && r.source().is_none()
+            && r.iif().is_none()
+            && r.multipath().is_none()
+            && r.nh_id().is_none()
+            && r.encap_type().is_none()
+            && r.flow().is_none()
+            && r.expires().is_none()
+    };
+    let endpoints = [left.destination(), right.destination()];
+    let first = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let second = IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0));
+    let Some(index) = left.oif() else {
+        return Ok(routes);
+    };
+    if !eligible(left)
+        || !eligible(right)
+        || !endpoints.contains(&Some(&first))
+        || !endpoints.contains(&Some(&second))
+        || right.oif() != Some(index)
+        || left.gateway() != right.gateway()
+        || left.priority() != right.priority()
+        || left.scope() != right.scope()
+        || left.protocol() != right.protocol()
+        || left.flags() != right.flags()
+        || left.pref() != right.pref()
+        || left.prefsrc() != right.prefsrc()
+        || left.metrics() != right.metrics()
+    {
+        return Ok(routes);
+    }
+    let vpn = netlink.get_links().await?.into_iter().any(|link| {
+        link.ifindex() == index
+            && matches!(link.kind(), Some("tun" | "wireguard"))
+            && !porthub_mesh::underlay::porthub_tun_name(link.name().unwrap_or(""))
+    });
+    if vpn {
+        routes.remove(j);
+        routes.remove(i);
+    }
+    Ok(routes)
+}
+
 impl Tun {
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
     pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
@@ -32,7 +96,7 @@ impl Tun {
     /// Fresh native inventory BEFORE assigning a source address. Never recreate
     /// an old bound source transiently while a conflicting LAN is still live.
     pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
-        let netlink=Connection::<Route>::new()?;let native=netlink.get_routes().await?;
+        let netlink=Connection::<Route>::new()?;let native=conflict_inventory(&netlink).await?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){Some(IpAddr::V4(address))=>Some(porthub_network::capture_routes::ExistingRoute{destination:*address,prefix:r.dst_len(),interface:r.oif()}),_=>None}).collect();
         super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,u32::MAX)?)?;Ok(())
     }
@@ -124,7 +188,7 @@ impl Tun {
     /// A conflicting pool is reported separately; other safe pools remain usable.
     pub async fn update_capture_routes(&self, pools: &[porthub_mesh::lan_routes::Network]) -> Result<porthub_network::capture_routes::CapturePlan> {
         use porthub_network::capture_routes::{self, ExistingRoute};
-        let native = safe(self.netlink.get_routes().await, "capture route inventory failed")?;
+        let native = conflict_inventory(&self.netlink).await?;
         let existing:Vec<_> = native.iter().filter_map(|route| match route.destination() {
             Some(IpAddr::V4(address)) => Some(ExistingRoute { destination:*address, prefix:route.dst_len(), interface:route.oif() }), _=>None,
         }).collect();
@@ -147,7 +211,7 @@ impl Tun {
     /// pair to DNS; it never reuses the additions-only legacy preflight.
     pub async fn reconcile_sparse(&self,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
         use porthub_network::capture_routes::{self,ExistingRoute};
-        let native=safe(self.netlink.get_routes().await,"sparse route audit failed")?;
+        let native=conflict_inventory(&self.netlink).await?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){Some(IpAddr::V4(address))=>Some(ExistingRoute{destination:*address,prefix:r.dst_len(),interface:r.oif()}),_=>None}).collect();
         let mut audit=super::native_owner::conflict(capture_routes::audit(pools,self.own,peers,&existing,self.index)?)?;
         // A route removed outside PortHub is not still a valid ownership claim.
@@ -241,7 +305,7 @@ async fn check_routes(
     if addresses.is_empty() {
         return Ok(());
     }
-    let routes = safe(netlink.get_routes().await, "private route preflight failed")?;
+    let routes = conflict_inventory(netlink).await?;
     for route in routes {
         if route.dst_len() == 0 || own.is_some_and(|own| route.oif() == Some(own)) {
             continue;
@@ -259,4 +323,64 @@ async fn check_routes(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "netns-tests"))]
+mod vpn_default_tests {
+    use super::*;
+    use nlink::netlink::link::WireguardLink;
+
+    #[tokio::test]
+    #[ignore = "requires an owned disposable container namespace, NET_ADMIN and WireGuard"]
+    async fn split_default_equivalence_preserves_host_collisions_and_native_routes() -> Result<()> {
+        ensure!(
+            std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
+                && std::path::Path::new("/.dockerenv").is_file(),
+            "owned namespace required"
+        );
+        let connection = Connection::<Route>::new()?;
+        let name = "vpn-fixture";
+        ensure!(connection.get_link_by_name(name).await?.is_none());
+        connection.add_link(WireguardLink::new(name)).await?;
+        let result = async {
+            let index = connection.get_link_by_name(name).await?.unwrap().ifindex();
+            connection.set_link_up(name).await?;
+            let low = Ipv4Addr::UNSPECIFIED;
+            let high = Ipv4Addr::new(128, 0, 0, 0);
+            let peer = Ipv4Addr::new(10, 203, 9, 3);
+            let half = |ip, metric| Ipv4Route::new(ip, 1).dev_index(index).metric(metric);
+            connection.add_route(half(low, 20)).await?;
+            ensure!(check_routes(&connection, &[peer], None).await.is_err());
+            connection.add_route(half(high, 40)).await?;
+            ensure!(check_routes(&connection, &[peer], None).await.is_err());
+            connection.del_route(half(high, 40)).await?;
+            connection.add_route(half(high, 20)).await?;
+            check_routes(&connection, &[peer], None).await?;
+            connection
+                .add_route(Ipv4Route::new(peer, 32).dev_index(index))
+                .await?;
+            ensure!(check_routes(&connection, &[peer], None).await.is_err());
+            let pools = ["10.203.9.0/24".parse()?];
+            ensure!(
+                Tun::preflight_sparse(Ipv4Addr::new(10, 203, 9, 2), &pools, &[peer])
+                    .await
+                    .is_err()
+            );
+            let native = connection.get_routes().await?;
+            ensure!(
+                native
+                    .iter()
+                    .filter(|r| r.oif() == Some(index) && r.dst_len() == 1)
+                    .count()
+                    == 2
+            );
+            ensure!(native.iter().any(|r| r.oif() == Some(index)
+                && r.dst_len() == 32
+                && r.destination() == Some(&IpAddr::V4(peer))));
+            anyhow::Ok(())
+        }
+        .await;
+        connection.del_link_if_exists(name).await?;
+        result
+    }
 }

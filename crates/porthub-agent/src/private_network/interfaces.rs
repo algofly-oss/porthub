@@ -241,6 +241,40 @@ mod tests {
     }
 
     #[cfg(feature = "netns-tests")]
+    #[tokio::test]
+    #[ignore = "requires an owned disposable container namespace, NET_ADMIN and WireGuard"]
+    async fn a_vpn_route_to_the_gateway_can_carry_relay_traffic_without_becoming_a_direct_candidate() -> Result<()> {
+        use nlink::netlink::link::WireguardLink;
+
+        anyhow::ensure!(
+            std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
+                && std::path::Path::new("/.dockerenv").is_file(),
+            "owned namespace required"
+        );
+        let connection = Connection::<Route>::new()?;
+        let name = "workmesh0";
+        anyhow::ensure!(connection.get_link_by_name(name).await?.is_none());
+        connection.add_link(WireguardLink::new(name)).await?;
+        let result = async {
+            let index = connection.get_link_by_name(name).await?.unwrap().ifindex();
+            let source = "192.0.2.44".parse()?;
+            connection.add_address_by_index(index, source, 24).await?;
+            connection.set_link_up(name).await?;
+            let gateway = "192.0.2.1:443".parse()?;
+            let settings = crate::outbound::Settings::default();
+            let routes = crate::outbound::discover(&settings, &[gateway]).await?;
+            anyhow::ensure!(routes.iter().any(|route|
+                route.interface == name && route.source == source && route.destination == gateway
+            ), "relay lost the kernel-selected VPN route");
+            anyhow::ensure!(current().await?.iter().all(|local| local.ip() != source),
+                "the VPN source was advertised as a physical peer address");
+            anyhow::Ok(())
+        }.await;
+        connection.del_link_if_exists(name).await?;
+        result
+    }
+
+    #[cfg(feature = "netns-tests")]
     async fn wait_snapshot(
         input: &mut watch::Receiver<Vec<SocketAddr>>,
         wanted: &[SocketAddr],
