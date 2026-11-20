@@ -77,7 +77,7 @@ export default function HostShellSessions({ machineId, platform }) {
         const rows = sessionRows(data);
         setSessions(rows);
         setCanOpen(data.can_open === true);
-        setOwner(data.owner_id);
+        setOwner(/^[a-f0-9]{24}$/.test(data.owner_id) ? data.owner_id : null);
         select(current => rows.some(session => session.id === current) ? current : null);
         setInvitations(current => Object.fromEntries(rows.filter(s => current[s.id]).map(s => [s.id, current[s.id]])));
         setError("");
@@ -98,11 +98,13 @@ export default function HostShellSessions({ machineId, platform }) {
     try {
       openRequest.current ||= Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2,"0")).join("");
       const { data } = await axios.post(`/api/machines/${machineId}/terminal-sessions`, { request_id: openRequest.current });
+      if (!/^[a-f0-9]{32}$/.test(data?.id)) throw new Error("Invalid shell response");
       openRequest.current = null;
       select(data.id);
       setRevision(value => value + 1);
     } catch (failure) {
-      setError(failure.response?.data?.detail || "Could not open the shell. Try again.");
+      const detail = failure.response?.data?.detail;
+      setError(typeof detail === "string" ? detail : "Could not open the shell. Try again.");
     } finally { setOpening(false); }
   }
   const active = sessions?.find(session => session.id === selected);
@@ -120,7 +122,7 @@ export default function HostShellSessions({ machineId, platform }) {
     </div> : !error && <p role="status" className="text-sm text-muted-foreground">
       {sessions ? (canOpen ? "Choose New shell to start a workspace." : "No active browser shells.") : "Loading sessions…"}
     </p>}
-    {!canOpen && owner && <details className="rounded-md border border-border px-3 py-2 text-sm">
+    {!canOpen && owner && /^[a-f0-9]{24}$/.test(machineId) && <details className="rounded-md border border-border px-3 py-2 text-sm">
       <summary className="cursor-pointer font-medium">Enable browser shells on this machine</summary>
       {String(platform || "").toLowerCase() === "windows"
         ? <p className="mt-2">The native Windows agent does not host interactive shells. Install PortHub in a WSL distribution, enroll that Linux agent, then enable browser shells on its registration.</p>

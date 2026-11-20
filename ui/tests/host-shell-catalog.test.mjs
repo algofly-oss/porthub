@@ -7,7 +7,7 @@ test("a fallback response cannot become shell state", () => {
   for (const body of [undefined, {}, "<html>", {sessions:[null]}, {sessions:[{id:"a",name:[]}] }]) {
     assert.throws(() => sessionRows(body));
   }
-  const rows = [{id:"a", name:"work", read_only:false}];
+  const rows = [{id:"a".repeat(32), name:"work", read_only:false}];
   assert.deepEqual(sessionRows({sessions:rows}), rows);
 });
 
