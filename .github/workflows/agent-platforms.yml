@@ -466,6 +466,16 @@ jobs:
       - name: Test transfers, management and tunnel adapters
         shell: bash
         run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh -p porthub-network -p porthub-io --target ${{ matrix.target }}
+      - name: Verify Darwin recovery with a reused tunnel index
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          cargo test --locked -p porthub-agent --lib --no-run --message-format=json --target ${{ matrix.target }} > "$RUNNER_TEMP/utun-tests.jsonl"
+          test_executable="$(python3 -c 'import json, sys; rows=map(json.loads,open(sys.argv[1])); print(next(r["executable"] for r in rows if r.get("executable") and r["target"]["name"]=="porthub_agent"))' "$RUNNER_TEMP/utun-tests.jsonl")"
+          case=private_network::native_owner::source::retired_utun::tests::binding_does_not_attach_and_excludes_a_second_owner
+          "$test_executable" --list | grep -Fx "$case: test"
+          sudo -n "$test_executable" --exact "$case" --ignored
       - name: Gate Linux private-network prerequisite preparation and unified activation
         if: runner.os == 'Linux'
         shell: bash
