@@ -27,9 +27,10 @@ mod rx;
 const QUEUE: usize = 256;
 const CHUNK: usize = 8192;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
-/// Largest contiguous socket read carrying one immutable admission.
-pub const DIRECT_FORWARD_WINDOW: usize = 256 * 1024;
-pub const FORWARD_WINDOW: usize = 4 * 1024 * 1024;
+/// Combined native TCP flight window on a datagram carrier.
+pub const DIRECT_FORWARD_WINDOW: usize = 1024 * 1024;
+/// Largest contiguous LAN read carrying one immutable admission.
+pub const FORWARD_WINDOW: usize = 8 * 1024 * 1024;
 const FORWARD_SOCKET_BUFFER: usize = 1024 * 1024;
 // Limit the aggregate memory added by wide socket windows across all virtual
 // hosts in one agent. Other flows retain the ordinary socket capacities.

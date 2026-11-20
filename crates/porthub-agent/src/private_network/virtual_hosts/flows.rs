@@ -33,6 +33,7 @@ impl<T> Drop for Active<T> {
 
 pub(super) struct Flows {
     stack: tagged::Handle,
+    direct_writers: std::sync::Arc<tokio::sync::Semaphore>,
     tcp: HashMap<Flow, Active<watch::Receiver<Option<tagged::Ingress>>>>,
     udp: HashMap<Flow, Active<mpsc::Sender<Datagram>>>,
     tasks: JoinSet<()>,
@@ -42,6 +43,7 @@ impl Flows {
     pub(super) fn new(stack: tagged::Handle, replies: mpsc::Sender<Reply>) -> Self {
         Self {
             stack,
+            direct_writers: std::sync::Arc::new(tokio::sync::Semaphore::new(FLOW_LIMIT)),
             replies,
             tcp: HashMap::new(),
             udp: HashMap::new(),
@@ -82,6 +84,7 @@ impl Flows {
             let (publish, route) = watch::channel(None);
             let lan = lan.clone();
             let stack = self.stack.clone();
+            let direct_writers = direct_carrier.then(|| self.direct_writers.clone());
             let replies = self.replies.clone();
             let admitted = grant.clone();
             let task = self.tasks.spawn(async move {
@@ -107,12 +110,7 @@ impl Flows {
                     publish.send_replace(Some(pending.ingress()));
                     let conn = pending.established().await?;
                     publish.send_replace(Some(conn.ingress()));
-                    let read_limit = if direct_carrier {
-                        tagged::DIRECT_FORWARD_WINDOW
-                    } else {
-                        tagged::FORWARD_WINDOW
-                    };
-                    tcp_bridge(conn, tcp, admitted, read_limit).await
+                    tcp_bridge(conn, tcp, admitted, direct_writers.as_deref()).await
                 }
                 .await;
             });
@@ -154,7 +152,7 @@ async fn tcp_bridge(
     conn: tagged::Connection,
     tcp: tokio::net::TcpStream,
     grant: Admission,
-    read_limit: usize,
+    direct_writers: Option<&tokio::sync::Semaphore>,
 ) -> Result<()> {
     tcp.set_nodelay(true)?;
     let (read, mut write) = tcp.into_split();
@@ -183,7 +181,7 @@ async fn tcp_bridge(
             }
         }
     };
-    let to_mesh = forward_reads(&conn, &read, &grant, read_limit);
+    let to_mesh = forward_reads(&conn, &read, &grant, direct_writers);
     let renew = async {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -271,12 +269,17 @@ async fn forward_reads(
     conn: &tagged::Connection,
     socket: &tokio::net::tcp::OwnedReadHalf,
     grant: &Admission,
-    read_limit: usize,
+    direct_writers: Option<&tokio::sync::Semaphore>,
 ) -> Result<()> {
     let mut id = [0; 16];
     getrandom::fill(&mut id).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut offset = 0;
-    let mut batch = LanRead::new(8192);
+    let initial_capacity = if direct_writers.is_some() {
+        8192
+    } else {
+        64 * 1024
+    };
+    let mut batch = LanRead::new(initial_capacity);
     let mut prior_ack = Duration::ZERO;
     loop {
         while batch.permit.is_none() {
@@ -292,13 +295,23 @@ async fn forward_reads(
                 .await?;
             return Ok(());
         }
+        // Share the datagram flight window between currently sending flows.
+        // Idle TCP connections consume neither window nor writer slot.
+        let _writer = direct_writers
+            .map(|slots| slots.try_acquire())
+            .transpose()?;
+        let read_limit = direct_writers.map_or(tagged::FORWARD_WINDOW, |slots| {
+            tagged::DIRECT_FORWARD_WINDOW
+                / (FLOW_LIMIT - slots.available_permits()).next_power_of_two()
+        });
         let next_size = if n == capacity && prior_ack < Duration::from_secs(1) {
-            (capacity * 2).min(read_limit)
+            capacity * 2
         } else if prior_ack > Duration::from_secs(2) {
             (capacity / 2).max(8192)
         } else {
             capacity
-        };
+        }
+        .min(read_limit);
         batch.storage.data.truncate(n);
         let mut next = LanRead::new(next_size);
         // EOF observed while filling a partial window follows its bytes under
