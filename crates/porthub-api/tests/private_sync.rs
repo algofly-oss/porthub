@@ -128,6 +128,14 @@ async fn native_signaling_authenticates_identity_limits_discovery_and_binds_both
         ensure!(initial["snapshot"]["peers"].as_array().unwrap().len()==2);
         ensure!(initial["snapshot"]["grants"][0]["source"]=="peer-0" && initial["snapshot"]["grants"][0]["destination"]=="peer-1");
         ensure!(initial["control_fallback_urls"]==json!(["https://fallback.test"]));
+        ensure!(initial.get("authority_clock").is_none());
+        let mut clock_request = request0.clone();
+        clock_request["clock_nonce"] = json!("35f82f4b6a324c97af1d501143166cb1");
+        let (status, _, timed) = case.call("POST", "/api/access/private/sync", "", clock_request.clone(), &[]).await?;
+        ensure!(status == StatusCode::OK && timed["authority_clock"]["nonce"] == clock_request["clock_nonce"]);
+        let expiry = chrono::DateTime::parse_from_rfc3339(timed["snapshot"]["expires_at"].as_str().unwrap())?;
+        let issued = chrono::DateTime::parse_from_rfc3339(timed["authority_clock"]["server_time"].as_str().unwrap())?;
+        ensure!(expiry > issued && expiry - issued <= chrono::Duration::seconds(15));
         let text=initial.to_string();for private in [token,"never-return-public-token","peer-2","credential_hash"] {ensure!(!text.contains(private));}
         let mut offer=request0.clone();offer["signals"]=json!([signal("peer-1","offer",&fp0),signal("peer-2","offer",&fp0)]);
         case.status("POST","/api/access/private/sync","",offer.clone(),StatusCode::OK).await?;

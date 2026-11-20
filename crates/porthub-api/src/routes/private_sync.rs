@@ -759,6 +759,9 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");
         let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");
     }
+    if let Some(nonce) = &input.clock_nonce {
+        response["authority_clock"] = json!({"nonce": nonce, "server_time": chrono::Utc::now()});
+    }
     if serde_json::to_vec(&response).expect("typed control response").len()>4*1024*1024 {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control reply exceeds bounded capacity; retry a smaller discovery batch"));
     }

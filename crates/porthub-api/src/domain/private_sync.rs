@@ -17,6 +17,8 @@ pub struct Signal {
 }
 #[derive(Serialize)]
 pub struct Sync {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_nonce: Option<String>,
     #[serde(skip_serializing_if="is_false")]
     pub virtual_host_provider:bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +72,8 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     let raw = input_compat::dictionary(raw.clone())
         .map(Value::Object)
         .unwrap_or(raw);
+    let clock_nonce = raw.get("clock_nonce").and_then(|v| v.as_str())
+        .filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit())).map(str::to_owned);
     let sparse=raw.get("sparse").filter(|v| !v.is_null()).map(|v|serde_json::from_value::<super::private_pairs::Request>(v.clone()).map_err(|_| crate::error::ApiError::bad_request("Invalid sparse private request"))).transpose()?;
     if let Some(request)=&sparse { request.validate()?; }
     let exit_pair_protocol=if cfg!(feature="private-sparse") {
@@ -168,6 +172,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     }
     model.finish()?;
     Ok(Sync {
+        clock_nonce,
         virtual_host_provider,
         sparse,
         exit_pair_protocol,

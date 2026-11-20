@@ -28,8 +28,17 @@ struct Signal {
     session: String,
     description: Description,
 }
+#[cfg(feature="private-sparse")]
+#[derive(Deserialize)]
+struct AuthorityClockReply {
+    nonce: String,
+    server_time: chrono::DateTime<chrono::Utc>,
+}
 #[derive(Deserialize)]
 struct Reply {
+    #[cfg(feature="private-sparse")]
+    #[serde(default)]
+    authority_clock: Option<AuthorityClockReply>,
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
     #[serde(default)]
     virtual_hosts: Vec<super::virtual_hosts::Spec>,
@@ -464,6 +473,10 @@ pub(crate) async fn run_endpoint(
             }
         }
         let request_window = super::authority_event::request_start(authority_domain.as_ref())?;
+        #[cfg(feature="private-sparse")]
+        let clock_nonce = uuid::Uuid::new_v4().simple().to_string();
+        #[cfg(feature="private-sparse")]
+        { body["clock_nonce"] = serde_json::json!(clock_nonce); }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
@@ -472,6 +485,8 @@ pub(crate) async fn run_endpoint(
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
                 if !value.authenticated_tls {
                     if let Some(reply) = &mut reply {
+                        #[cfg(feature="private-sparse")]
+                        { reply.authority_clock = None; }
                         reply.pinned_relay = None;
                         #[cfg(all(feature="private-sparse",feature="private-stream"))]
                         if !profile.allow_insecure_http_for_tests {reply.virtual_hosts.clear();}
@@ -491,6 +506,19 @@ pub(crate) async fn run_endpoint(
         if let Some(mut reply) = reply {
             stream_offer.observe_reply(&reply.snapshot,&reply.stream_protocols);
             let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
+            #[cfg(feature="private-sparse")]
+            let mut request_window = request_window;
+            #[cfg(feature="private-sparse")]
+            if let (Some(window), Some(clock)) = (&mut request_window, &reply.authority_clock) {
+                ensure!(clock.nonce == clock_nonce, "private authority response does not match request");
+                window.use_relative_deadlines();
+                reply.snapshot.expires_at = window.local_expiry(clock.server_time, reply.snapshot.expires_at)?;
+                let leases = reply.pair_responses.iter_mut().filter_map(|p| p.lease.as_mut())
+                    .chain(reply.exit_pick.iter_mut().filter_map(|pick| pick.lease.as_mut()));
+                for lease in leases {
+                    lease.expires_at = window.local_expiry(clock.server_time, lease.expires_at)?;
+                }
+            }
             super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
             ensure!(reply.exit_pick.is_none() || reply.snapshot.sparse.is_some(), "exit picker response lacks sparse authority");
