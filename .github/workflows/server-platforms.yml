@@ -213,11 +213,8 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
         run: python3 scripts/test-portal-production-ui.py --root terminal-browser-assets/ui
-      - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
-        env:
-          PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
-          NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
-        run: python3 scripts/test-terminal-browser-integration.py --ui-root terminal-browser-assets/ui
+      - name: Verify retired shell endpoints
+        run: cargo test --locked -p porthub-api --test terminal_retired
       - name: Retain failed phone layout geometry screenshots
         if: failure()
         uses: actions/upload-artifact@v4
@@ -261,8 +258,11 @@ jobs:
           yarn install --frozen-lockfile --cache-folder ../.cache/ui-yarn --network-timeout 120000 --network-concurrency 4
           yarn build
           yarn next export --outdir ../ui-artifacts/ui
-      - name: Exercise the exported terminal in a real browser
-        run: python3 scripts/test-terminal-production-ui.py --root ui-artifacts/ui
+      - name: Verify the retired terminal page is absent from the export
+        run: |
+          test -f ui-artifacts/ui/home.html
+          test ! -e ui-artifacts/ui/terminal.html
+          test ! -e ui-artifacts/ui/terminal/index.html
       - name: Verify and compress reusable browser assets
         run: |
           find ui-artifacts/ui -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -exec gzip --keep -9 {} +

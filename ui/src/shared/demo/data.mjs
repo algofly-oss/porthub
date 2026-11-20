@@ -1,5 +1,4 @@
 import { demoPrivateTraffic } from "./private-traffic.mjs";
-import { demoTerminalTraffic } from "../utils/terminal-traffic.mjs";
 import { demoAccessInventory } from "./access-inventory.mjs";
 import { searchScore } from "../utils/search.mjs";
 import { normalizeTrafficSamples } from "../utils/traffic.mjs";
@@ -46,16 +45,6 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   if(path==="/private/traffic") {
     if(state.privateTrafficError)throw Error(state.privateTrafficError);
     return demoPrivateTraffic(state.machines, url.searchParams.get("range") || "1h", url.searchParams.get("machine_id") || "all", Date.now(), {search:url.searchParams.get("search") || "",page:Number(url.searchParams.get("page") || 1),source_peer_id:url.searchParams.get("source_peer_id"),destination_peer_id:url.searchParams.get("destination_peer_id"),coverage:state.privateTrafficCoverage,stale:state.privateTrafficStale,demoDirections:state.privateTrafficDirections});
-  }
-  if (/^\/machines\/[^/]+\/terminal-sessions$/.test(path)) {
-    if (method.toUpperCase() !== "GET") throw new Error("Demo machines cannot host shell sessions.");
-    return {sessions:[], can_open:false};
-  }
-  if(path==="/terminal/traffic") {
-    if(state.terminalTrafficError)throw Error(state.terminalTrafficError);
-    if(state.terminalTraffic)return state.terminalTraffic;
-    const machine=url.searchParams.get("machine_id") || "all";
-    return demoTerminalTraffic(url.searchParams.get("range") || "1h",machine,machine==="all" || state.machines.some(row=>row._id===machine));
   }
   if(path==="/inventory/summary")return {data:{machines:{total:state.machines.length,online:state.machines.filter(m=>m.connection_status==="online").length,offline:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="offline").length,disabled:state.machines.filter(m=>m.enabled===false).length,auth_required:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="auth_required").length},ports:state.connections.length,proxies:state.proxies.length}};
   if(path==="/inventory/status") {const ids=new Set((url.searchParams.get("ids") || "").split(","));return {data:[...state.machines,...demoVirtualMachines(state)].filter(m=>ids.has(m._id))};}

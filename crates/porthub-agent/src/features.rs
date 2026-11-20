@@ -25,6 +25,7 @@ pub enum Feature {
     CameraShare,
     MediaReceive,
     Images,
+    #[value(skip)]
     Terminal,
     Expose,
     PublicForwarding,
@@ -33,7 +34,7 @@ pub enum Feature {
     DirectConnections,
 }
 impl Feature {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 14] = [
         Self::Keyboard,
         Self::Usb,
         Self::Metrics,
@@ -43,7 +44,6 @@ impl Feature {
         Self::CameraShare,
         Self::MediaReceive,
         Self::Images,
-        Self::Terminal,
         Self::Expose,
         Self::PublicForwarding,
         Self::PrivateNetwork,
@@ -78,7 +78,7 @@ pub struct Policy {
 }
 impl Policy {
     pub fn enabled(&self, feature: Feature) -> bool {
-        !self.disabled.get(&feature).copied().unwrap_or(false)
+        feature != Feature::Terminal && !self.disabled.get(&feature).copied().unwrap_or(false)
     }
 }
 fn path(profile: &Path) -> PathBuf {
@@ -163,6 +163,7 @@ pub(crate) fn enabled(profile: &Path, feature: Feature) -> bool {
     subscribe(profile).borrow().enabled(feature)
 }
 fn set(profile: &Path, feature: Feature, enabled: bool) -> Result<Policy> {
+    ensure!(feature != Feature::Terminal, "Custom terminal access has been removed");
     let mut entries = registry().lock().unwrap_or_else(|e| e.into_inner());
     let sender = entries.entry(profile.to_owned()).or_insert_with(|| {
         watch::channel(load(profile).unwrap_or_else(|_| Policy {

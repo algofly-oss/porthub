@@ -193,43 +193,7 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
     let (control_stop, mut control_stopping) = tokio::sync::watch::channel(false);
     let mut control_lease = None;
-    let terminal_socket = || {
-        std::env::var_os("PORTHUB_TERMINAL_SSH_SOCKET")
-            .map(PathBuf::from)
-            .or_else(|| {
-                api_socket
-                    .as_ref()
-                    .map(|path| path.with_file_name("terminal-ssh.sock"))
-            })
-    };
-    let tls_ingress = match std::env::var("PORTHUB_TERMINAL_SSH_MULTIPLEX")
-        .unwrap_or_default()
-        .as_str()
-    {
-        "true" => {
-            anyhow::ensure!(
-                !args.tls_listen.is_empty(),
-                "terminal SSH multiplexing requires a TLS listener"
-            );
-            porthub_edge::terminal::TlsIngress::with_ssh(
-                terminal_socket().context("terminal SSH requires an API socket path")?,
-                control_stopping.clone(),
-            )
-        }
-        "false" | "" => porthub_edge::terminal::TlsIngress::default(),
-        _ => anyhow::bail!("PORTHUB_TERMINAL_SSH_MULTIPLEX must be true or false"),
-    };
-    if let Ok(address) = std::env::var("PORTHUB_TERMINAL_SSH_LISTEN") {
-        if !address.is_empty() {
-            let listener = tokio::net::TcpListener::bind(address.parse::<SocketAddr>()?).await?;
-            let socket = terminal_socket().context("terminal SSH requires an API socket path")?;
-            serving.spawn(porthub_edge::terminal::run(
-                listener,
-                socket,
-                control_stopping.clone(),
-            ));
-        }
-    }
+    let tls_ingress = porthub_edge::terminal::TlsIngress::default();
     if let Some(path) = args.control_socket.or_else(|| {
         std::env::var_os("PORTHUB_EDGE_SOCKET")
             .filter(|path| !path.is_empty())
