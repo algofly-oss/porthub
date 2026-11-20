@@ -789,7 +789,7 @@ mod tcp_tests {
         let mut last = None;
         for _ in 0..32 {
             #[cfg(windows)]
-            let port={let mut random=[0;2];getrandom::fill(&mut random)?;10000+u16::from_ne_bytes(random)%30000};
+            let port=super::super::dns_windows::fixture_port()?;
             #[cfg(not(windows))]
             let port=0;
             let tcp = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {

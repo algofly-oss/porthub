@@ -67,6 +67,15 @@ pub(super) fn bind(address: SocketAddrV4) -> Result<(UdpSocket, TcpListener)> {
         TcpListener::from_std(tcp.into())?,
     ))
 }
+// Windows may exclude contiguous ranges from TCP but allocate them to ephemeral
+// UDP binds. Independent samples keep dual-protocol fixtures out of that sequence.
+#[cfg(test)]
+pub(super) fn fixture_port() -> Result<u16> {
+    let mut random = [0;2];
+    getrandom::fill(&mut random)?;
+    Ok(10000 + u16::from_ne_bytes(random) % 30000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,14 +87,14 @@ mod tests {
         Ok(())
     }
     fn candidate() -> Result<(UdpSocket, TcpListener)> {
-        super::super::native_owner::fixture_retry_socket_setup(||bind(SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST,0)))
+        super::super::native_owner::fixture_retry_socket_setup(||bind(SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST,fixture_port()?)))
     }
     fn foreign_tcp_candidate()->Result<(Socket,std::net::TcpListener,SocketAddr)> {
         super::super::native_owner::fixture_retry_socket_setup(||{
             // Reserve both protocols before testing TCP-only occupancy. A port
             // selected by TCP alone may belong to an excluded UDP range.
             let udp=exclusive(Type::DGRAM,Protocol::UDP).context("fixture reserve exclusive UDP socket")?;
-            udp.bind(&SocketAddr::from((std::net::Ipv4Addr::LOCALHOST,0)).into()).context("fixture reserve exclusive UDP endpoint")?;
+            udp.bind(&SocketAddr::from((std::net::Ipv4Addr::LOCALHOST,fixture_port()?)).into()).context("fixture reserve exclusive UDP endpoint")?;
             let endpoint=udp.local_addr().context("fixture read reserved UDP endpoint")?.as_socket().context("fixture reserved endpoint missing")?;
             let tcp=std::net::TcpListener::bind(endpoint).context("fixture reserve foreign TCP endpoint alongside UDP")?;
             Ok((udp,tcp,endpoint))
