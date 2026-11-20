@@ -2153,7 +2153,7 @@ export default function HostConfigPopup({
         centered
         radius="md"
         size="min(960px, calc(100vw - 48px))"
-        fixedHeight={!selectedRule && machineSection === "logs" ? "calc(100dvh - 64px)" : "min(680px, calc(100dvh - 64px))"}
+        fixedHeight={!selectedRule && machineSection === "shells" ? "auto" : !selectedRule && machineSection === "logs" ? "calc(100dvh - 64px)" : "min(680px, calc(100dvh - 64px))"}
         classNames={modalClassNames}
         closeOnClickOutside={
           !proxyEditorOpen &&
@@ -3009,7 +3009,7 @@ export default function HostConfigPopup({
             </div>
 
             <Group position="right" data-dialog-footer>
-              {(selectedRule || machineSection !== "virtual-hosts") && <span className={`mr-auto text-xs ${anyUnsavedChanges ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`} role="status">{savingSection ? "Saving…" : anyUnsavedChanges ? "Unsaved changes" : "All changes saved"}</span>}
+              {(selectedRule || anyUnsavedChanges || !["virtual-hosts", "shells"].includes(machineSection)) && <span className={`mr-auto text-xs ${anyUnsavedChanges ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`} role="status">{savingSection ? "Saving…" : anyUnsavedChanges ? "Unsaved changes" : "All changes saved"}</span>}
               {selectedRule ? (
                 /* Saving applies the edit immediately; no second save step. */
                 <>

@@ -319,6 +319,7 @@ impl Attachments {
             HostEvent::Ping => {
                 self.emit(HostOutput::Pong)?;
             }
+            HostEvent::TerminateDashboardWorkspace => anyhow::bail!("dashboard termination requires the local workspace owner"),
             HostEvent::Stop { .. } | HostEvent::Reconnect { .. } => {
                 self.generations.clear();
                 self.forwarders.clear();

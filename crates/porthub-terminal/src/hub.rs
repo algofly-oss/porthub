@@ -637,6 +637,14 @@ fn remove_participant(state: &mut State, identity: u64) {
     }
 }
 impl Shared {
+    pub fn request_dashboard_end(&self) -> Result<()> {
+        ensure!(self.options.dashboard_owner.is_some(), "not a dashboard workspace");
+        let state = self.state.lock().expect("terminal session mutex");
+        let host = state.host.as_ref().ok_or_else(|| anyhow::anyhow!("terminal host offline"))?;
+        host.try_send(HostEvent::TerminateDashboardWorkspace)?;
+        Ok(())
+    }
+
     pub fn close_event(&self) -> Option<HostEvent> {
         self.state
             .lock()

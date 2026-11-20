@@ -329,6 +329,7 @@ pub enum HostEvent {
     Detach {
         client: u64,
     },
+    TerminateDashboardWorkspace,
     Stop {
         reason: String,
     },
