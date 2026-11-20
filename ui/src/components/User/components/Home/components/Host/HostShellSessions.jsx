@@ -1,4 +1,5 @@
 import axios from "axios";
+import { IconPlus, IconRefresh } from "@tabler/icons-react";
 import { sessionRows } from "@/shared/utils/host-shell-catalog.mjs";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
@@ -109,18 +110,27 @@ export default function HostShellSessions({ machineId, platform }) {
   }
   const active = sessions?.find(session => session.id === selected);
   return <section className="space-y-3 p-4" aria-label="Shell sessions">
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <h2 className="text-sm font-semibold">Shell sessions</h2>
-      {canOpen && <Button type="button" size="sm" disabled={opening} onClick={openShell}>{opening ? "Opening…" : "New shell"}</Button>}
-      <Button type="button" size="sm" variant="ghost" onClick={() => setRevision(value => value + 1)}>Refresh</Button>
+      <div className="ml-auto flex items-center gap-1">
+        <Button type="button" size="sm" variant="ghost" className="px-2.5"
+          aria-label="Refresh shell sessions" title="Refresh shell sessions"
+          onClick={() => setRevision(value => value + 1)}>
+          <IconRefresh size={16} aria-hidden="true" />
+        </Button>
+        {canOpen && <Button type="button" size="sm" disabled={opening} onClick={openShell}>
+          <IconPlus size={16} aria-hidden="true" />{opening ? "Opening…" : "New shell"}
+        </Button>}
+      </div>
     </div>
     {error && <p role="alert" className="text-sm">{error}</p>}
     {sessions?.length ? <div className="flex flex-wrap gap-2" role="group" aria-label="Choose shell">
       {sessions.map(session => <Button key={session.id} type="button" size="sm"
-        aria-pressed={selected === session.id} variant={selected === session.id ? "secondary" : "outline"}
-        onClick={() => select(session.id)}>{session.name}{session.read_only && " · Read only"}</Button>)}
+        aria-pressed={selected === session.id} variant="outline" title={session.name}
+        className="max-w-full aria-pressed:border-primary aria-pressed:bg-accent dark:aria-pressed:border-primary"
+        onClick={() => select(session.id)}><span className="truncate">{session.name}</span>{session.read_only && " · Read only"}</Button>)}
     </div> : !error && <p role="status" className="text-sm text-muted-foreground">
-      {sessions ? (canOpen ? "Choose New shell to start a workspace." : "No active browser shells.") : "Loading sessions…"}
+      {sessions ? "No active shell sessions." : "Loading sessions…"}
     </p>}
     {!canOpen && owner && /^[a-f0-9]{24}$/.test(machineId) && <details className="rounded-md border border-border px-3 py-2 text-sm">
       <summary className="cursor-pointer font-medium">Enable browser shells on this machine</summary>
