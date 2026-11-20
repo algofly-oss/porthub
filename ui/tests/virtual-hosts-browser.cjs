@@ -51,7 +51,13 @@ async function pick(page, editor, label, search, option) {
       await page.reload();
       await panel.getByText(/Update the agent on luna/).waitFor();
       await panel.getByRole("heading", { name: "miro-via-luna" }).waitFor();
-      assert.equal(await page.getByRole("group", { name: "Machine configuration sections" }).getByRole("button", { name: "Virtual Host", exact: true }).getAttribute("aria-pressed"), "true");
+      const configTabs = page.getByRole("group", { name: "Machine configuration sections" });
+      const virtualTab = configTabs.getByRole("button", { name: "Virtual Host", exact: true });
+      assert.equal(await virtualTab.getAttribute("aria-pressed"), "true");
+      await configTabs.getByRole("button", { name: "Shells", exact: true }).click();
+      await page.getByRole("region", { name: "Shell sessions" }).waitFor();
+      await virtualTab.click();
+      await panel.getByRole("heading", { name: "miro-via-luna" }).waitFor();
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       await page.screenshot({ path: `/tmp/porthub-vh-${width}.png` });
 
@@ -62,7 +68,10 @@ async function pick(page, editor, label, search, option) {
       await row.click();
       const details = page.getByRole("dialog", { name: "miro-via-luna" });
       await details.getByText("192.168.1.57").waitFor();
-      assert.equal(await details.getByRole("button", { name: /open shell|update client/i }).count(), 0);
+      assert.equal(await details.getByRole("button", { name: /shells|open shell|update client/i }).count(), 0);
+      await page.goto(`${machines}&machine=${encodeURIComponent(new URL(page.url()).searchParams.get("machine"))}&machineTab=shells`);
+      await details.getByText("192.168.1.57").waitFor();
+      assert.equal(await page.getByRole("region", { name: "Shell sessions" }).count(), 0);
       await details.getByRole("button", { name: `Manage on ${provider.name}` }).click();
       await panel.waitFor();
 
