@@ -151,9 +151,7 @@ impl Consumer {
             .ok_or_else(|| anyhow::anyhow!("exit interface is unavailable"))?;
         let name = link.name().unwrap_or("").to_owned();
         ensure!(
-            name.len() == 10
-                && name.starts_with("ph")
-                && name[2..].bytes().all(|c| c.is_ascii_hexdigit()),
+            porthub_mesh::underlay::porthub_tun_name(&name),
             "exit interface is not owned by PortHub"
         );
         super::exit_journal::Journal::recover(&netlink).await?;

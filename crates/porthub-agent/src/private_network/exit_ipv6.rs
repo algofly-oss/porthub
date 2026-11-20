@@ -10,9 +10,7 @@ use std::{collections::BTreeSet, net::IpAddr};
 
 fn table(name: &str) -> Result<String> {
     ensure!(
-        name.len() == 10
-            && name.starts_with("ph")
-            && name[2..].bytes().all(|c| c.is_ascii_hexdigit()),
+        porthub_mesh::underlay::porthub_tun_name(name),
         "invalid exit owner"
     );
     Ok(format!("porthub_exit6_{name}"))
