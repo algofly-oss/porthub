@@ -276,12 +276,42 @@ impl Drop for Lifetime {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+struct PathState {
+    state: State,
+    relayed: bool,
+    hosts: Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)>,
+}
+impl PathState {
+    fn inactive(state: State) -> Self {
+        Self { state, relayed: false, hosts: None }
+    }
+    fn on_lan(&self, networks: &[crate::lan_routes::Network]) -> bool {
+        self.state == State::Ready && !self.relayed && self.hosts.is_some_and(|(local, remote)| {
+            networks.iter().any(|net| net.contains(local) && net.contains(remote))
+        })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn lan_selection_requires_both_selected_addresses_and_a_ready_direct_session() {
+    let networks = ["192.168.0.0/24".parse().unwrap()];
+    let hosts = Some(("192.168.0.3".parse().unwrap(), "192.168.0.40".parse().unwrap()));
+    let ready = PathState { state: State::Ready, hosts, relayed: false };
+    assert!(ready.on_lan(&networks));
+    assert!(!ready.on_lan(&["192.168.1.0/24".parse().unwrap()]));
+    assert!(!PathState { hosts: None, ..ready }.on_lan(&networks));
+    assert!(!PathState { relayed: true, ..ready }.on_lan(&networks));
+    assert!(!PathState { state: State::Waiting, ..ready }.on_lan(&networks));
+}
+
 #[derive(Clone)]
 pub struct Session {
     commands: mpsc::Sender<Command>,
     packets: mpsc::Sender<Outbound>,
     guarded:Arc<std::sync::atomic::AtomicBool>,
-    state: watch::Receiver<(State, bool)>,
+    state: watch::Receiver<PathState>,
     description: Description,
     lifetime: Arc<Lifetime>,
 }
@@ -405,7 +435,7 @@ impl Session {
         let (commands, command_rx) = mpsc::channel(64);
         let (packets, packet_rx) = mpsc::channel(2048);
         let (received, received_rx) = mpsc::channel(2048);
-        let (state_tx, state) = watch::channel((State::Waiting, false));
+        let (state_tx, state) = watch::channel(PathState::inactive(State::Waiting));
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let guarded=Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -436,7 +466,7 @@ impl Session {
                     .await;
                 }
             }
-            state_tx.send_replace((if failed { State::Failed } else { State::Closed }, false));
+            state_tx.send_replace(PathState::inactive(if failed { State::Failed } else { State::Closed }));
         });
         Ok((
             Self {
@@ -458,10 +488,13 @@ impl Session {
         self.description.clone()
     }
     pub fn state(&self) -> State {
-        self.state.borrow().0
+        self.state.borrow().state
     }
     pub fn is_relay(&self) -> bool {
-        self.state.borrow().1
+        self.state.borrow().relayed
+    }
+    pub fn on_lan(&self, networks: &[crate::lan_routes::Network]) -> bool {
+        self.state.borrow().on_lan(networks)
     }
     pub async fn remote(&self, actor: &str, description: Description) -> Result<()> {
         let (reply, result) = oneshot::channel();
@@ -480,7 +513,7 @@ impl Session {
     pub async fn ready(&self) -> Result<()> {
         let mut state = self.state.clone();
         loop {
-            match state.borrow_and_update().0 {
+            match state.borrow_and_update().state {
                 State::Ready => return Ok(()),
                 State::Closed | State::Failed => anyhow::bail!("private peer handshake failed"),
                 _ => {}
@@ -597,7 +630,7 @@ async fn drive(
     mut commands: mpsc::Receiver<Command>,
     mut outgoing: mpsc::Receiver<Outbound>,
     incoming: mpsc::Sender<Bytes>,
-    state: &watch::Sender<(State, bool)>,
+    state: &watch::Sender<PathState>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let mut statistics = Statistics::default();
@@ -645,7 +678,7 @@ async fn drive(
                 statistics.dropped_incoming = statistics.dropped_incoming.saturating_add(1);
             }
         }
-        let current = (peer.state(), peer.is_relay());
+        let current = PathState { state: peer.state(), relayed: peer.is_relay(), hosts: peer.selected_host_pair() };
         if *state.borrow() != current {
             state.send_replace(current);
         }

@@ -271,7 +271,7 @@ impl Quality {
         Some(Vec::new())
     }
 
-    pub fn prefer_peer(&self, peer: &str, default: bool, now: Instant) -> bool {
+    pub fn prefer_peer(&self, peer: &str, default: bool, now: Instant, verified_lan: impl FnOnce() -> bool) -> bool {
         let Some(scores) = self.scores.get(peer) else {
             return default;
         };
@@ -281,10 +281,22 @@ impl Quality {
         let (Some(peer), Some(gateway)) = (fresh(scores[1]), fresh(scores[0])) else {
             return default;
         };
+        if peer.bits_per_second == 0 && gateway.bits_per_second == 0 {
+            return default;
+        }
         if peer.bits_per_second >= gateway.bits_per_second.saturating_mul(6) / 5 {
             return true;
         }
         if gateway.bits_per_second >= peer.bits_per_second.saturating_mul(6) / 5 {
+            // A Wi-Fi packet train can be spread across several milliseconds
+            // while the gateway delivers its train in one buffered read.
+            // Allow a verified LAN to win on time to first MiB in that case.
+            if peer.bits_per_second > 0 && peer.rtt < gateway.rtt && verified_lan() {
+                let first_mib = |s: Score| s.rtt + Duration::from_micros(
+                    (8 * 1024 * 1024 * 1_000_000u64) / s.bits_per_second
+                );
+                return first_mib(peer) <= first_mib(gateway);
+            }
             return false;
         }
         if peer.rtt.saturating_add(Duration::from_millis(10)) < gateway.rtt {
@@ -298,13 +310,19 @@ impl Quality {
 
     fn observe(&mut self, peer: &str, direct: bool, next: Score) {
         let scores = self.scores.entry(peer.to_owned()).or_insert([None, None]);
-        let score = scores[direct as usize].get_or_insert(next);
-        // Smooth brief queue spikes without making a real sustained change
-        // take many minutes to influence new flows.
-        score.bits_per_second =
-            score.bits_per_second.saturating_mul(3) / 4 + next.bits_per_second / 4;
-        score.rtt = score.rtt.mul_f64(0.75) + next.rtt.mul_f64(0.25);
-        score.measured_at = next.measured_at;
+        let slot = &mut scores[direct as usize];
+        // A timeout has no measured rate or RTT. Smooth only consecutive live
+        // samples so the first successful retry can select the recovered path.
+        let mut score = next;
+        if let Some(previous) = slot.filter(|p| {
+            p.bits_per_second > 0 && next.bits_per_second > 0
+                && next.measured_at.saturating_duration_since(p.measured_at) <= SCORE_TTL
+        }) {
+            score.bits_per_second =
+                previous.bits_per_second.saturating_mul(3) / 4 + next.bits_per_second / 4;
+            score.rtt = previous.rtt.mul_f64(0.75) + next.rtt.mul_f64(0.25);
+        }
+        *slot = Some(score);
         tracing::debug!(
             peer,
             direct,
@@ -417,10 +435,10 @@ mod tests {
             }
         }
         // A faster gateway path must override Auto's usual peer-first default.
-        assert!(!source.prefer_peer("target", true, start + Duration::from_secs(1)));
+        assert!(!source.prefer_peer("target", true, start + Duration::from_secs(1), || false));
         // Scores are keyed by the authenticated remote identity, not the IP
         // address shared by unrelated machines.
-        assert!(source.prefer_peer("another-peer", true, start + Duration::from_secs(1)));
+        assert!(source.prefer_peer("another-peer", true, start + Duration::from_secs(1), || false));
     }
 
     #[test]
@@ -445,7 +463,7 @@ mod tests {
                 measured_at: now,
             },
         );
-        assert!(quality.prefer_peer("peer", false, now));
+        assert!(quality.prefer_peer("peer", false, now, || false));
         // A genuinely slow peer remains distinguishable from a faster gateway.
         quality.scores.clear();
         quality.observe(
@@ -466,7 +484,25 @@ mod tests {
                 measured_at: now,
             },
         );
-        assert!(!quality.prefer_peer("peer", true, now));
+        assert!(!quality.prefer_peer("peer", true, now, || false));
+    }
+
+    #[test]
+    fn wifi_burst_spread_prefers_verified_lan_and_still_detects_a_slow_lan() {
+        let now = Instant::now();
+        let score = |ns, ms| Score {
+            bits_per_second: throughput(PROBE_BYTES, ns),
+            rtt: Duration::from_millis(ms), measured_at: now,
+        };
+        let mut quality = Quality::default();
+        quality.observe("peer", false, score(500_000, 115));
+        quality.observe("peer", true, score(3_300_000, 4));
+        assert!(quality.prefer_peer("peer", true, now, || true));
+        assert!(!quality.prefer_peer("peer", true, now, || false));
+        quality.scores.clear();
+        quality.observe("peer", false, score(500_000, 115));
+        quality.observe("peer", true, score(60_000_000, 4));
+        assert!(!quality.prefer_peer("peer", true, now, || true));
     }
 
     #[test]
@@ -479,7 +515,7 @@ mod tests {
             Some(Vec::new())
         );
         quality.cancel("peer", true, 1, now);
-        assert!(quality.prefer_peer("peer", true, now));
+        assert!(quality.prefer_peer("peer", true, now, || false));
         quality.observe(
             "peer",
             true,
@@ -498,11 +534,42 @@ mod tests {
                 measured_at: now,
             },
         );
-        assert!(!quality.prefer_peer("peer", true, now));
-        assert!(quality.prefer_peer("peer", true, now + SCORE_TTL + Duration::from_secs(1)));
+        assert!(!quality.prefer_peer("peer", true, now, || false));
+        assert!(quality.prefer_peer("peer", true, now + SCORE_TTL + Duration::from_secs(1), || false));
         quality.prune(now + SCORE_TTL + Duration::from_secs(1));
         assert!(quality.scores.is_empty());
         assert!(Frame::decode(b"not a path probe").is_none());
+    }
+
+    #[test]
+    fn first_success_after_timeout_replaces_the_failure_estimate() {
+        let mut quality = Quality::default();
+        let now = Instant::now();
+        let recovered = now + Duration::from_secs(22);
+        quality.start("peer", true, 1, now);
+        quality.prune(now + Duration::from_secs(6));
+        for (direct, rate, millis) in [(false, 120_000_000, 100), (true, 200_000_000, 4)] {
+            quality.observe("peer", direct, Score {
+                bits_per_second: rate,
+                rtt: Duration::from_millis(millis),
+                measured_at: recovered,
+            });
+        }
+        assert!(quality.prefer_peer("peer", false, recovered, || false));
+    }
+
+    #[test]
+    fn two_failed_probes_preserve_the_callers_default() {
+        let mut quality = Quality::default();
+        let now = Instant::now();
+        for direct in [true, false] {
+            quality.start("peer", direct, 1, now);
+        }
+        let expired = now + Duration::from_secs(6);
+        quality.prune(expired);
+        for default in [true, false] {
+            assert_eq!(quality.prefer_peer("peer", default, expired, || false), default);
+        }
     }
 
     #[test]
@@ -523,7 +590,7 @@ mod tests {
                 measured_at: now + PROBE_TIMEOUT + Duration::from_secs(1),
             },
         );
-        assert!(!quality.prefer_peer("peer", true, now + Duration::from_secs(7)));
+        assert!(!quality.prefer_peer("peer", true, now + Duration::from_secs(7), || false));
         assert!(quality
             .start("peer", true, 2, now + Duration::from_secs(7))
             .is_empty());
