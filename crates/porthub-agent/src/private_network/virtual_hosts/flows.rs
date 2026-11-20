@@ -108,7 +108,7 @@ impl Flows {
                     let conn = pending.established().await?;
                     publish.send_replace(Some(conn.ingress()));
                     let read_limit = if direct_carrier {
-                        1024 * 1024
+                        tagged::DIRECT_FORWARD_WINDOW
                     } else {
                         tagged::FORWARD_WINDOW
                     };

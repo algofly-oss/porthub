@@ -338,7 +338,6 @@ impl Runner {
         );
         // This TCP leg stays on the local TUN. Match a stream proxy's
         // TCP_NODELAY behavior; delayed local ACKs must not pace WAN data.
-        socket.set_congestion_control(tcp::CongestionControl::None);
         socket.set_nagle_enabled(false);
         socket.set_ack_delay(None);
         let endpoint = |address: SocketAddrV4| (IpAddress::Ipv4(*address.ip()), address.port());

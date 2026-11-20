@@ -28,6 +28,7 @@ const QUEUE: usize = 256;
 const CHUNK: usize = 8192;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Largest contiguous socket read carrying one immutable admission.
+pub const DIRECT_FORWARD_WINDOW: usize = 256 * 1024;
 pub const FORWARD_WINDOW: usize = 4 * 1024 * 1024;
 const FORWARD_SOCKET_BUFFER: usize = 1024 * 1024;
 // Limit the aggregate memory added by wide socket windows across all virtual
@@ -1116,7 +1117,7 @@ impl Runner {
             .flatten();
         let (receive_size, send_size) = if wide_window.is_some() {
             let send_size = if direct_carrier {
-                FORWARD_SOCKET_BUFFER
+                DIRECT_FORWARD_WINDOW
             } else {
                 2 * FORWARD_SOCKET_BUFFER
             };
@@ -1128,11 +1129,6 @@ impl Runner {
             tcp::SocketBuffer::new(vec![0; receive_size]),
             tcp::SocketBuffer::new(vec![0; send_size]),
         );
-        socket.set_congestion_control(if self.wide_forwarding && direct_carrier {
-            tcp::CongestionControl::Cubic
-        } else {
-            tcp::CongestionControl::None
-        });
         socket.set_timeout(None);
         socket.set_nagle_enabled(false);
         socket.set_ack_delay(None);

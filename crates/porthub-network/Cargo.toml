@@ -21,4 +21,4 @@ bytes = "1.12"
 getrandom = "0.3"
 sha2 = "0.10"
 tokio-util = { version = "0.7", features = ["rt"] }
-smoltcp = { version = "=0.14.0", optional = true, default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp","socket-tcp-cubic"] }
+smoltcp = { version = "=0.14.0", optional = true, default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
