@@ -75,7 +75,7 @@ impl ForwardReceipt {
         if self.expires<=now || !hub.allowed_scope(&self.source,&self.target,now,self.exit){return false;}
         let (Some(a),Some(b))=(hub.leases.get(&self.source),hub.leases.get(&self.target))else{return false;};
         if a.credential_hash!=self.source_hash||b.credential_hash!=self.target_hash||a.instance!=self.source_instance||b.instance!=self.target_instance||a.identity_generation!=self.source_generation||b.identity_generation!=self.target_generation{return false;}
-        let key=if self.source<self.target{(self.source.clone(),self.target.clone())}else{(self.target.clone(),self.source.clone())};
+        let key = PairLookup::new(&self.source, &self.target);
         self.owner.is_none_or(|owner|(if self.exit{&hub.exit_pairs}else{&hub.pairs}).get(&key).is_some_and(|p|p.owner_generation==owner))
     }
 }
@@ -101,14 +101,32 @@ impl Forward<'_> {
     }
 }
 struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
+type PairTable = hashbrown::HashMap<(String, String), PairAuthority, std::collections::hash_map::RandomState>;
+
+// Hash the same two strings, in the same order, as the owned tuple on insertion.
+#[derive(Hash)]
+struct PairLookup<'a>(&'a str, &'a str);
+
+impl<'a> PairLookup<'a> {
+    fn new(a: &'a str, b: &'a str) -> Self {
+        if a <= b { Self(a, b) } else { Self(b, a) }
+    }
+}
+
+impl hashbrown::Equivalent<(String, String)> for PairLookup<'_> {
+    fn equivalent(&self, key: &(String, String)) -> bool {
+        self.0 == key.0 && self.1 == key.1
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     leases: HashMap<String, Lease>,
     revoked: HashMap<String, Instant>,
     revoked_cleanup_at: Option<Instant>,
     connections: HashMap<String, HashMap<u8, Connection>>,
-    pairs: HashMap<(String,String), PairAuthority>,
-    exit_pairs: HashMap<(String,String), PairAuthority>,
+    pairs: PairTable,
+    exit_pairs: PairTable,
     generation: u64,
     admissions: HashMap<String, Admission>,
     workspace_generations: HashMap<String, (u64, bool)>,
@@ -154,7 +172,7 @@ impl Inner {
         let (Some(a),Some(b))=(self.leases.get(source),self.leases.get(target)) else{return false;};
         if a.expires<=now || b.expires<=now {return false;}
         if a.sparse_epoch.is_none() && b.sparse_epoch.is_none() {return a.allowed.contains(target)&&b.allowed.contains(source);}
-        let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
+        let key = PairLookup::new(source, target);
         let Some(pair)=(if exit{&self.exit_pairs}else{&self.pairs}).get(&key).filter(|p|p.expires>now) else{return false;};
         let (Some(left),Some(right))=(self.leases.get(&pair.left),self.leases.get(&pair.right)) else{return false;};
         left.credential_hash==pair.left_hash && right.credential_hash==pair.right_hash
@@ -630,7 +648,7 @@ impl Hub {
             _=>false,
         };
         if !hub.allowed_scope(source,target,now,exit) {return None;}
-        let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
+        let key = PairLookup::new(source, target);
         let pair=(if exit{&hub.exit_pairs}else{&hub.pairs}).get(&key);
         let expires=a.expires.min(b.expires).min(pair.map(|p|p.expires).unwrap_or(a.expires));
         let receipt=ForwardReceipt{source:source.into(),target:target.into(),source_hash:a.credential_hash.clone(),target_hash:b.credential_hash.clone(),source_instance:a.instance.clone(),target_instance:b.instance.clone(),source_generation:a.identity_generation,target_generation:b.identity_generation,exit,owner:pair.map(|p|p.owner_generation),expires};

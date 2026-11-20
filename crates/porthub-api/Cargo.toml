@@ -12,6 +12,7 @@ speech-cuda = ["transcribe-cpp/cuda"]
 speech-vulkan = ["transcribe-cpp/vulkan"]
 
 [dependencies]
+hashbrown = { version = "0.17", default-features = false, features = ["equivalent"] }
 transcribe-cpp = { version = "=0.4.2", default-features = false }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
