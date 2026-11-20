@@ -910,7 +910,7 @@ async fn container_forwarding_uses_host_exit_and_pins_flows_across_fallback() ->
 #[cfg(all(target_os = "linux", feature = "netns-tests"))]
 #[tokio::test]
 #[ignore = "requires explicitly owned disposable network namespace"]
-async fn lan_only_routes_remote_subnets_and_preserves_local_and_internet_routes() -> anyhow::Result<()> {
+async fn capture_routes_preserve_local_and_internet_routes() -> anyhow::Result<()> {
     use nlink::netlink::{Connection, Route, route::Ipv4Route, types::route::RouteScope};
     use porthub_agent::private_network::device::Tun;
     use std::{net::Ipv4Addr, time::Duration};
@@ -924,7 +924,7 @@ async fn lan_only_routes_remote_subnets_and_preserves_local_and_internet_routes(
     netlink.add_route(Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
     netlink.add_route(Ipv4Route::new("192.168.0.0".parse()?, 16).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
     // A narrower remote advertisement cannot take over the existing local LAN.
-    tun.update_lan_routes(&["192.168.80.0/24".parse()?, "10.80.0.0/24".parse()?]).await?;
+    tun.update_capture_routes(&["192.168.80.0/24".parse()?, "10.80.0.0/24".parse()?]).await?;
     async fn send_and_receive(destination: &str, device: &Tun, source: Ipv4Addr) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
         socket.send_to(b"lan-mode", destination).await?;
@@ -944,7 +944,7 @@ async fn lan_only_routes_remote_subnets_and_preserves_local_and_internet_routes(
     send_and_receive("10.80.0.7:8000", &tun, overlay).await?;
     send_and_receive("192.168.80.7:8000", &uplink, physical).await?;
     send_and_receive("8.8.8.8:8000", &uplink, physical).await?;
-    tun.update_lan_routes(&[]).await?;
+    tun.update_capture_routes(&[]).await?;
     send_and_receive("10.80.0.7:8000", &uplink, physical).await?;
     Ok(())
 }

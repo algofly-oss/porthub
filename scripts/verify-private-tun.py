@@ -11,7 +11,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 environment = {**os.environ, "CARGO_BUILD_JOBS": "8", "CARGO_PROFILE_TEST_DEBUG": "0", "CARGO_PROFILE_DEV_DEBUG": "0"}
 tests = {
-    "private_packets": ["owned_linux_tun_routes_kernel_udp_packets_and_cleans_up", "owned_exit_nat_preserves_global_forwarding_and_cleans_up", "owned_exit_consumer_routes_new_connections_and_preserves_underlay_sockets", "owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_routes"],
+    "private_packets": ["capture_routes_preserve_local_and_internet_routes", "owned_linux_tun_routes_kernel_udp_packets_and_cleans_up", "owned_exit_nat_preserves_global_forwarding_and_cleans_up", "owned_exit_consumer_routes_new_connections_and_preserves_underlay_sockets", "owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_routes"],
     "porthub_agent": [
         "private_network::interfaces::tests::kernel_events_refresh_underlay_addresses_and_ignore_owned_overlay_links",
         "private_network::interfaces::tests::a_vpn_route_to_the_gateway_can_carry_relay_traffic_without_becoming_a_direct_candidate",
