@@ -112,7 +112,12 @@ export function demoAccess(state, method, path, body, id) {
   }));
   const rename = path.match(/^\/access\/private\/peers\/([^/]+)\/hostname$/);
   if (rename) {
-    const peer = privatePeers.find((p) => p._id === decodeURIComponent(rename[1]));
+    const virtualPeers = (state.virtualHosts || []).map(row => ({
+      _id: `${owner}:${row.id}`, machine_id: row.id, machine_name: row.name,
+      hostname: access.hostnames[row.id] || row.name,
+    }));
+    const peers = [...privatePeers, ...virtualPeers];
+    const peer = peers.find(p => p._id === decodeURIComponent(rename[1]));
     if (!peer) throw Error("Private peer not found");
     const wanted = String(body.hostname || "").trim().toLowerCase();
     if (!wanted) {
@@ -122,7 +127,7 @@ export function demoAccess(state, method, path, body, id) {
     if (!/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(wanted))
       throw Error("Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen");
     const clash = machines.find((m) => m._id !== peer.machine_id && label(m.name) === wanted) ||
-      privatePeers.find((p) => p.machine_id !== peer.machine_id && p.hostname === wanted);
+      peers.find(p => p.machine_id !== peer.machine_id && (p.hostname === wanted || label(p.machine_name) === wanted));
     if (clash) throw Error(`${wanted} is already used by ${clash.name || clash.machine_name}`);
     access.hostnames[peer.machine_id] = wanted;
     return { hostname: wanted };

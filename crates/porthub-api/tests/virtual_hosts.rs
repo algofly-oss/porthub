@@ -53,6 +53,16 @@ async fn virtual_host_has_a_separate_acl_identity_and_requires_its_enrolled_pare
         case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"rules":[{"id":"miro-only","name":"Virtual target only","bidirectional":true,"sources":[{"kind":"machine","id":consumer.to_hex()}],"destinations":[{"kind":"machine","id":id}],"ports":"8000"}]}).await?;
         let permitted=case.status("POST",sync,"",check.clone(),StatusCode::OK).await?;
         ensure!(granted(&permitted),"virtual host is missing its ACL grant");
+        ensure!(added["peer_id"] == peer);
+        let rename = format!("/api/access/private/peers/{peer}/hostname");
+        case.status("PUT", &rename, &outsider, json!({"hostname":"foreign"}), StatusCode::NOT_FOUND).await?;
+        for (label, expected) in [("miro-renamed", "miro-renamed.phub"), ("miro-via-luna", "miro-via-luna.phub")] {
+            case.status("PUT", &rename, &cookie, json!({"hostname":label}), StatusCode::OK).await?;
+            let listed = case.status("GET",&endpoint,&cookie,json!({}),StatusCode::OK).await?;
+            let host = &listed["virtual_hosts"][0];
+            ensure!(host["hostname"] == expected && host["id"] == added["id"] && host["target_ip"] == added["target_ip"] && host["private_ip"] == added["private_ip"]);
+            ensure!(granted(&case.status("POST",sync,"",check.clone(),StatusCode::OK).await?));
+        }
         ensure!(!permitted["snapshot"]["grants"].as_array().unwrap().iter().any(|g|g["source"]==condor && g["destination"]==parent));
         let grants = permitted["snapshot"]["grants"].as_array().unwrap();
         ensure!(!grants.iter().any(|g|g["source"]==peer || (g["destination"]==peer && g["protocol"]!="tcp" && g["protocol"]!="udp")));
