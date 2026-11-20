@@ -98,6 +98,8 @@ pub(crate) struct RequestWindow {
     domain: Option<super::authority_event::Domain>,
     boot_start: Duration,
     awake_start: Instant,
+    wall_start: SystemTime,
+    relative_deadlines: bool,
 }
 impl RequestWindow {
     pub(crate) fn start(clock: Arc<dyn SuspendClock>) -> Result<Self> {
@@ -117,13 +119,26 @@ impl RequestWindow {
             domain,
             boot_start,
             awake_start: Instant::now(),
+            wall_start: SystemTime::now(),
+            relative_deadlines: false,
         })
+    }
+    pub(crate) fn use_relative_deadlines(&mut self) {
+        self.relative_deadlines = true;
+    }
+    pub(crate) fn local_expiry(&self, server_now: chrono::DateTime<chrono::Utc>, expiry: chrono::DateTime<chrono::Utc>) -> Result<chrono::DateTime<chrono::Utc>> {
+        let ttl = (expiry - server_now).to_std()?;
+        ensure!(!ttl.is_zero() && ttl <= REQUEST_VALIDITY, "invalid server authority lifetime");
+        Ok(self.wall_start.checked_add(ttl).ok_or_else(|| anyhow::anyhow!("invalid local authority deadline"))?.into())
     }
     pub(crate) fn check(&self, server_expiry: SystemTime) -> Result<()> {
         self.remaining(server_expiry).map(|_| ())
     }
     pub(crate) fn remaining(&self, server_expiry: SystemTime) -> Result<Duration> {
-        let local = self.remaining_within(REQUEST_VALIDITY)?;
+        let limit = if self.relative_deadlines {
+            server_expiry.duration_since(self.wall_start)?.min(REQUEST_VALIDITY)
+        } else { REQUEST_VALIDITY };
+        let local = self.remaining_within(limit)?;
         let server = server_expiry
             .duration_since(SystemTime::now())
             .ok()
@@ -272,6 +287,24 @@ mod tests {
         assert!(original.clone().remaining_within(limit).is_err());
         assert!(original.remaining_within(Duration::ZERO).is_err());
         assert!(original.remaining_within(Duration::from_secs(16)).is_err());
+    }
+    #[test]
+    fn clock_skew_preserves_short_leases_and_charges_transit_and_suspend() {
+        for skew in [-22, 22] {
+            let clock = Arc::new(Clock(AtomicU64::new(0)));
+            let mut window = RequestWindow::start(clock.clone()).unwrap();
+            window.use_relative_deadlines();
+            let server = chrono::Utc::now() + chrono::Duration::seconds(skew);
+            assert!(window.local_expiry(server, server).is_err());
+            assert!(window.local_expiry(server, server - chrono::Duration::seconds(1)).is_err());
+            assert!(window.local_expiry(server, server + chrono::Duration::seconds(16)).is_err());
+            let expiry = window.local_expiry(server, server + chrono::Duration::seconds(4)).unwrap();
+            clock.0.store(3000, Ordering::SeqCst);
+            let remaining = window.remaining(expiry.into()).unwrap();
+            assert!(remaining > Duration::ZERO && remaining <= Duration::from_secs(1));
+            clock.0.store(4000, Ordering::SeqCst);
+            assert!(window.check(expiry.into()).is_err());
+        }
     }
     #[test]
     fn actual_native_clock_advances_without_configuration_changes() {
