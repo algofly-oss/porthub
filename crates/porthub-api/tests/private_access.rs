@@ -106,6 +106,9 @@ async fn network_changes_validate_permissions_and_preserve_existing_peer_address
         #[cfg(feature = "private-sparse")]
         {
             let path = format!("/api/access/network/renumber-hold?workspace={owner}");
+            let summary_path = format!("/api/inventory/access-summary?workspace={owner}");
+            let before = case.status("GET", &summary_path, &cookie, json!(null), StatusCode::OK).await?;
+            ensure!(before["data"]["network"]["native_renumber_held"] == false);
             let hold = json!({"held": true});
             case.status("PUT", &path, &member_cookie, hold.clone(), StatusCode::FORBIDDEN).await?;
             let (status, _, _) = case.call("PUT", &path, &cookie, hold.clone(), &[("origin", "https://evil.test")]).await?;
@@ -113,6 +116,8 @@ async fn network_changes_validate_permissions_and_preserve_existing_peer_address
             case.status("PUT", &path, &cookie, json!({"held": "false"}), StatusCode::BAD_REQUEST).await?;
             let saved = case.status("PUT", &path, &cookie, hold, StatusCode::OK).await?;
             ensure!(saved["native_renumber_held"] == true);
+            let after = case.status("GET", &summary_path, &member_cookie, json!(null), StatusCode::OK).await?;
+            ensure!(after["data"]["network"]["native_renumber_held"] == true);
         }
         let body=json!({"cidr":"192.168.40.0/24","dns_suffix":"LAN.Example.COM.","ignored":u64::MAX});
         let path=format!("/api/access/network?workspace={owner}");
