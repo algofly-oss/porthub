@@ -296,7 +296,7 @@ async fn wait_retry_clock(delay: Duration, clock: impl Fn() -> Option<Duration>)
         if remaining.is_zero() || tokio::time::Instant::now() >= active_deadline {
             return;
         }
-        // Only a failed worker waits here. A short remaining active-time sleep
+        // A short remaining active-time sleep
         // lets the first wake observe a retry deadline that passed in suspend.
         let check = tokio::time::Instant::now() + remaining.min(Duration::from_secs(1));
         tokio::time::sleep_until(check.min(active_deadline)).await;
@@ -325,10 +325,10 @@ fn linux_retry_timer(delay: Duration) -> std::io::Result<tokio::io::unix::AsyncF
     tokio::io::unix::AsyncFd::new(fd)
 }
 
-pub(crate) async fn private_retry_delay(delay: Duration) {
+pub(crate) async fn suspend_aware_delay(delay: Duration) {
     #[cfg(target_os = "macos")]
     if let Ok(queue) = crate::macos_kqueue::continuous_timer(delay) {
-        // A failed worker should retry on the first wake after its deadline.
+        // Retry and relay heartbeat deadlines should fire on the first wake after expiry.
         // The Tokio deadline also covers an unavailable or failed kernel timer.
         tokio::select! {
             Ok(_) = crate::macos_kqueue::next_flags(&queue) => {},
@@ -421,7 +421,7 @@ pub(crate) async fn supervise<F, Fut>(
                             if changed.is_err() { return; }
                             retry = Duration::from_secs(5);
                         },
-                        _ = private_retry_delay(retry) => retry = (retry * 2).min(Duration::from_secs(60)),
+                        _ = suspend_aware_delay(retry) => retry = (retry * 2).min(Duration::from_secs(60)),
                     }
                     break;
                 },

@@ -348,7 +348,7 @@ pub async fn run_with_logs(
                 tracing::info!("private authority expired; requesting a fresh lease");
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
-                    _ = crate::unified::private_retry_delay(Duration::from_secs(5)) => {}
+                    _ = crate::unified::suspend_aware_delay(Duration::from_secs(5)) => {}
                 }
             }
             other => return other,
