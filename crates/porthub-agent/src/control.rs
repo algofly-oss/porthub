@@ -47,6 +47,18 @@ impl Reply {
         serde_json::from_slice(&self.bytes).map_err(|_| Failure::InvalidResponse)
     }
 }
+#[cfg(feature = "private-sparse")]
+fn certificate_time_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause=Some(err);
+    while let Some(e)=cause {
+        if let Some(rustls::Error::InvalidCertificate(cert))=e.downcast_ref::<rustls::Error>() {
+            return matches!(cert,rustls::CertificateError::Expired | rustls::CertificateError::ExpiredContext{..} |
+                rustls::CertificateError::NotValidYet | rustls::CertificateError::NotValidYetContext{..});
+        }
+        cause=if let Some(io)=e.downcast_ref::<std::io::Error>() {io.get_ref().map(|inner|inner as &dyn std::error::Error)} else {e.source()};
+    }
+    false
+}
 pub struct Control {
     #[cfg(test)]
     test_paths: Option<Vec<crate::outbound::Candidate>>,
@@ -54,6 +66,12 @@ pub struct Control {
     outbound_settings: crate::outbound::Settings,
     path_state: tokio::sync::Mutex<std::collections::HashMap<String,crate::outbound::Selection>>,
     private_peer_id: Option<String>,
+    #[cfg(all(test,feature="private-sparse"))]
+    test_clock_roots: Option<rustls::RootCertStore>,
+    #[cfg(feature = "private-sparse")]
+    clock_origin: Option<crate::private_network::gateway_time::GatewayTime>,
+    #[cfg(feature = "private-sparse")]
+    recovered_tls: Mutex<Option<(rustls::ClientConfig, reqwest::Client)>>,
     http: reqwest::Client,
     preferred: Mutex<Option<(String, Instant)>>,
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -76,27 +94,70 @@ impl Control {
             outbound_settings: crate::outbound::Settings::from_env()?,
             path_state: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             private_peer_id: None,
+            #[cfg(all(test,feature="private-sparse"))]
+            test_clock_roots: None,
+            #[cfg(feature = "private-sparse")]
+            clock_origin: None,
+            #[cfg(feature = "private-sparse")]
+            recovered_tls: Mutex::new(None),
             http,
             preferred: Mutex::new(None),
             #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             underlay: tokio::sync::Mutex::new(None),
         })
     }
+    #[cfg(all(test,feature="private-sparse"))]
+    pub(crate) fn use_fixture_roots(&mut self, roots:rustls::RootCertStore)->anyhow::Result<()> {
+        let tls=rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?.with_root_certificates(roots.clone()).with_no_client_auth();
+        self.http=reqwest::Client::builder().no_proxy().use_preconfigured_tls(tls).build()?;
+        self.test_clock_roots=Some(roots);
+        Ok(())
+    }
+    #[cfg(feature = "private-sparse")]
+    pub(crate) fn set_clock_origin(&mut self, origin: &crate::private_network::relay::PinnedRelay) -> anyhow::Result<()> {
+        self.clock_origin = Some(crate::private_network::gateway_time::GatewayTime::new(&origin.url, &origin.spki_sha256)?);
+        Ok(())
+    }
+
+    #[cfg(feature = "private-sparse")]
+    async fn recover_clock(&self) -> Result<(),Failure> {
+        let clock=self.clock_origin.as_ref().ok_or(Failure::Unavailable)?;
+        let roots=rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        #[cfg(test)]
+        let roots=self.test_clock_roots.clone().unwrap_or(roots);
+        let tls=clock.tls_config(roots).await.map_err(|_|Failure::Unavailable)?;
+        let http=reqwest::Client::builder().use_preconfigured_tls(tls.clone())
+            .redirect(reqwest::redirect::Policy::none()).pool_max_idle_per_host(2)
+            .pool_idle_timeout(Duration::from_secs(60)).connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(40)).build().map_err(|_|Failure::Unavailable)?;
+        *self.recovered_tls.lock().map_err(|_|Failure::Unavailable)?=Some((tls,http));
+        #[cfg(any(target_os="linux",target_os="macos",windows))]
+        { *self.underlay.lock().await=None; }
+        Ok(())
+    }
+
     /// Bind only to sources permitted by the kernel-selected egress policy.
     /// Refresh lazily: no timer or discovery work runs while control is idle.
     async fn http_for(&self, base: &str) -> Result<(reqwest::Client, Option<crate::outbound::Candidate>), Failure> {
+        #[cfg(feature = "private-sparse")]
+        let recovered=self.recovered_tls.lock().map_err(|_|Failure::Unavailable)?.clone();
+        #[cfg(feature = "private-sparse")]
+        let default_client=recovered.as_ref().map(|(_,client)|client).unwrap_or(&self.http);
+        #[cfg(not(feature = "private-sparse"))]
+        let default_client=&self.http;
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let loopback = url::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_owned))
                 .is_some_and(|host| host == "localhost" || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
             #[cfg(test)]
             let loopback = loopback && self.test_paths.is_none();
-            if loopback { return Ok((self.http.clone(), None)); }
+            if loopback { return Ok((default_client.clone(), None)); }
             let mut cached = self.underlay.lock().await;
             if let Some((candidate, client, until, authority)) = &*cached {
                 if authority == base && Instant::now() < *until { return Ok((client.clone(), Some(candidate.clone()))); }
             }
-            if self.outbound_settings.system { return Ok((self.http.clone(), None)); }
+            if self.outbound_settings.system { return Ok((default_client.clone(), None)); }
             let url = url::Url::parse(base).map_err(|_| Failure::Unavailable)?;
             let host = url.host_str().ok_or(Failure::Unavailable)?;
             let port = url.port_or_known_default().ok_or(Failure::Unavailable)?;
@@ -113,6 +174,8 @@ impl Control {
             let builder = reqwest::Client::builder().local_address(local).resolve_to_addrs(host, &[destination]);
             #[cfg(target_os = "macos")]
             let builder = builder.interface(&porthub_mesh::underlay::interface_name(local).map_err(|_| Failure::Unavailable)?);
+            #[cfg(feature = "private-sparse")]
+            let builder=match recovered {Some((tls,_))=>builder.use_preconfigured_tls(tls),None=>builder};
             let client = builder.redirect(reqwest::redirect::Policy::none())
                 .pool_max_idle_per_host(2).pool_idle_timeout(Duration::from_secs(60))
                 .connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(40))
@@ -121,7 +184,7 @@ impl Control {
             return Ok((client, Some(candidate)));
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-        { let _ = base; Ok((self.http.clone(), None)) }
+        { let _ = base; Ok((default_client.clone(), None)) }
     }
     async fn refresh_underlay(&self, base: &str, failed: Option<&crate::outbound::Candidate>) {
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -325,6 +388,17 @@ impl Control {
         let image_upload = method == Method::POST && path == "machines/client/images";
         let attempt = Duration::from_secs(if image_upload { 270 } else { 40 });
         let deadline = Instant::now() + Duration::from_secs(if image_upload { 300 } else { 45 });
+        #[cfg(feature = "private-sparse")]
+        let mut tried_clock=false;
+        #[cfg(feature = "private-sparse")]
+        if self.private_peer_id.is_some() {
+            let needs_clock = {
+                let cached=self.recovered_tls.lock().map_err(|_| Failure::Unavailable)?;
+                cached.as_ref().map_or_else(||std::time::SystemTime::now()<std::time::UNIX_EPOCH,
+                    |(tls,_)|tls.time_provider.current_time().is_none())
+            };
+            if needs_clock {self.recover_clock().await?;tried_clock=true;}
+        }
         'authorities: for base in self.authorities() {
           for _ in 0..8 {
             if Instant::now() >= deadline { return Err(Failure::Unavailable); }
@@ -345,6 +419,11 @@ impl Control {
             let mut response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
+                    #[cfg(feature = "private-sparse")]
+                    if !tried_clock && self.clock_origin.is_some() && error.is_connect() && certificate_time_error(&error) {
+                        tried_clock=true;
+                        if self.recover_clock().await.is_ok() {continue;}
+                    }
                     self.refresh_underlay(&base,candidate.as_ref()).await;
                     // A connect failure happens before request transmission.
                     // Never replay a possibly committed mutation on a timeout.

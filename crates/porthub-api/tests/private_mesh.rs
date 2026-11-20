@@ -193,7 +193,7 @@ async fn native_gateway_fallback_authenticates_leases_and_blocks_spoofed_packet_
         for peer in &peers {
             let profile=Profile{server:base.clone(),peer_id:peer.clone(),workspace:owner.to_hex(),token:token.into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let (sender,input)=relay::channel();let (output,events)=mpsc::channel(16);
-            let (relay_config, receiver) = tokio::sync::watch::channel(Some(relay::Config { direct_url: None, relay_token: None, pinned: None }));
+            let (relay_config, receiver) = tokio::sync::watch::channel(Some(relay::Config { #[cfg(feature="private-sparse")] clock:None, direct_url: None, relay_token: None, pinned: None }));
             // Closing configuration explicitly shuts down the relay owner.
             // Retain the sender until this fixture finishes transferring.
             relay_configs.push(relay_config);

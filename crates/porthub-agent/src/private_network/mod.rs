@@ -102,6 +102,10 @@ mod dns_windows;
 #[cfg(feature = "private-sparse")]
 mod authority_clock;
 #[cfg(feature = "private-sparse")]
+pub(crate) mod gateway_time;
+#[cfg(feature = "private-sparse")]
+pub(crate) mod clock_identity;
+#[cfg(feature = "private-sparse")]
 pub(crate) use authority_clock::ExpiredDuringSuspend;
 #[cfg(feature = "private-sparse")]
 pub(crate) use authority_clock::{NativeClock, SuspendClock};

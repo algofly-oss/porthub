@@ -115,6 +115,9 @@ struct Metadata {
 #[derive(Deserialize)]
 #[cfg(any(unix, windows))]
 struct Credentials {
+    #[cfg(feature = "private-sparse")]
+    #[serde(default)]
+    clock_origin: Option<crate::private_network::relay::PinnedRelay>,
     peer_id: String,
     workspace: String,
     token: String,
@@ -521,6 +524,12 @@ pub async fn enroll(
             allow_insecure_http_for_tests: insecure,
         };
         profile.validate()?;
+        #[cfg(feature = "private-sparse")]
+        if !insecure && profile.server.starts_with("https://") {
+            if let Some(origin) = credentials.clock_origin {
+                if crate::private_network::clock_identity::remember(&destination,&profile,&origin).is_err() { tracing::warn!("could not persist private gateway clock identity"); }
+            }
+        }
         profile::write_private(&destination, &serde_json::to_vec_pretty(&profile)?, false)?;
         Ok(destination)
     }

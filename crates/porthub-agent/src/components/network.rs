@@ -9,7 +9,12 @@ use std::{
 use tokio::sync::Mutex;
 use url::Url;
 
+#[cfg(feature = "private-sparse")]
+pub(crate) type ClockReceiver =
+    tokio::sync::watch::Receiver<Option<crate::private_network::gateway_time::ClockSample>>;
 pub struct Routes {
+    #[cfg(feature = "private-sparse")]
+    registration: Option<(url::Origin, ClockReceiver)>,
     settings: crate::outbound::Settings,
     state: Mutex<HashMap<String, crate::outbound::Selection>>,
 }
@@ -18,14 +23,47 @@ impl Routes {
         Ok(Self {
             settings: crate::outbound::Settings::from_env()?,
             state: Mutex::new(HashMap::new()),
+            #[cfg(feature = "private-sparse")]
+            registration: None,
         })
     }
-    fn client() -> reqwest::ClientBuilder {
-        reqwest::Client::builder()
+    #[cfg(feature = "private-sparse")]
+    pub(crate) fn for_registration(gateway: &str, clock: ClockReceiver) -> Result<Self> {
+        let mut routes = Self::new()?;
+        routes.registration = Some((Url::parse(gateway)?.origin(), clock));
+        Ok(routes)
+    }
+    fn client(&self, url: &Url) -> Result<reqwest::ClientBuilder> {
+        let builder = reqwest::Client::builder();
+        #[cfg(feature = "private-sparse")]
+        let builder = if let Some(sample) = self
+            .registration
+            .as_ref()
+            .filter(|(origin, _)| *origin == url.origin())
+            .and_then(|(_, rx)| *rx.borrow())
+        {
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let tls = rustls::ClientConfig::builder_with_details(
+                std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+                std::sync::Arc::new(sample),
+            )
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            builder.use_preconfigured_tls(tls)
+        } else {
+            ensure!(
+                url.scheme() != "https" || std::time::SystemTime::now() >= std::time::UNIX_EPOCH,
+                "component origin has no trusted clock yet"
+            );
+            builder
+        };
+        Ok(builder
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("PortHub component manager")
             .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_secs(300)))
     }
 }
 #[async_trait]
@@ -33,7 +71,7 @@ impl Routing for Routes {
     async fn route(&self, url: &Url) -> Result<Routed> {
         if self.settings.system {
             return Ok(Routed {
-                client: Self::client().build()?,
+                client: self.client(url)?.build()?,
                 ticket: String::new(),
             });
         }
@@ -61,7 +99,7 @@ impl Routing for Routes {
             && self.settings.source.is_none()
         {
             return Ok(Routed {
-                client: Self::client().build()?,
+                client: self.client(url)?.build()?,
                 ticket: String::new(),
             });
         }
@@ -86,7 +124,8 @@ impl Routing for Routes {
                 .next()
                 .context("no policy-permitted component route is currently available")?
         };
-        let builder = Self::client()
+        let builder = self
+            .client(url)?
             .local_address(candidate.source)
             .resolve_to_addrs(&host, &[candidate.destination]);
         #[cfg(target_os = "macos")]

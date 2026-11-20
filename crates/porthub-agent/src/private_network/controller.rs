@@ -44,6 +44,9 @@ struct Reply {
     virtual_hosts: Vec<super::virtual_hosts::Spec>,
     #[serde(default)]
     pinned_relay: Option<super::relay::PinnedRelay>,
+    #[cfg(feature="private-sparse")]
+    #[serde(default)]
+    clock_origin: Option<super::relay::PinnedRelay>,
     snapshot: Snapshot,
     #[serde(default)]
     exit_pick: Option<porthub_network::policy::ExitPickResponse>,
@@ -380,7 +383,13 @@ pub(crate) async fn run_endpoint(
         instance,
         certificate: identity,
     } = local;
-    let control = crate::control::Control::new_private(&profile)?;
+    let mut control = crate::control::Control::new_private(&profile)?;
+    #[cfg(feature="private-sparse")]
+    let mut clock_pin = native_profile.as_deref().and_then(|p| super::clock_identity::read(p,&profile));
+    #[cfg(feature="private-sparse")]
+    if let Some(pin)=clock_pin.as_ref(){let _=control.set_clock_origin(pin);}
+    #[cfg(feature="private-sparse")]
+    let mut refresh_clock_origin = Instant::now();
     let mut bases = control.authorities();
     // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
     // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
@@ -476,7 +485,13 @@ pub(crate) async fn run_endpoint(
         #[cfg(feature="private-sparse")]
         let clock_nonce = uuid::Uuid::new_v4().simple().to_string();
         #[cfg(feature="private-sparse")]
-        { body["clock_nonce"] = serde_json::json!(clock_nonce); }
+        {
+            body["clock_nonce"] = serde_json::json!(clock_nonce);
+            if !virtual_endpoint && native_profile.is_some() && Instant::now()>=refresh_clock_origin {
+                body["refresh_clock_origin"]=true.into();
+                refresh_clock_origin=Instant::now()+Duration::from_secs(6*3600);
+            }
+        }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
@@ -486,7 +501,7 @@ pub(crate) async fn run_endpoint(
                 if !value.authenticated_tls {
                     if let Some(reply) = &mut reply {
                         #[cfg(feature="private-sparse")]
-                        { reply.authority_clock = None; }
+                        { reply.authority_clock = None; reply.clock_origin = None; }
                         reply.pinned_relay = None;
                         #[cfg(all(feature="private-sparse",feature="private-stream"))]
                         if !profile.allow_insecure_http_for_tests {reply.virtual_hosts.clear();}
@@ -512,6 +527,7 @@ pub(crate) async fn run_endpoint(
             if let (Some(window), Some(clock)) = (&mut request_window, &reply.authority_clock) {
                 ensure!(clock.nonce == clock_nonce, "private authority response does not match request");
                 window.use_relative_deadlines();
+                window.clock_sample=super::gateway_time::ClockSample::from_sync(clock.server_time);
                 reply.snapshot.expires_at = window.local_expiry(clock.server_time, reply.snapshot.expires_at)?;
                 let leases = reply.pair_responses.iter_mut().filter_map(|p| p.lease.as_mut())
                     .chain(reply.exit_pick.iter_mut().filter_map(|pick| pick.lease.as_mut()));
@@ -533,6 +549,12 @@ pub(crate) async fn run_endpoint(
                 reply.snapshot.peers.len() <= 4096 && reply.signals.len() <= 128 && reply.proxy_jobs.len() <=64,
                 "private sync exceeds limits"
             );
+            #[cfg(feature="private-sparse")]
+            if let (Some(path),Some(pin))=(native_profile.as_deref(),reply.clock_origin.as_ref()) {
+                if clock_pin.as_ref()!=Some(pin) && super::clock_identity::remember(path,&profile,pin).is_ok() && control.set_clock_origin(pin).is_ok(){
+                    clock_pin=Some(pin.clone());
+                }
+            }
             #[cfg(feature="local-tor")]
             {
                 let mut origins=Vec::new();
@@ -588,11 +610,20 @@ pub(crate) async fn run_endpoint(
                 } else {resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));}
             }
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
+                #[cfg(feature="private-sparse")]
+                clock: request_window.as_ref().and_then(|window|window.clock_sample),
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
                 pinned: reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some()),
                 relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
             })};
-            if *relay_config.borrow()!=direct_relay{relay_config.send_replace(direct_relay);}
+            relay_config.send_if_modified(|current| {
+                // Refresh elapsed-time references without restarting connected relay lanes.
+                #[cfg(feature="private-sparse")]
+                if let (Some(old),Some(new))=(current.as_mut(),direct_relay.as_ref()){old.clock=new.clock;}
+                if *current==direct_relay{return false;}
+                *current=direct_relay;
+                true
+            });
             let valid: HashMap<_, _> = transport_peers.iter()
                 .filter(|peer| peer.id != profile.peer_id)
                 .map(|peer| (peer.id.clone(), peer))

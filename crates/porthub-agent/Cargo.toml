@@ -75,8 +75,9 @@ rcgen = "0.14"
 
 porthub-identity = { path = "../porthub-identity" }
 
-[dev-dependencies]
 webpki-roots = "1"
+
+[dev-dependencies]
 hyper = { version = "1", features = ["client", "http1"] }
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }

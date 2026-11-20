@@ -100,6 +100,7 @@ pub(crate) struct RequestWindow {
     awake_start: Instant,
     wall_start: SystemTime,
     relative_deadlines: bool,
+    pub(super) clock_sample: Option<super::gateway_time::ClockSample>,
 }
 impl RequestWindow {
     pub(crate) fn start(clock: Arc<dyn SuspendClock>) -> Result<Self> {
@@ -121,6 +122,7 @@ impl RequestWindow {
             awake_start: Instant::now(),
             wall_start: SystemTime::now(),
             relative_deadlines: false,
+            clock_sample: None,
         })
     }
     pub(crate) fn use_relative_deadlines(&mut self) {

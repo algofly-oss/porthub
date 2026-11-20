@@ -51,13 +51,15 @@ pub struct Sender {
     ready: Arc<[AtomicBool; RELAY_LANES]>,
     dropped_packets: Arc<AtomicU64>,
 }
-#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PinnedRelay {
-    url: String,
-    spki_sha256: String,
+    pub(crate) url: String,
+    pub(crate) spki_sha256: String,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
+    #[cfg(feature="private-sparse")]
+    pub clock: Option<super::gateway_time::ClockSample>,
     pub pinned: Option<PinnedRelay>,
     pub direct_url: Option<String>,
     pub relay_token: Option<String>,
@@ -349,6 +351,10 @@ pub async fn run_bound(
         while config.borrow_and_update().is_none() {
             tokio::select! {_=cancel.cancelled()=>return Ok(()),changed=config.changed()=>if changed.is_err(){return Ok(())}}
         }
+        #[cfg(feature="private-sparse")]
+        let clock=config.borrow().as_ref().and_then(|config|config.clock);
+        #[cfg(not(feature="private-sparse"))]
+        let clock=None;
         let mut candidates = Vec::with_capacity(profile.fallback_servers.len() + 3);
         if let Some(configuration) = config.borrow_and_update().clone() {
             if let Some(token) = configuration.relay_token.filter(|t| (32..=128).contains(&t.len())) {
@@ -387,7 +393,7 @@ pub async fn run_bound(
             };
             for path in paths {
                 local = path.as_ref().map(|p|vec![p.source]).unwrap_or_default();
-                if let Some(connection) = connect_lane(&base,pin.as_deref(),&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
+                if let Some(connection) = connect_lane(&base,pin.as_deref(),clock,&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
                     if let Some(path) = path { selection.success(path); }
                     let lane_count = connection.lane_count;
                     primary = Some((base.clone(),token.clone(),pin.clone(),connection,lane_count));
@@ -403,6 +409,7 @@ pub async fn run_bound(
                 let Some(connection) = connect_lane(
                     &base,
                     pin.as_deref(),
+                    clock,
                     &token,
                     &profile.peer_id,
                     &instance,
@@ -456,6 +463,8 @@ struct ConnectedLane {
 async fn connect_lane(
     base: &str,
     pin: Option<&str>,
+    #[cfg(feature="private-sparse")] clock: Option<super::gateway_time::ClockSample>,
+    #[cfg(not(feature="private-sparse"))] _clock: Option<()>,
     token: &str,
     peer: &str,
     instance: &str,
@@ -472,9 +481,20 @@ async fn connect_lane(
     } else {
         return Ok(None);
     };
+    #[cfg(feature="private-sparse")]
+    if scheme=="wss" && clock.is_none() && std::time::SystemTime::now()<std::time::UNIX_EPOCH { return Ok(None); }
     let connector = match pin {
         Some(pin) if scheme == "wss" => {
             let Ok(tls) = porthub_identity::pinned_client_config(pin) else { return Ok(None); };
+            #[cfg(feature="private-sparse")]
+            let tls=if let Some(clock)=clock {let mut config=tls;config.time_provider=Arc::new(clock);config}else{tls};
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls)))
+        }
+        #[cfg(feature="private-sparse")]
+        None if scheme=="wss" && clock.is_some() => {
+            let roots=rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let tls=rustls::ClientConfig::builder_with_details(Arc::new(rustls::crypto::ring::default_provider()),Arc::new(clock.expect("matched authenticated clock")))
+                .with_safe_default_protocol_versions()?.with_root_certificates(roots).with_no_client_auth();
             Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls)))
         }
         Some(_) => return Ok(None),
@@ -745,9 +765,9 @@ mod tests {
         });
         let stop = CancellationToken::new();
         let url = format!("https://{address}");
-        assert!(connect_lane(&format!("http://{address}"), Some(&pin), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
-        assert!(connect_lane(&url, Some(&"00".repeat(32)), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
-        assert!(connect_lane(&url, Some(&pin), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_some());
+        assert!(connect_lane(&format!("http://{address}"), Some(&pin), None, "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
+        assert!(connect_lane(&url, Some(&"00".repeat(32)), None, "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
+        assert!(connect_lane(&url, Some(&pin), None, "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_some());
         tokio::time::timeout(Duration::from_secs(4), server).await???;
         Ok(())
     }
@@ -774,7 +794,7 @@ mod tests {
             }
             Ok::<_,anyhow::Error>(())
         }));
-        let connection=connect_lane(&base,None,"test-token","peer","instance",0,1,&[],&stop).await?.ok_or_else(||anyhow::anyhow!("test relay unavailable"))?;
+        let connection=connect_lane(&base,None,None,"test-token","peer","instance",0,1,&[],&stop).await?.ok_or_else(||anyhow::anyhow!("test relay unavailable"))?;
         let(sender,mut inputs)=channel();let(_update,mut config)=watch::channel(None);let(events,_incoming)=mpsc::channel(8);
         let owner_sender=sender.clone();let owner_stop=stop.clone();
         let owner=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{
@@ -947,6 +967,7 @@ mod tests {
         };
         let (sender, input) = channel();
         let (_updates, config) = watch::channel(Some(Config {
+            #[cfg(feature="private-sparse")] clock:None,
             pinned: None,
             direct_url: Some(rejected_base),
             relay_token: Some("t".repeat(32)),
@@ -1084,6 +1105,7 @@ mod tests {
         for lane in 0..RELAY_LANES {
             let connection = connect_lane(
                 &base,
+                None,
                 None,
                 "test-token",
                 "peer",

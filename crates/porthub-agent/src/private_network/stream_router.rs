@@ -92,7 +92,7 @@ impl Policy {
         policy.deadline = Instant::now()
             + snapshot
                 .expires_at
-                .signed_duration_since(chrono::Utc::now())
+                .signed_duration_since(porthub_network::local_wall_time())
                 .to_std().map_err(|_| anyhow::anyhow!("private policy lease expired; check host clock synchronization and gateway connectivity"))?;
         for grant in &snapshot.grants {
             if grant.protocol != "tcp" && grant.protocol != "any" {
