@@ -138,7 +138,11 @@ async fn prepare(
         .take(2)
         .cloned()
         .collect();
-    let (session, packets) = Session::gather(
+    // Only enable router changes for an installation that opted into the pilot.
+    let router = if !stun_servers.is_empty() && std::env::var("PORTHUB_ROUTER_MAPPING").as_deref() == Ok("1") {
+        tokio::time::timeout(Duration::from_millis(500), super::lan_discovery::mapping_router(&interfaces)).await.ok().flatten()
+    } else { None };
+    let (session, packets) = Session::gather_with_router(
         &interfaces,
         &profile.peer_id,
         &info.id,
@@ -146,6 +150,7 @@ async fn prepare(
         &info.fingerprint,
         allocation,
         &stun_servers,
+        router,
     )
     .await?;
     Ok(Prepared {

@@ -11,6 +11,7 @@ pub mod exit_policy;
 pub mod lan_routes;
 pub mod protocol;
 pub mod relay;
+mod router_mapping;
 #[cfg(feature = "streams")]
 pub mod streams;
 pub mod stun;
