@@ -514,14 +514,18 @@ async fn local_dashboard_pool_replenishes_and_withdraws_enrolled_shells() -> Res
         .status("GET", &path, &cookie, Value::Null, StatusCode::OK)
         .await?;
     ensure!(full["can_open"] == false && full["sessions"].as_array().unwrap().len() == 2);
-    let stopped = command()
-        .args(["terminal", "stop", &first])
-        .output()
-        .await?;
-    ensure!(
-        stopped.status.success(),
-        "could not close first pool workspace"
-    );
+    let end_url = format!("{origin}{path}/{first}");
+    let (_, guest_cookie) = case.user("pool-guest@example.test", "user").await?;
+    for (actor, request_origin, expected) in [
+        (&guest_cookie, origin.as_str(), StatusCode::NOT_FOUND),
+        (&cookie, "https://other.example", StatusCode::FORBIDDEN),
+        (&cookie, origin.as_str(), StatusCode::NO_CONTENT),
+    ] {
+        let response = client.delete(&end_url).header("Origin", request_origin)
+            .header("Cookie", actor).send().await?;
+        ensure!(response.status() == expected, "end session returned {}", response.status());
+    }
+    case.status("GET",&format!("{path}/{second}"),&cookie,Value::Null,StatusCode::NO_CONTENT).await?;
     let third = claim(&client, &origin, &path, &cookie).await?;
     ensure!(
         third != first && third != second,
