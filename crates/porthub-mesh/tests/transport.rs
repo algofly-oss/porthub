@@ -64,6 +64,36 @@ fn connect(left: &mut Peer, right: &mut Peer, start: Instant) -> Result<Instant>
     anyhow::bail!("private handshake did not complete")
 }
 #[test]
+fn temporarily_disconnected_ice_path_stops_carrying_packets_and_recovers() -> Result<()> {
+    let (mut left, mut right, start) = memory_pair()?;
+    let ready = connect(&mut left, &mut right, start)?;
+    let data = [7; 64];
+    let mut now = ready;
+    for _ in 0..80 {
+        now += Duration::from_millis(100);
+        for peer in [&mut left, &mut right] {
+            if peer.next_timeout().is_some_and(|deadline| deadline <= now) {
+                peer.timeout(now)?;
+            }
+            while peer.transmit().is_some() {}
+        }
+        if left.state() != State::Ready && right.state() != State::Ready {
+            break;
+        }
+    }
+    assert_eq!(left.state(), State::Connecting);
+    assert_eq!(right.state(), State::Connecting);
+    assert!(left.send(now, &data).is_err());
+
+    // Restore the same path while the original ICE and DTLS sessions still exist.
+    let recovered = connect(&mut left, &mut right, now)?;
+    left.send(recovered, &data)?;
+    pump(&mut left, &mut right, recovered)?;
+    assert_eq!(right.packet().as_deref(), Some(data.as_slice()));
+    Ok(())
+}
+
+#[test]
 fn unanswered_offer_expires_and_a_fresh_offer_can_connect() -> Result<()> {
     let start = Instant::now();
     let a = Identity::new()?;

@@ -25,7 +25,70 @@ pub struct Zone {
     management_names: HashSet<String>,
     sparse: Option<super::sparse::Handle>,
     ttl: u32,
+    #[cfg(target_os = "macos")]
+    failed_lookups: Arc<std::sync::Mutex<FailedLookups>>,
 }
+
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Default)]
+struct FailedLookups {
+    names: HashMap<String, std::time::Instant>,
+    last_refresh: Option<std::time::Instant>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl FailedLookups {
+    fn remember(&mut self, name: &str, now: std::time::Instant) {
+        if self.names.len() >= 64 && !self.names.contains_key(name) {
+            if let Some(oldest) = self.names.iter().min_by_key(|(_, at)| *at).map(|(k, _)| k.clone()) {
+                self.names.remove(&oldest);
+            }
+        }
+        self.names.insert(name.to_owned(), now);
+    }
+
+    fn recovered(&mut self, now: std::time::Instant, authorized: impl Fn(&str) -> bool) -> bool {
+        if self.last_refresh.is_some_and(|at| now.duration_since(at).as_secs() < 10) {
+            return false;
+        }
+        let mut recovered = false;
+        self.names.retain(|name, since| {
+            if now.duration_since(*since).as_secs() >= 180 {
+                return false;
+            }
+            if authorized(name) {
+                recovered = true;
+                return false;
+            }
+            true
+        });
+        if recovered {
+            self.last_refresh = Some(now);
+        }
+        recovered
+    }
+}
+#[cfg(test)]
+#[test]
+fn dns_recovery_requires_an_authorized_answer_and_coalesces_names() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut cache = FailedLookups::default();
+    cache.remember("first.phub.", start);
+    cache.remember("second.phub.", start);
+    assert!(!cache.recovered(start, |_| false));
+    assert!(cache.recovered(start, |name| name == "second.phub."));
+    assert!(!cache.recovered(start + Duration::from_secs(1), |_| true));
+    assert!(cache.recovered(start + Duration::from_secs(10), |_| true));
+    assert!(!cache.recovered(start + Duration::from_secs(20), |_| true));
+    for i in 0..100 {
+        cache.remember(&format!("host-{i}.phub."), start);
+    }
+    assert_eq!(cache.names.len(), 64);
+    assert!(!cache.recovered(start + Duration::from_secs(181), |_| true));
+    assert!(cache.names.is_empty());
+}
+
 impl Zone {
     pub fn set_sparse(&mut self,handle:super::sparse::Handle){self.sparse=Some(handle);}
     fn missing_private(&self,bytes:&[u8])->Option<String>{
@@ -187,7 +250,7 @@ mod tor_coexistence_tests {
             records:HashMap::from([("miro.phub.".into(),"10.203.0.2".parse()?)]),
             rules:vec![Rule {domain:"blocked.test".into(),include_subdomains:false,action:Action::Block},Rule {domain:"gateway.test".into(),include_subdomains:false,action:Action::Block}],
             forward_all:true,management_names:HashSet::from(["gateway.test".into()]),
-            sparse:None,ttl:5,
+            ttl:5, ..Default::default()
         };
         let query=|name:&str|->Result<Vec<u8>> {let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));Ok(query.to_vec()?)};
         let private=query("miro.phub.")?;assert!(!zone.needs_upstream(&private));
@@ -343,6 +406,9 @@ async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstrea
             answer.ttl = ttl;
             return answer.answer(bytes);
         }
+        #[cfg(target_os = "macos")]
+        state.failed_lookups.lock().unwrap_or_else(|p| p.into_inner())
+            .remember(&name, std::time::Instant::now());
         let mut answer=Message::from_vec(&state.answer(bytes)?).ok()?;answer.metadata.response_code=ResponseCode::ServFail;return answer.to_vec().ok();
     }
     {
@@ -416,6 +482,17 @@ pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()
         super::dns_convergence_macos::wait(&[],&old).await?;
     }
     *current=None;Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn refresh_recovered_names(zone: &RwLock<Zone>, registration: &Registration) {
+    let Some(session) = &registration.private_session else { return };
+    let zone = zone.read().await;
+    let Some(sparse) = &zone.sparse else { return };
+    let mut failures = zone.failed_lookups.lock().unwrap_or_else(|p| p.into_inner());
+    if failures.recovered(std::time::Instant::now(), |name| sparse.dns_name_record(name).is_some()) {
+        session.refresh();
+    }
 }
 
 /// Replace namespaces without first removing the still-valid owned set.
@@ -1102,5 +1179,73 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
     task.await??;
     server_task.await??;
     drop(registration);
+    result
+}
+
+#[cfg(all(test, target_os = "macos", feature = "private-sparse"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires privileged macOS supplemental DNS registration"]
+async fn recovered_pair_resolves_through_the_macos_system_cache() -> Result<()> {
+    use anyhow::Context;
+    use porthub_network::policy::{Lookup, PairLease};
+    use tokio::time::{sleep, timeout, Duration};
+
+    async fn lookup(name: &str, ip: Ipv4Addr) -> bool {
+        tokio::net::lookup_host((name, 80)).await
+            .is_ok_and(|mut answers| answers.any(|answer| answer.ip() == ip))
+    }
+
+    let suffix = format!("phcheck-{}.test", uuid::Uuid::new_v4().simple());
+    let name = format!("other.{suffix}");
+    let own = Ipv4Addr::new(10, 234, 240, 2);
+    let ip = Ipv4Addr::new(10, 234, 240, 3);
+    let local = serde_json::json!({"id":"a","ip":own,"hostname":format!("self.{suffix}"),"instance":"a1","fingerprint":"local"});
+    let epoch = "a".repeat(64);
+    let expires = chrono::Utc::now() + chrono::Duration::seconds(180);
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "workspace":"test","self":"a","revision":1,"expires_at":expires,
+        "sparse":{"protocol":1,"epoch":epoch},"peers":[local],"grants":[]
+    }))?;
+    let lease: PairLease = serde_json::from_value(serde_json::json!({
+        "workspace":"test","self":"a","revision":1,"epoch":epoch,"expires_at":expires,"local":local,
+        "peer":{"id":"b","ip":ip,"hostname":name,"instance":"b1","fingerprint":"remote"},
+        "grants":[{"source":"a","destination":"b","protocol":"any","ports":[]}]
+    }))?;
+    let query = Lookup { kind: "name".into(), value: name.clone() };
+    let (handle, _control) = super::sparse::channel();
+    handle.update_base(&snapshot);
+    handle.installed(&query, lease.clone());
+    let dns = Server::bind(own).await?;
+    let port = dns.port()?;
+    let zone = dns.zone.clone();
+    {
+        let mut zone = zone.write().await;
+        zone.update(&snapshot)?;
+        zone.set_sparse(handle.clone());
+    }
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(dns.serve(stop.clone()));
+    let mut registration = Some(register(0, own, port, &[suffix]).await?);
+    let result: Result<()> = async {
+        timeout(Duration::from_secs(12), async {
+            while !lookup(&name, ip).await { sleep(Duration::from_millis(200)).await; }
+        }).await.context("initial system lookup did not reach the authorized peer")?;
+        handle.retire("b");
+        timeout(Duration::from_secs(25), async {
+            while lookup(&name, ip).await { sleep(Duration::from_millis(200)).await; }
+        }).await.context("system resolver did not observe the temporary private DNS failure")?;
+        ensure!(zone.read().await.failed_lookups.lock().unwrap().names.contains_key(&format!("{name}.")));
+        handle.installed(&query, lease);
+        ensure!(handle.dns_name_record(&name).is_some());
+        refresh_recovered_names(&zone, registration.as_ref().unwrap()).await;
+        timeout(Duration::from_secs(12), async {
+            while !lookup(&name, ip).await { sleep(Duration::from_millis(200)).await; }
+        }).await.context("system resolver retained a failure after the authorized address returned")?;
+        Ok(())
+    }.await;
+    let withdrawn = shutdown_registration(&mut registration).await;
+    stop.cancel();
+    server.await??;
+    withdrawn?;
     result
 }

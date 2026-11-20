@@ -898,12 +898,25 @@ mod io_tests {
                 // Keep an otherwise healthy control queue busy while the established
                 // UDP path silently drops every datagram in both directions.
                 tokio::time::timeout(Duration::from_secs(30), async {
-                    while left.state() == State::Ready {
+                    let mut saw_disconnect = false;
+                    loop {
+                        match left.state() {
+                            State::Connecting => saw_disconnect = true,
+                            State::Failed => break,
+                            State::Ready => {}
+                            State::Waiting | State::Closed => {
+                                anyhow::bail!("unexpected state after established path loss")
+                            }
+                        }
                         let _ = left.statistics().await;
                         tokio::task::yield_now().await;
                     }
-                }).await?;
-                ensure!(left.state() == State::Failed);
+                    ensure!(
+                        saw_disconnect,
+                        "unavailable path stayed ready until ICE failed"
+                    );
+                    anyhow::Ok(())
+                }).await??;
             }
             if fault == Fault::RetiredPermit {
                 let valid=Arc::new(AtomicBool::new(true));let check=valid.clone();
