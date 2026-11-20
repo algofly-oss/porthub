@@ -20,6 +20,18 @@ use turn_util::{Conn, Error as IoError, Result as IoResult};
 const SERVER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
 pub type Socket = Arc<dyn Conn + Send + Sync>;
 
+async fn connect_turn_stream(
+    url: &url::Url,
+    local: &[std::net::IpAddr],
+) -> Result<tokio::net::TcpStream> {
+    let stream = crate::underlay::connect(url, local).await?;
+    crate::configure_tcp(&stream);
+    // Each encrypted datagram can be smaller than a TCP segment. Let its peer
+    // receive it while earlier datagrams are still awaiting acknowledgements.
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
+}
+
 struct Transport {
     input: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
     output: mpsc::Sender<Vec<u8>>,
@@ -170,8 +182,7 @@ impl Allocation {
         let (mut websocket, _) = tokio::time::timeout(
             Duration::from_secs(5),
             async {
-                let stream = crate::underlay::connect(&url, local).await?;
-                crate::configure_tcp(&stream);
+                let stream = connect_turn_stream(&url, local).await?;
                 Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), connector).await?)
             },
         )
@@ -307,5 +318,24 @@ impl Allocation {
         if let Some(task) = task {
             let _ = task.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turn_datagrams_disable_nagle_on_bound_and_default_routes() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = url::Url::parse(&format!("wss://{}/relay", listener.local_addr()?))?;
+        let loopback = [std::net::IpAddr::from([127, 0, 0, 1])];
+        for sources in [&[][..], &loopback[..]] {
+            let stream = connect_turn_stream(&url, sources).await?;
+            let (_, peer) = listener.accept().await?;
+            assert_eq!(stream.local_addr()?, peer);
+            assert!(stream.nodelay()?);
+        }
+        Ok(())
     }
 }
