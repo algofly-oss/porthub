@@ -77,7 +77,8 @@ impl rustls::time_provider::TimeProvider for BootstrapClock {
 
 pub(crate) struct GatewayTime {
     endpoint: reqwest::Url,
-    client: reqwest::Client,
+    bootstrap_tls: rustls::ClientConfig,
+    outbound: crate::outbound::Settings,
     state: Mutex<State>,
     updates: tokio::sync::watch::Sender<Option<ClockSample>>,
 }
@@ -90,15 +91,10 @@ impl GatewayTime {
         let mut bootstrap = porthub_identity::pinned_client_config(pin)?;
         bootstrap.time_provider = std::sync::Arc::new(BootstrapClock);
         bootstrap.resumption = rustls::client::Resumption::disabled();
-        let client = reqwest::Client::builder()
-            .use_preconfigured_tls(bootstrap)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()?;
         Ok(Self {
             endpoint: url.join("api/gateway/clock")?,
-            client,
+            bootstrap_tls: bootstrap,
+            outbound: crate::outbound::Settings::from_env()?,
             state: Mutex::new(State::default()),
             updates: tokio::sync::watch::channel(None).0,
         })
@@ -128,6 +124,49 @@ impl GatewayTime {
         .with_no_client_auth())
     }
 
+    async fn request_time(&self, nonce: &str, attempt: u32) -> Result<reqwest::Response> {
+        let mut client = reqwest::Client::builder()
+            .use_preconfigured_tls(self.bootstrap_tls.clone())
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if self.outbound.interface.is_some() || self.outbound.source.is_some() {
+            let host = self
+                .endpoint
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("missing clock host"))?
+                .trim_matches(['[', ']']);
+            let port = self
+                .endpoint
+                .port_or_known_default()
+                .ok_or_else(|| anyhow::anyhow!("missing clock port"))?;
+            let destinations: Vec<_> = tokio::net::lookup_host((host, port))
+                .await?
+                .take(16)
+                .collect();
+            let routes = crate::outbound::discover(&self.outbound, &destinations).await?;
+            let routes =
+                crate::outbound::Selection::default().order(&routes, std::time::Instant::now());
+            ensure!(
+                !routes.is_empty(),
+                "no permitted route to the gateway clock"
+            );
+            let route = &routes[attempt as usize % routes.len()];
+            client = client
+                .local_address(route.source)
+                .resolve_to_addrs(host, &[route.destination]);
+            #[cfg(target_os = "macos")]
+            {
+                client = client.interface(&route.interface);
+            }
+        }
+        Ok(client
+            .build()?
+            .post(self.endpoint.clone())
+            .header("porthub-clock-nonce", nonce)
+            .send()
+            .await?)
+    }
+
     pub(crate) async fn recover(&self) -> Result<Duration> {
         let mut state = self.state.lock().await;
         let start = NativeClock.elapsed_since_boot()?;
@@ -135,14 +174,12 @@ impl GatewayTime {
             return Ok(cached);
         }
         let challenge = uuid::Uuid::new_v4();
+        let attempt = state.failures;
         state.begin(start, challenge.as_bytes()[0])?;
         let nonce = challenge.simple().to_string();
-        let reply = self
-            .client
-            .post(self.endpoint.clone())
-            .header("porthub-clock-nonce", &nonce)
-            .send()
-            .await?;
+        let reply =
+            tokio::time::timeout(Duration::from_secs(5), self.request_time(&nonce, attempt))
+                .await??;
         ensure!(
             reply.status() == reqwest::StatusCode::NO_CONTENT,
             "gateway clock unavailable"
@@ -250,7 +287,10 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
             url: origin.clone(),
             spki_sha256: "ab".repeat(32),
         })?;
-        assert!(ctl.request(reqwest::Method::GET, "probe", None, &[]).await.is_err());
+        assert!(ctl
+            .request(reqwest::Method::GET, "probe", None, &[])
+            .await
+            .is_err());
         let public = serde_json::from_value(serde_json::json!({
             "server": origin, "machine_id": "000000000000000000000002", "token": "x".repeat(32)
         }))?;
@@ -260,8 +300,12 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
             url: origin.clone(),
             spki_sha256: pin.clone(),
         })?;
-        assert_eq!(host.request(reqwest::Method::GET, "probe", None, &[]).await?.status,
-            StatusCode::NO_CONTENT);
+        assert_eq!(
+            host.request(reqwest::Method::GET, "probe", None, &[])
+                .await?
+                .status,
+            StatusCode::NO_CONTENT
+        );
         let recovered = GatewayTime::new(&origin, &pin)?;
         let cfg = recovered.tls_config(roots).await?;
         let now = cfg.time_provider.current_time().unwrap().as_secs();
@@ -351,6 +395,10 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
         .use_preconfigured_tls(clock.tls_config(rustls::RootCertStore::empty()).await?)
         .build()?;
     assert!(untrusted.get(&origin).send().await.is_err());
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let mut restricted = GatewayTime::new(&origin, &pin)?;
+    restricted.outbound.interface = Some("porthub-missing-clock-interface".into());
+    assert!(restricted.recover().await.is_err());
     assert_eq!(requests.load(Ordering::SeqCst), 1);
     let wrong = GatewayTime::new(&origin, &"ab".repeat(32))?;
     assert!(wrong.recover().await.is_err());
