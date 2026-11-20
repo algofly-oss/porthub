@@ -38,6 +38,9 @@ pub fn digest(value: &str) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
+    /// Account explicitly authorized by the local OS user to claim this fresh workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard_owner: Option<String>,
     pub name: String,
     /// Invitation expiry only; zero keeps invitations valid until session end.
     pub expires_at: i64,
@@ -139,6 +142,10 @@ impl HostHello {
                 && self.write_token != self.read_token,
             "terminal capabilities must be distinct"
         );
+        if let Some(owner) = &self.options.dashboard_owner {
+            ensure!(token(owner, 24) && self.options.access == Access::Web && !self.direct_transport,
+                "dashboard workspaces require an account and a brokered web connection");
+        }
         self.options.validate(now)
     }
 }
