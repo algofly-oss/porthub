@@ -32,11 +32,22 @@ impl ClockSample {
         let age = now.checked_sub(self.observed)?;
         (age < MAX_AGE).then(|| self.utc.checked_add(age)).flatten()
     }
+
+    fn validation_time(
+        &self,
+        elapsed: Option<Duration>,
+        wall: std::time::SystemTime,
+    ) -> Option<Duration> {
+        // Unattended systems may regain working time synchronization during an outage.
+        // After the sample expires, ordinary certificate validation can use that clock.
+        elapsed.and_then(|now| self.utc_at(now))
+            .or_else(|| wall.duration_since(std::time::UNIX_EPOCH).ok())
+    }
 }
 
 impl rustls::time_provider::TimeProvider for ClockSample {
     fn current_time(&self) -> Option<rustls::pki_types::UnixTime> {
-        self.utc_at(NativeClock.elapsed_since_boot().ok()?)
+        self.validation_time(NativeClock.elapsed_since_boot().ok(), std::time::SystemTime::now())
             .map(rustls::pki_types::UnixTime::since_unix_epoch)
     }
 }
@@ -218,6 +229,20 @@ impl GatewayTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expired_sample_returns_to_the_system_clock_for_certificate_validation() {
+        use std::time::UNIX_EPOCH;
+        let sample = ClockSample {
+            utc: Duration::from_secs(1_900_000_000),
+            observed: Duration::from_secs(300),
+        };
+        let wall = sample.utc + MAX_AGE + Duration::from_secs(20);
+        assert_eq!(sample.validation_time(Some(sample.observed), UNIX_EPOCH + wall), Some(sample.utc));
+        assert_eq!(sample.validation_time(Some(sample.observed + MAX_AGE), UNIX_EPOCH + wall), Some(wall));
+        assert_eq!(sample.validation_time(Some(sample.observed + MAX_AGE), UNIX_EPOCH - Duration::from_secs(1)), None);
+        assert_eq!(sample.utc_at(sample.observed + MAX_AGE), None);
+    }
+
     #[test]
     fn failed_recovery_backs_off_and_valid_time_advances_locally() {
         let mut state = State::default();
