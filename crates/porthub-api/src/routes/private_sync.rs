@@ -117,7 +117,7 @@ pub(crate) async fn active_matching(
         .filter_map(|p| p.get("machine_id").cloned())
         .collect();
     let machines:Vec<Document>=app.collection("machines").find(doc!{"_id":{"$in":ids},"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"private_owner_revoked":{"$ne":true}})
-        .projection(doc!{"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"name":1,"hostname":1,"enabled":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
+        .projection(doc!{"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"kind":1,"name":1,"hostname":1,"enabled":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
     let member_filter = if selected.is_some() {
         let owners: Vec<_> = peers.iter().filter_map(|p|p.get("owner_id").cloned()).collect();
         let owners = crate::account_delete::identity_aliases(&owners);
@@ -136,7 +136,7 @@ pub(crate) async fn active_matching(
         .into_iter()
         .map(|m| (store::id(m.get("_id")), m))
         .collect();
-    let peers = peers
+    let peers: Vec<Document> = peers
         .into_iter()
         .filter(|p| {
             valid.contains(&store::id(p.get("owner_id")))
@@ -145,7 +145,9 @@ pub(crate) async fn active_matching(
                     .is_some_and(|m| m.get("user_id") == p.get("owner_id"))
         })
         .collect();
-    Ok((peers, inventory))
+    let mut authorized=Vec::new();
+    for peer in peers { if super::virtual_hosts::parent_valid(app,&peer).await? { authorized.push(peer); } }
+    Ok((authorized, inventory))
 }
 static FINGERPRINTS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^a=fingerprint:sha-256 ([^\r\n]+)").unwrap());
@@ -192,6 +194,9 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     #[cfg(feature="private-sparse")]
     let peer=app.collection("private_peers").find_one(doc!{"_id":&input.peer_id,"workspace_id":peer.get("workspace_id"),"enabled":true,"credential_hash":&hash}).await?
         .ok_or_else(||forbidden("Private credential changed or was revoked while waiting"))?;
+    if peer.contains_key("virtual_parent") && (!super::virtual_hosts::parent_valid(&app,&peer).await? || input.virtual_host_provider || input.native_repair.is_some() || input.exit_pick.is_some() || input.exit_pair_protocol.is_some() || input.exit_ready || input.lan_exit || input.tor_exit || input.application_proxy || !input.lan_networks.is_empty()){
+        return Err(forbidden("Virtual provider unavailable or unsupported agent capability"));
+    }
     #[cfg(feature="private-sparse")]
     let admission=app.private_relay.begin_workspace_admission(&input.peer_id,&hash,&input.instance,&peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex())
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
@@ -228,7 +233,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         .get_object_id("workspace_id")
         .map_err(|_| forbidden("Machine or workspace membership is disabled"))?;
     let indexed=if cfg!(feature="private-sparse") && input.sparse.is_some()
-        && (input.exit_pair_protocol==Some(1)||!requires_complete_exit_snapshot(app,owner,&peer).await?) {
+        && (peer.contains_key("virtual_parent")||input.exit_pair_protocol==Some(1)||!requires_complete_exit_snapshot(app,owner,&peer).await?) {
         Some(crate::private_sparse::select(&app,owner,&peer,input.sparse.as_ref().expect("negotiated request")).await?)
     }else{None};
     let (mut peers,mut inventory)=if let Some(indexed)=&indexed{(indexed.peers.clone(),indexed.inventory.clone())}else{active(&app,owner).await?};
@@ -262,7 +267,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
+    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"virtual_host_provider":input.virtual_host_provider,"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
         "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
         .ok_or_else(||forbidden("Private credential revoked"))?;
     #[cfg(feature="private-sparse")]
@@ -333,10 +338,10 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         .try_collect()
         .await?
     };
-    let exit_definitions: Vec<Document> = app.collection("private_exit_nodes")
+    let exit_definitions: Vec<Document> = if peer.contains_key("virtual_parent"){Vec::new()}else{app.collection("private_exit_nodes")
         .find(doc! {"workspace_id":owner,"enabled":{"$ne":false}})
         .sort(doc! {"created_at":1,"_id":1})
-        .await?.try_collect().await?;
+        .await?.try_collect().await?};
     let exit_negotiated=input.exit_pair_protocol==Some(1)&&indexed.is_some();
     let own_exit_machine=inventory.get(&store::id(updated.get("machine_id"))).expect("active own machine");
     if cfg!(feature="private-sparse"){crate::private_exit_picker::publish(app,owner,&updated,own_exit_machine,&exit_definitions,exit_negotiated,input.exit_ready).await?;}
@@ -720,6 +725,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,
         "sparse_sequence":sparse_request.map(|r|r.sequence),"pair_responses":pair_responses,"control_fallback_urls":fallback,"poll_seconds":1});
+    if input.virtual_host_provider { response["virtual_hosts"]=json!(super::virtual_hosts::assignments(app,&updated,&input.token).await?); }
     if exit_negotiated{
         response["snapshot"]["sparse"]["exit_epoch"]=json!(exit_epoch);
         response["snapshot"]["sparse"]["selection_epoch"]=json!(selection_epoch);

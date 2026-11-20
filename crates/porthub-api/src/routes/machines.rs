@@ -163,7 +163,7 @@ async fn refresh_token(
     let user = auth::current_user(&app, &headers).await?;
     let id = object_id(&id, "Invalid machine id")?;
     let _guard = app.connection_lock.lock().await;
-    let filter = doc! {"_id":id,"user_id":user.get("_id")};
+    let filter = doc! {"_id":id,"user_id":user.get("_id"),"kind":{"$ne":"virtual_host"}};
     let previous = app
         .collection("machines")
         .find_one(filter.clone())
@@ -229,7 +229,7 @@ async fn request_update(
         .collect::<String>();
     let now = DateTime::now();
     let updated=app.collection("machines").find_one_and_update(
-        doc! {"_id":id,"user_id":user.get("_id"),"deletion_pending":{"$ne":true},"native_deletion":{"$exists":false}},
+        doc! {"_id":id,"user_id":user.get("_id"),"kind":{"$ne":"virtual_host"},"deletion_pending":{"$ne":true},"native_deletion":{"$exists":false}},
         doc! {"$set":{"client_update_target_version":&latest_client_version,"client_update_request_id":request,
             "client_update_requested_at":now,"updated_at":now}})
         .return_document(mongodb::options::ReturnDocument::After).await?

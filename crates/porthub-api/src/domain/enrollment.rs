@@ -185,6 +185,7 @@ pub fn preferences_value(value: serde_json::Value) -> ApiResult<(Network, String
 }
 
 pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
+    if machine.get_str("kind")==Ok("virtual_host"){return Ok(()); }
     let _network_guard = app.private_network_lock.lock().await;
     if machine.get_bool("private_owner_revoked").unwrap_or(false) {
         return Ok(());
