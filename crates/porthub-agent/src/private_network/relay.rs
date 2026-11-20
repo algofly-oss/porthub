@@ -56,7 +56,7 @@ pub struct PinnedRelay {
     pub(crate) url: String,
     pub(crate) spki_sha256: String,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Config {
     #[cfg(feature="private-sparse")]
     pub clock: Option<super::gateway_time::ClockSample>,
