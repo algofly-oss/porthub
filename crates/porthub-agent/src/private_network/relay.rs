@@ -600,6 +600,14 @@ const HEARTBEAT: HeartbeatTiming = HeartbeatTiming {
     response: Duration::from_secs(15),
 };
 
+impl HeartbeatTiming {
+    // Any failed lane reopens the whole relay. Spread the initial probes over
+    // one interval so a common outage need not wait for every lane to ping together.
+    fn first_ping(self, index: usize, lane_count: usize) -> Duration {
+        (self.ping * (index as u32 + 1)) / lane_count as u32
+    }
+}
+
 struct LaneProbe {
     nonce: [u8; 16],
     sequence: u64,
@@ -650,6 +658,7 @@ async fn serve_lanes_with_heartbeat<F, Fut>(
     let reading = cancel.child_token();
     let mut readers = tokio::task::JoinSet::new();
     let mut writers = futures_util::stream::FuturesUnordered::new();
+    let lane_count = connections.len();
     let probes=connections.iter().map(|_|LaneProbe::new()).collect::<Result<Vec<_>>>()?;
     for ((connection, input),probe) in connections.into_iter().zip(packets.iter_mut()).zip(probes) {
         let lane = connection.lane;
@@ -681,7 +690,8 @@ async fn serve_lanes_with_heartbeat<F, Fut>(
         // Each socket has its own writer. A full TCP send buffer on one lane
         // must not prevent the other lanes from making progress.
         let output = write_lane(
-            writer,input,control_rx,connection.batch,connection.prefixes,probe,timing,wait.clone(),
+            writer, input, control_rx, connection.batch, connection.prefixes, probe,
+            timing, timing.first_ping(lane, lane_count), wait.clone(),
         );
         writers.push(async move { (lane, output.await) });
     }
@@ -731,13 +741,14 @@ async fn write_lane<F, Fut>(
     prefixes: bool,
     mut probe: LaneProbe,
     timing: HeartbeatTiming,
+    first_ping: Duration,
     wait: F,
 ) -> Result<()>
 where
     F: Fn(Duration) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let mut timer = Box::pin(wait(timing.ping));
+    let mut timer = Box::pin(wait(first_ping));
     loop {
         // A Pong queued before resume cannot renew an already expired challenge.
         // The inner select gives ordinary traffic and peer control frames a fair turn.
@@ -781,6 +792,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_heartbeat_phases_use_the_connected_lane_count() {
+        for count in 1..=RELAY_LANES {
+            let probes: Vec<_> = (0..count).map(|lane| HEARTBEAT.first_ping(lane, count)).collect();
+            assert!(probes[0] > Duration::ZERO);
+            assert_eq!(probes.last(), Some(&HEARTBEAT.ping));
+            let largest_gap = HEARTBEAT.ping / count as u32 + Duration::from_nanos(1);
+            let mut previous = Duration::ZERO;
+            for delay in probes {
+                assert!(delay > previous && delay - previous <= largest_gap);
+                previous = delay;
+            }
+        }
+    }
 
     #[test]
     fn only_current_on_time_pong_retires_pending_probe() -> Result<()> {
@@ -948,7 +974,7 @@ mod tests {
         };
         let probe = LaneProbe::new()?;
         let writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            write_lane(sink,&mut data,controls,false,false,probe,HEARTBEAT,wait).await
+            write_lane(sink,&mut data,controls,false,false,probe,HEARTBEAT,HEARTBEAT.ping,wait).await
         }));
         let limit = Duration::from_secs(2);
         let (_, ping) = tokio::time::timeout(limit, alarms.recv()).await?.unwrap();
@@ -1032,7 +1058,7 @@ mod tests {
         let (sink,_)=client?.0.split();let mut server=server?;
         let (_pong_send,pongs)=mpsc::channel(1);let (_unused,replacement)=mpsc::channel(1);
         let mut input=std::mem::replace(&mut lanes[0],replacement);
-        let task=tokio::spawn(async move {write_lane(sink,&mut input,pongs,false,false,LaneProbe::new()?,HEARTBEAT,tokio::time::sleep).await});
+        let task=tokio::spawn(async move {write_lane(sink,&mut input,pongs,false,false,LaneProbe::new()?,HEARTBEAT,HEARTBEAT.ping,tokio::time::sleep).await});
         assert!(tokio::time::timeout(Duration::from_millis(50),server.next()).await.is_err());
         sender.send("p",&record()[2..])?;
         let frame=tokio::time::timeout(Duration::from_secs(1),server.next()).await?.unwrap()?;
