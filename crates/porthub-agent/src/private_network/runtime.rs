@@ -476,11 +476,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut native_stream_safe=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
-    let (dns_target,dns_health) = {
+    let (dns_target,dns_health,dns_write) = {
         let (target,input)=watch::channel(None);
         let (result,health)=watch::channel(None);
-        tasks.spawn(crate::private_dns_setup::monitor(input,result,work.clone()));
-        (target,health)
+        let write = Arc::new(tokio::sync::Mutex::new(()));
+        tasks.spawn(crate::private_dns_setup::monitor(input,result,write.clone(),work.clone()));
+        (target,health,write)
     };
     let mut exit_route = None;
     let mut sparse_exit_intent:Option<porthub_network::policy::ExitIntent>=None;
@@ -764,10 +765,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
+                    #[cfg(target_os="linux")]
+                    let _dns_guard = dns_write.lock().await;
                     if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await.context(PrivateStage::DnsRegistration)?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
-                        let next=Some((own.hostname.clone(),own.ip));
+                        let next=Some(crate::private_dns_setup::LookupTarget {
+                            hostname: own.hostname.clone(),
+                            address: own.ip,
+                            link: (!isolated).then(||crate::private_dns_setup::LinkDns { index:tun.index,port,suffixes:suffixes.clone() }),
+                        });
                         if *previous==next {false} else {*previous=next;true}
                     });}
                     registered_suffixes=suffixes;

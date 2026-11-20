@@ -523,6 +523,18 @@ pub async fn register(
     port: u16,
     suffixes: &[String],
 ) -> Result<Registration> {
+    configure_linux_link(index, own, port, suffixes, true).await?;
+    Ok(Registration::default())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn configure_linux_link(
+    index: u32,
+    own: Ipv4Addr,
+    port: u16,
+    suffixes: &[String],
+    flush_caches: bool,
+) -> Result<()> {
     let connection = zbus::Connection::system()
         .await
         .map_err(|_| anyhow::anyhow!("private DNS system bus unavailable"))?;
@@ -553,10 +565,12 @@ pub async fn register(
     proxy
         .call::<_, _, ()>("SetLinkDefaultRoute", &(index as i32, false))
         .await?;
-    // A removed block or changed address should not remain in the system
-    // resolver cache. Registration is refreshed only when policy changes.
-    let _ = proxy.call::<_, _, ()>("FlushCaches", &()).await;
-    Ok(Registration::default())
+    // Policy changes invalidate old answers. Repairing lost link settings
+    // keeps the caches of other links intact.
+    if flush_caches {
+        let _ = proxy.call::<_, _, ()>("FlushCaches", &()).await;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -984,4 +998,93 @@ mod tcp_tests {
         assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buffer)).await??, 0);
         Ok(())
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[tokio::test]
+#[ignore = "requires a disposable network namespace with a private systemd-resolved and phtest0"]
+async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()> {
+    use crate::private_dns_setup::{monitor, LinkDns, LookupTarget};
+    use std::time::Duration;
+    use tokio::sync::{watch, Mutex};
+    ensure!(
+        std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
+            && std::path::Path::new("/.dockerenv").is_file(),
+        "owned namespace required"
+    );
+    let index = std::fs::read_to_string("/sys/class/net/phtest0/ifindex")?
+        .trim()
+        .parse()?;
+    let own: Ipv4Addr = "10.219.94.2".parse()?;
+    let hostname = "fixture-recovery.phub";
+    let server = Server::bind(own).await?;
+    let port = server.port()?;
+    {
+        let mut zone = server.zone.write().await;
+        zone.suffixes.insert("phub.".into());
+        zone.records.insert(format!("{hostname}."), own);
+    }
+    let cancel = CancellationToken::new();
+    let server_task = tokio::spawn(server.serve(cancel.clone()));
+    let suffixes = vec!["phub".to_owned()];
+    let registration = register(index, own, port, &suffixes).await?;
+    let target = LookupTarget {
+        hostname: hostname.into(),
+        address: own,
+        link: Some(LinkDns {
+            index,
+            port,
+            suffixes,
+        }),
+    };
+    let (_target, input) = watch::channel(Some(target));
+    let (report, mut health) = watch::channel(None);
+    let task = tokio::spawn(monitor(
+        input,
+        report,
+        Arc::new(Mutex::new(())),
+        cancel.clone(),
+    ));
+    let result = async {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            health.wait_for(|v| *v == Some(true)),
+        )
+        .await??;
+        ensure!(tokio::process::Command::new("resolvectl")
+            .args(["revert", "phtest0"])
+            .status()
+            .await?
+            .success());
+        let broken = tokio::process::Command::new("getent")
+            .args(["ahostsv4", hostname])
+            .output()
+            .await?;
+        ensure!(!broken.status.success(), "fixture did not lose system DNS");
+        // Observe the failed libc probe, then a positive readback from the repaired link.
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            health.wait_for(|v| *v == Some(false)),
+        )
+        .await??;
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            health.wait_for(|v| *v == Some(true)),
+        )
+        .await??;
+        let answer = tokio::process::Command::new("getent")
+            .args(["ahostsv4", hostname])
+            .output()
+            .await?;
+        ensure!(
+            answer.status.success() && String::from_utf8(answer.stdout)?.contains(&own.to_string())
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    cancel.cancel();
+    task.await??;
+    server_task.await??;
+    drop(registration);
+    result
 }
