@@ -56,7 +56,7 @@ export default function Traffic({ active = true }) {
     <PageHeader title="Traffic Explorer" />
     <div className="toolbar"><div className="flex flex-wrap items-center gap-2">
       <div className="min-w-0 basis-full lg:flex-1 lg:basis-48"><SearchField label="Search traffic" value={query} onChange={setQuery} placeholder="Search ports…" /></div>
-      <InventorySelect kind="machines" className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"}]} />
+      <InventorySelect kind="machines" filters={{agents_only:true}} className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"}]} />
       <SearchSelect className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Sort traffic" value={sort} onChange={setSort} options={[{value:"traffic",label:"Most traffic"},{value:"blocked",label:"Most blocked"},{value:"name",label:"Service A–Z"}]} />
       <SearchSelect className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic window" value={seconds} onChange={value=>setSeconds(Number(value))} options={[{value:60,label:"Last 60 seconds"},{value:120,label:"Last 2 minutes"}]} />
       <div className="ml-auto flex shrink-0 items-center gap-2">

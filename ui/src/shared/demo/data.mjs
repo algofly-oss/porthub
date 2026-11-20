@@ -4,6 +4,7 @@ import { demoAccessInventory } from "./access-inventory.mjs";
 import { searchScore } from "../utils/search.mjs";
 import { normalizeTrafficSamples } from "../utils/traffic.mjs";
 import { demoInventory } from "./inventory.mjs";
+import { demoVirtualHosts, demoVirtualMachines } from "./virtual-hosts.mjs";
 import { demoAccess } from "./access.mjs";
 const id = value => value.toString(16).padStart(24, "0");
 const stamp = () => new Date().toISOString();
@@ -72,13 +73,19 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
     return {...activity,data,routes:recent ? state.proxies.filter(p=>data.some(m=>m.route_id===p._id)).map(p=>({_id:p._id,name:p.name,hosts:p.hosts,entry_points:p.entry_points,connection:p.connection})) : []};
   }
   if(path.startsWith("/inventory/access-"))return demoAccessInventory(state,path.split("access-").pop(),Object.fromEntries(url.searchParams),id);
-  if(path.startsWith("/inventory/"))return demoInventory(state,path.split("/").pop(),Object.fromEntries(url.searchParams));
+  if(path.startsWith("/inventory/")) {
+    const kind=path.split("/").pop();
+    const inventoryState=kind==="machines" && url.searchParams.get("agents_only")!=="true" ? {...state,machines:[...state.machines,...demoVirtualMachines(state)]} : state;
+    return demoInventory(inventoryState,kind,Object.fromEntries(url.searchParams));
+  }
   const read = method === "get";
   if (path === "/images") {
     if (read) return { images: [] };
     throw new Error("Image hosting requires a connected PortHub account. Exit demo to upload.");
   }
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
+  const virtual = path.match(/^\/machines\/([^/]+)\/virtual-hosts(?:\/([^/]+))?$/);
+  if (virtual) return demoVirtualHosts(state,method,virtual[1],virtual[2],body,id);
   if (path.startsWith("/access/")) return demoAccess(state,method,path,body,id);
   if (path === "/auth/me") return state.user;
   if (path === "/traffic-routes/health") {

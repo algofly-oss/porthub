@@ -55,15 +55,23 @@ async fn members(app: &App, owner: ObjectId) -> ApiResult<(Vec<Bson>, HashMap<St
     }
     Ok((ids, roles))
 }
-fn entity_pipeline(kind: &str, owner: ObjectId, users: &[Bson]) -> Vec<Document> {
-    let filter = if kind == "user" {
+fn entity_pipeline(
+    kind: &str,
+    owner: ObjectId,
+    users: &[Bson],
+    agents_only: bool,
+) -> Vec<Document> {
+    let mut filter = if kind == "user" {
         doc! {"_id":{"$in":users}}
     } else {
         doc! {"user_id":owner,"deletion_pending":{"$ne":true}}
     };
+    if kind == "machine" && agents_only {
+        filter.insert("kind", doc! {"$ne":"virtual_host"});
+    }
     vec![
         doc! {"$match":filter},
-        doc! {"$project":{"name":1,"username":1,"email":1}},
+        doc! {"$project":{"name":1,"username":1,"email":1,"virtual_parent":1,"target_ip":1,"via":1}},
         doc! {"$set":{"_id":{"$concat":[format!("{kind}:"),{"$toString":"$_id"}]},"kind":kind,"label":{"$concat":[format!("{} · ",match kind {"machine"=>"Machine","group"=>"Group",_=>"Person"}),{"$ifNull":["$name","$username"]}]}}},
     ]
 }
@@ -148,6 +156,15 @@ pub async fn page(
     };
     if kind == "machines" {
         filter.insert("deletion_pending", doc! {"$ne":true});
+        if p.agents_only {
+            filter.insert("kind", doc! {"$ne":"virtual_host"});
+        }
+    }
+    if kind == "peers" {
+        filter.insert("virtual_published", doc! {"$ne":false});
+        if p.agents_only {
+            filter.insert("virtual_parent", doc! {"$exists":false});
+        }
     }
     if kind == "invitations" {
         if !["owner", "admin"].contains(&role.as_str()) {
@@ -186,9 +203,9 @@ pub async fn page(
     }
     let mut stages = vec![doc! {"$match":filter}];
     if kind == "entities" {
-        stages = entity_pipeline("user", owner, &users);
+        stages = entity_pipeline("user", owner, &users, p.agents_only);
         for (collection, kind) in [("machines", "machine"), ("machine_groups", "group")] {
-            stages.push(doc!{"$unionWith":{"coll":collection,"pipeline":entity_pipeline(kind,owner,&users)}});
+            stages.push(doc!{"$unionWith":{"coll":collection,"pipeline":entity_pipeline(kind,owner,&users,p.agents_only)}});
         }
         if !p.entity_types.is_empty() {
             let types = p.entity_types.split(',').collect::<Vec<_>>();
@@ -259,6 +276,9 @@ pub async fn page(
         doc! {"$skip":((p.page-1)*p.page_size) as i64},
         doc! {"$limit":p.page_size as i64},
     ];
+    if ["entities", "machines", "peers"].contains(&kind) && !p.agents_only {
+        data.push(inventory::serving_machine_lookup(Bson::ObjectId(owner)));
+    }
     if kind == "books" {
         data.push(doc! {"$lookup":{"from":"machine_groups","let":{"group":"$group_id"},"pipeline":[{"$match":{"user_id":owner,"$expr":{"$eq":[{"$toString":"$_id"},"$$group"]}}},{"$project":{"name":1}}],"as":"_organising_group"}});
     }
@@ -453,6 +473,11 @@ pub async fn page(
             }
             _ => json!({"_id":id}),
         };
+        inventory::describe_virtual(&app, &mut row, record, inventory::joined_provider(record));
+        if kind == "peers" && record.contains_key("virtual_parent") {
+            row["online"] = Value::Null;
+            row["installed"] = Value::Null;
+        }
         if !p.membership.is_empty() && ["machines", "people"].contains(&kind) {
             let group = membership_group
                 .as_ref()

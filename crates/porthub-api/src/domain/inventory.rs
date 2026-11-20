@@ -1,7 +1,7 @@
 //! Serialization shared by inventory routes, realtime updates and operator
 //! reports. Raw Mongo records (including private credentials) are never returned.
 use crate::{App, store};
-use mongodb::bson::{Bson, DateTime, Document, oid::ObjectId};
+use mongodb::bson::{Bson, DateTime, Document, doc, oid::ObjectId};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -52,6 +52,9 @@ pub fn status_at(app: &App, machine: &Document, now: DateTime) -> &'static str {
     if machine.get_bool("enabled") == Ok(false) {
         return "disabled";
     }
+    if store::string(machine, "kind") == "virtual_host" {
+        return "unknown";
+    }
     let seen = machine
         .get_datetime("last_seen_at")
         .map(|date| date.timestamp_millis())
@@ -70,7 +73,46 @@ pub fn status_at(app: &App, machine: &Document, now: DateTime) -> &'static str {
     }
 }
 
+/// Resolve serving machines after pagination. Only workspace-local display and status fields are joined.
+pub fn serving_machine_lookup(owner: Bson) -> Document {
+    doc! {"$lookup":{"from":"machines","localField":"virtual_parent","foreignField":"_id",
+    "pipeline":[{"$match":{"user_id":owner,"deletion_pending":{"$ne":true}}},
+                {"$project":{"name":1,"last_seen_at":1,"enabled":1,"auth_required":1}}],"as":"_provider"}}
+}
+
+pub fn describe_virtual(
+    app: &App,
+    row: &mut Value,
+    record: &Document,
+    provider: Option<&Document>,
+) {
+    let Ok(parent) = record.get_object_id("virtual_parent") else {
+        return;
+    };
+    let stored = record.get_document("via").ok();
+    let mut via = json!({"id":parent.to_hex(),"name":provider.or(stored).map(|d|store::string(d,"name")).unwrap_or("")});
+    if let Some(machine) = provider {
+        via["online"] = json!(status(app, machine) == "online");
+    }
+    if row["kind"] != "machine" {
+        row["kind"] = json!("virtual_host");
+    }
+    row["via"] = via;
+    row["target_ip"] = store::field(record, "target_ip");
+}
+
+pub fn joined_provider(record: &Document) -> Option<&Document> {
+    record.get_array("_provider").ok()?.first()?.as_document()
+}
+
 pub fn machine(app: &App, machine: &Document) -> Value {
+    if store::string(machine, "kind") == "virtual_host" {
+        let mut row = json!({"_id":store::id(machine.get("_id")),"name":store::field(machine,"name"),
+            "group_ids":group_ids(machine).iter().map(|id|id.to_hex()).collect::<Vec<_>>(),
+            "enabled":default_field(machine,"enabled",json!(true)),"connection_status":"unknown"});
+        describe_virtual(app, &mut row, machine, joined_provider(machine));
+        return row;
+    }
     let status = status(app, machine);
     let latest_client_version = app.client_version();
     let version = store::string(machine, "client_version").trim();

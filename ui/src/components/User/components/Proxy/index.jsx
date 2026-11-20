@@ -167,7 +167,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
         {label:"Tag",control:<InventorySelect kind="proxy-tags" label="Filter proxy tag" value={tag} onChange={setTag} selected={tag} extraOptions={[{value:"all",label:"All tags"}]} />},
         {label:"Machine group",advanced:true,control:<InventorySelect kind="groups" label="Filter inherited machine group" value={machineGroup} onChange={setMachineGroup} extraOptions={[{value:"all",label:"All machine groups"}]} />},
         {label:"Sort proxies",control:<SearchSelect label="Sort proxies" value={sort} onChange={setSort} options={[...INVENTORY_SORT_OPTIONS,{value:"updated",label:"Recently updated"},{value:"status",label:"Enabled first"}]} />},
-        {label:"Machine",advanced:true,control:<InventorySelect kind="machines" label="Filter proxy machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"},{value:"manual",label:"Standalone URLs"}]} />},
+        {label:"Machine",advanced:true,control:<InventorySelect kind="machines" filters={{agents_only:true}} label="Filter proxy machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"},{value:"manual",label:"Standalone URLs"}]} />},
         {label:"Group rows",advanced:true,control:<SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} />},
       ]}
       primaryActions={createButton}

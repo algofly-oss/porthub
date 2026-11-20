@@ -375,3 +375,38 @@ async fn aggregate_delta_bases_correct_older_buckets_and_cannot_cross_scopes() -
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn virtual_hosts_are_distinct_machine_identities_with_provider_status() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result: Result<()> = async {
+        let (owner, cookie) = case.user("virtual-inventory@example.invalid", "user").await?;
+        let provider = ObjectId::new();
+        let host = ObjectId::new();
+        let data = case.app.collection("machines");
+        data.insert_one(doc!{"_id":provider,"user_id":owner,"name":"luna-current","enabled":true,"last_seen_at":DateTime::now()}).await?;
+        data.insert_one(doc!{"_id":host,"user_id":owner,"name":"miro-via-luna","kind":"virtual_host","virtual_parent":provider,"via":{"id":provider.to_hex(),"name":"luna-old"},"target_ip":"192.168.1.57"}).await?;
+        case.app.collection("private_peers").insert_one(doc!{"_id":format!("{owner}:{host}"),"workspace_id":owner,"owner_id":owner,"machine_id":host,"virtual_parent":provider,"target_ip":"192.168.1.57","hostname":"miro-via-luna","ip":"10.203.0.12","enabled":true,"virtual_published":true}).await?;
+        for path in ["/api/inventory/machines","/api/machines/list","/api/inventory/access-machines","/api/inventory/access-entities","/api/inventory/access-peers","/api/access/snapshot"] {
+            let response = case.status("GET", path,&cookie,json!(null),StatusCode::OK).await?;
+            let rows = if path.ends_with("/snapshot") {&response["private_peers"]} else {&response["data"]};
+            let host_row = rows.as_array().unwrap().iter().find(|r|r["target_ip"]=="192.168.1.57").unwrap_or_else(||panic!("Missing virtual host in {path}: {rows}"));
+            ensure!(host_row["via"]["name"]=="luna-current" && host_row["via"]["online"]==true,"{path}: {host_row}");
+            if path.ends_with("entities") {
+                ensure!(host_row["kind"]=="machine" && host_row["_id"]==format!("machine:{host}"));
+            } else {
+                ensure!(host_row["kind"]=="virtual_host");
+            }
+            if path.ends_with("peers") || path.ends_with("snapshot") {ensure!(host_row["online"].is_null());}
+        }
+        for endpoint in ["machines","access-machines","access-entities","access-peers"] {
+            let path=format!("/api/inventory/{endpoint}?agents_only=true&q=miro-via-luna");
+            let filtered=case.status("GET",&path,&cookie,json!(null),StatusCode::OK).await?;
+            ensure!(filtered["pagination"]["total"]==0,"{endpoint} returned virtual machine as an agent");
+        }
+        Ok(())
+    }.await;
+    case.db.drop().await?;
+    result
+}

@@ -382,10 +382,17 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
             .or_default()
             .push(peer);
     }
+    let providers: HashMap<_, _> = machines
+        .iter()
+        .filter_map(|m| Some((m.get_object_id("_id").ok()?, m)))
+        .collect();
     let data: Vec<Value> = machines
         .iter()
         .map(|machine| {
             let mut value = inventory::machine(&app, machine);
+            if let Ok(id) = machine.get_object_id("virtual_parent") {
+                inventory::describe_virtual(&app, &mut value, machine, providers.get(&id).copied());
+            }
             let ips = if machine.get_bool("private_owner_revoked").unwrap_or(false) {
                 Vec::new()
             } else {
