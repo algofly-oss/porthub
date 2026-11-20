@@ -128,6 +128,12 @@ impl Allocation {
     pub async fn connect_bound(
         url: &str, username: &str, password: &str, allow_plaintext_origin: bool, local: &[std::net::IpAddr],
     ) -> Result<Self> {
+        Self::connect_with_pin(url, username, password, allow_plaintext_origin, local, None).await
+    }
+    pub async fn connect_with_pin(
+        url: &str, username: &str, password: &str, allow_plaintext_origin: bool,
+        local: &[std::net::IpAddr], pin: Option<&str>,
+    ) -> Result<Self> {
         let url = url::Url::parse(url).map_err(|_| anyhow::anyhow!("invalid private relay URL"))?;
         ensure!(
             url.scheme() == "wss" || (url.scheme() == "ws" && allow_plaintext_origin),
@@ -148,6 +154,14 @@ impl Allocation {
                 && password.len() <= 256,
             "invalid private relay credential"
         );
+        let connector = match pin {
+            Some(pin) => {
+                ensure!(url.scheme() == "wss", "a pinned TURN relay requires TLS");
+                let config = porthub_identity::pinned_client_config(pin)?;
+                Some(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+            }
+            None => None,
+        };
         let config = WebSocketConfig::default()
             .read_buffer_size(8192)
             .write_buffer_size(8192)
@@ -158,7 +172,7 @@ impl Allocation {
             async {
                 let stream = crate::underlay::connect(&url, local).await?;
                 crate::configure_tcp(&stream);
-                Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), None).await?)
+                Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), connector).await?)
             },
         )
         .await
