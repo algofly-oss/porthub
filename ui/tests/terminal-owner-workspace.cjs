@@ -43,6 +43,20 @@ async function exercise() {
     await concurrent.goto(dashboard);
     await concurrent.getByRole("button",{name:"amberotter",exact:true}).click();
     await output(concurrent,"porthub-test$");
+    const recovery = await page.evaluate(({machine,session})=>JSON.parse(sessionStorage.getItem(`porthub:terminal:owner:${machine}:${session}`)).token,{machine,session});
+    async function testRecovery(route) {
+      return concurrent.evaluate(({route,recovery})=>new Promise((resolve,reject)=>{
+        const url = new URL(route, location.origin);
+        url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(url);
+        const timer = setTimeout(()=>{socket.close();reject(Error("missing recovery admission result"));},5000);
+        socket.onopen = ()=>socket.send(JSON.stringify({resume_token:recovery,cols:80,rows:24}));
+        socket.onmessage = ({data})=>{const result=JSON.parse(data);clearTimeout(timer);socket.close();resolve(result.type);};
+        socket.onerror = ()=>{clearTimeout(timer);resolve("denied");};
+      }),{route,recovery});
+    }
+    assert.equal(await testRecovery("/api/terminal/join"),"closed","dashboard recovery cannot become an anonymous credential");
+    assert.equal(await testRecovery(`${path}/${session}/join`),"closed","another login cannot take over this participant");
     await shell(page).focus();
     await page.keyboard.type("VALUE=shared");
     await output(concurrent,"VALUE=shared");
@@ -95,7 +109,15 @@ async function exercise() {
     await tab.getByText("New invitation joins blocked",{exact:true}).waitFor();
     const stale = await foreign.request.post(origin+"/api/terminal/info",{data:{token:new URL(writeLink).hash.slice(1)}});
     assert.equal(stale.ok(),false);
+    const signedOut = await second.request.post(origin+"/api/auth/signout",{headers:{Origin:origin},data:{}});
+    assert.ok(signedOut.ok(),"sign out the second authorized login");
+    await shell(concurrent).focus();
+    await concurrent.keyboard.type("REVOKED_INPUT");
     await shell(tab).focus();
+    await tab.keyboard.type("echo OWNER_LIVE");
+    await tab.keyboard.press("Enter");
+    await output(tab,"OWNER_LIVE");
+    assert.equal((await tab.locator(".xterm-rows").innerText()).includes("REVOKED_INPUT"),false);
     await tab.keyboard.press("Control+d");
     try { await tab.getByRole("button",{name:"Reconnect",exact:true}).waitFor({timeout:15000}); }
     catch (error) {
@@ -103,7 +125,7 @@ async function exercise() {
         (await first.request.get(origin+path+"/"+session)).status());
       throw error;
     }
-    console.log("PASS dashboard workspace claim, two authorized browser logins, foreign-account and Origin denial, shared pre-Enter keystrokes, dedicated-tab reattach and shell exit");
+    console.log("PASS dashboard workspace claim, two authorized browser logins, foreign-account and Origin denial, login-bound recovery, owner-issued read-only and interactive guest links, shared pre-Enter keystrokes, dedicated-tab reattach, logout revocation and shell exit");
   } finally { await browser.close(); }
 }
 exercise().catch(error=>{console.error(error);process.exitCode=1;});

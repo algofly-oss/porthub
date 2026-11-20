@@ -141,9 +141,10 @@ async fn apply(
                 return Ok(());
             }
             let state = manager.state(spec).await?;
-            if state.active {
+            if state.installed {
                 manager.stop(spec).await?;
             }
+            #[cfg(target_os = "linux")]
             manager.disable(spec).await?;
             std::fs::remove_file(&spec.unit)?;
             manager.reload().await?;
@@ -159,17 +160,18 @@ async fn apply(
                 if !state.active {
                     manager.start(spec).await?;
                 }
-                return Ok(());
+                return started(manager, spec).await;
             }
             super::atomic(&spec.unit, bytes, true)?;
             let result = async {
                 manager.reload().await?;
                 manager.enable(spec).await?;
-                manager.start(spec).await
+                manager.start(spec).await?;
+                started(manager, spec).await
             }
             .await;
             if let Err(error) = result {
-                if manager.state(spec).await.is_ok_and(|state| state.active) {
+                if manager.state(spec).await.is_ok_and(|state| state.installed) {
                     manager.stop(spec).await?;
                 }
                 manager
@@ -186,6 +188,19 @@ async fn apply(
     Ok(())
 }
 
+async fn started(manager: &dyn Manager, spec: &Spec) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state = manager.state(spec).await?;
+            if state.enabled && state.active {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    })
+    .await
+    .context("the dashboard shell service did not start")?
+}
 #[cfg(test)]
 mod tests {
     use super::*;
