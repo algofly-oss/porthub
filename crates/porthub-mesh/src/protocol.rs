@@ -723,6 +723,17 @@ impl Peer {
     pub fn packet(&mut self) -> Option<Bytes> {
         self.packets.pop_front()
     }
+    pub(crate) fn selected_host_pair(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
+        use rtc_ice::candidate::CandidateType::Host;
+        let (local, remote) = self.ice.get_selected_candidate_pair()?;
+        if local.candidate_type() != Host || remote.candidate_type() != Host {
+            return None;
+        }
+        match (local.base_addr().ip(), remote.addr().ip()) {
+            (std::net::IpAddr::V4(local), std::net::IpAddr::V4(remote)) => Some((local, remote)),
+            _ => None,
+        }
+    }
     pub fn is_relay(&self) -> bool {
         self.ice
             .get_selected_candidate_pair()

@@ -273,5 +273,6 @@ async fn remove_member(
             doc! {"$set":{"revoked_at":DateTime::now()}},
         )
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"msg":"Member removed"})))
 }

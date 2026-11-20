@@ -147,7 +147,9 @@ impl Zone {
         {
             if let Some(ip) = self.records.get(&name) {
                 let ttl=self.sparse.as_ref().map(|handle|handle.authority_ttl()).unwrap_or(Some(self.ttl.max(1)));
-                if let Some(ttl)=ttl {reply.add_answer(Record::from_rdata(q.name().clone(), self.ttl.max(1).min(ttl), RData::A(A(*ip))));}
+                // Keep the lease in the agent. Applications should ask the local
+                // resolver again after an access or private-name change.
+                if ttl.is_some() {reply.add_answer(Record::from_rdata(q.name().clone(), 0, RData::A(A(*ip))));}
                 else {reply.metadata.response_code=ResponseCode::ServFail;}
             }
         }
@@ -937,7 +939,7 @@ mod tcp_tests {
             assert_eq!(answer.answers.len(), usize::from(ty == RecordType::A));
             if let Some(record) = answer.answers.first() {
                 assert_eq!(&record.data, &RData::A(A("10.203.0.3".parse()?)));
-                assert!((1..=5).contains(&record.ttl));
+                assert_eq!(record.ttl, 0);
             }
         }
         cancel.cancel();

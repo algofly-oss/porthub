@@ -57,6 +57,7 @@ async fn create(
     }
     let id = ObjectId::new();
     app.collection("machine_groups").insert_one(doc!{"_id":id,"user_id":owner,"name":name,"user_ids":[],"sort_order":0,"created_at":DateTime::now()}).await?;
+    app.private_changes.changed(owner);
     Ok(Json(
         json!({"data":{"_id":id.to_hex(),"name":name,"user_ids":[]}}),
     ))
@@ -186,5 +187,6 @@ async fn members(
             doc! {"$set":{"user_ids":users,"updated_at":DateTime::now()}},
         )
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"msg":"Group members saved"})))
 }

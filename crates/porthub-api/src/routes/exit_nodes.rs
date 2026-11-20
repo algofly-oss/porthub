@@ -361,6 +361,7 @@ async fn create(
     app.collection("private_exit_nodes")
         .insert_one(&route)
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"data":serialize(&route)})))
 }
 
@@ -398,6 +399,7 @@ async fn update(
     app.collection("private_exit_nodes")
         .replace_one(doc! {"_id":route_id,"workspace_id":owner_id}, &candidate)
         .await?;
+    app.private_changes.changed(owner);
     Ok(Json(json!({"data":serialize(&candidate)})))
 }
 
@@ -416,6 +418,7 @@ async fn delete(
     if result.deleted_count == 0 {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"));
     }
+    app.private_changes.changed(owner);
     Ok(Json(json!({"msg":"Exit node deleted"})))
 }
 

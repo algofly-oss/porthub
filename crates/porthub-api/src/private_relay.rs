@@ -496,6 +496,14 @@ impl Hub {
         let now = Instant::now();
         hub.allowed_pair(source, target, now)
     }
+    pub(crate) fn change_workspace(&self, id: &str, hash: &str, instance: &str) -> Option<mongodb::bson::oid::ObjectId> {
+        let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let lease = hub.leases.get(id)?;
+        if lease.expires <= Instant::now() || lease.credential_hash != hash || lease.instance != instance { return None; }
+        let (workspace, generation) = lease.workspace.as_ref()?;
+        if hub.workspace_generations.get(workspace) != Some(&(*generation, false)) { return None; }
+        mongodb::bson::oid::ObjectId::parse_str(workspace).ok()
+    }
     fn authorized(&self, id: &str, hash: &str, instance: &str) -> bool {
         self.0
             .lock()

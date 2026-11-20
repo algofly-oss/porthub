@@ -168,6 +168,7 @@ async fn enroll(
         headers: &headers,
         query: &empty,
     };
+    app.private_changes.changed(owner);
     let uri = enrollment_ticket::link(&view.public_base(&app, &machine), &short)?;
     let (machines, peers) = enrollment::names(&app, owner).await?;
     let names = private_names::assign(&machines, &peers);
@@ -223,6 +224,7 @@ async fn bootstrap(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiRes
     if result.modified_count != 1 {
         return Err(conflict("Enrollment was already completed or superseded"));
     }
+    if let Ok(owner)=peer.get_object_id("workspace_id"){app.private_changes.changed(owner);}
     Ok(([(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer")],Json(json!({"peer_id":store::field(&peer,"_id"),"token":credential,"workspace":store::field(&peer,"workspace_id"),"clock_origin":crate::gateway_origin::clock_origin(&app)}))).into_response())
 }
 async fn rename(
@@ -276,5 +278,6 @@ async fn rename(
     }
     let (machines, peers) = enrollment::names(&app, owner).await?;
     let names = private_names::assign(&machines, &peers);
+    app.private_changes.changed(owner);
     Ok(Json(json!({"hostname":names.primary[&id]})))
 }

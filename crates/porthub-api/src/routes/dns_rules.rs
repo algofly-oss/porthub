@@ -146,6 +146,7 @@ async fn save(
             .map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
         app.collection("private_dns_rules").update_one(doc! {"_id":&id},doc! {"$set":{"workspace_id":owner,"machine_id":machine_id,"rules":rules,"updated_at":DateTime::now()}}).upsert(true).await?;
     }
+    app.private_changes.changed(owner);
     Ok(Json(
         json!({"data":{"machine_id":machine_id.to_hex(),"rules":rules}}),
     ))

@@ -85,13 +85,14 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
     let _guard = stop.clone().drop_guard();
     let mut tasks = JoinSet::new();
     let result=timeout(Duration::from_secs(if idle{90}else{45}),async {
-        let(owner,_)=case.user("sparse-runtime@test.invalid","user").await?;
+        let(owner,cookie)=case.user("sparse-runtime@test.invalid","user").await?;
         let mut ids=Vec::new();let mut machines=Vec::new();let mut peers=Vec::new();
         for i in 0..4097u32 {
             let machine=ObjectId::new();let id=format!("{owner}:{machine}");
             let ip=if i==4096 {Ipv4Addr::new(10,235,0,1)}else{Ipv4Addr::from(u32::from(Ipv4Addr::new(10,234,0,1))+i)};
             machines.push(doc!{"_id":machine,"user_id":owner,"name":format!("Private runtime {i}")});
             peers.push(doc!{"_id":&id,"workspace_id":owner,"machine_id":machine,"owner_id":owner,"ip":ip.to_string(),"enabled":true,"credential_hash":token_digest(TOKEN)});
+            if i == 4096 { peers.last_mut().unwrap().insert("hostname", "runtime-target"); }
             ids.push((id,ip));
         }
         case.app.collection("machines").insert_many(machines).await?;case.app.collection("private_peers").insert_many(peers).await?;
@@ -133,7 +134,7 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
         for id in [&aid,&bid] {let row=case.app.collection("private_peers").find_one(doc!{"_id":id}).await?.ok_or_else(||anyhow::anyhow!("controller publication absent"))?;ensure!(row.get_str("stream_transport").unwrap_or_default().is_empty(),"unproven native lifecycle unexpectedly advertised origin mode");}
 
         let started=std::time::Instant::now();let flow=tcp_stream::Flow{source:std::net::SocketAddrV4::new(aip,42000),destination:std::net::SocketAddrV4::new(bip,443)};
-        let client=tokio::spawn(async move{ka.connect(flow).await});let mut server=apps.recv().await.ok_or_else(||anyhow::anyhow!("service never received authenticated native SYN"))?;let mut client=client.await??;
+        let first_stack=ka.clone();let client=tokio::spawn(async move{first_stack.connect(flow).await});let mut server=apps.recv().await.ok_or_else(||anyhow::anyhow!("service never received authenticated native SYN"))?;let mut client=client.await??;
         if missed {
             let lost=std::time::Instant::now();http_stop.cancel();
             timeout(Duration::from_secs(20),async {
@@ -182,12 +183,46 @@ async fn exercise(idle:bool,missed:bool)->Result<()> {
         client.write_all(&request).await?;client.shutdown().await?;let mut bytes=Vec::new();client.read_to_end(&mut bytes).await?;ensure!(bytes==answer,"API-authorized response mismatch");service.await??;
         ensure!(a.node.counts()==(1,2)&&b.node.counts()==(1,2),"cross-pool application exceeded actual bounded owner counts");
         println!("registered=4097 active_identity_pairs=1 source_flow_slots=2 destination_flow_slots=2 request_bytes={} response_bytes={} native_application_elapsed_ms={}",request.len(),answer.len(),started.elapsed().as_millis());
+        let held_flow = tcp_stream::Flow {
+            source: std::net::SocketAddrV4::new(aip, 42001),
+            destination: std::net::SocketAddrV4::new(bip, 443),
+        };
+        let connecting = tokio::spawn(async move { ka.connect(held_flow).await });
+        let mut receiver = apps.recv().await.ok_or_else(|| anyhow::anyhow!("second service did not open"))?;
+        let mut sender = connecting.await??;
+        sender.write_all(b"live").await?;
+        let mut before = [0; 4];
+        receiver.read_exact(&mut before).await?;
+        ensure!(&before == b"live", "held stream did not carry data before revocation");
         let revoke_started=std::time::Instant::now();
-        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"enabled":false},"$inc":{"revision":1_i64}}).await?;
-        ha.request_peer(&bid);hb.request_peer(&aid);
+        // Remove the rule through the dashboard's authenticated endpoint. Both
+        // controllers must retire active grants without another lookup or reconnect.
+        case.status("DELETE", &format!("/api/access/books/{book}"), &cookie,
+            serde_json::json!({"revision":1}), axum::http::StatusCode::OK).await?;
         timeout(Duration::from_secs(5),async {while a.node.counts()!=(0,0)||b.node.counts()!=(0,0){tokio::time::sleep(Duration::from_millis(10)).await;}}).await?;
         ensure!(a.policy.lock().await.valid_lease()&&b.policy.lock().await.valid_lease()&&ha.by_id(&bid).is_none()&&hb.by_id(&aid).is_none(),"real policy revoke retained pair or unnecessarily revoked still-valid base");
         println!("actual_rulebook_revoke_dispatch_retirement_ms={}",revoke_started.elapsed().as_millis());
+        // Do not close either application socket: a stale flow owner would still
+        // accept the same tuple and deliver these bytes after dashboard revocation.
+        let _ = sender.write_all(b"blocked").await;
+        let mut after = [0; 7];
+        if let Ok(Ok(size)) = timeout(Duration::from_millis(900), receiver.read(&mut after)).await {
+            ensure!(size == 0, "application data crossed a revoked open connection");
+        }
+        ensure!(a.node.counts() == (0,0) && b.node.counts() == (0,0));
+        println!("dashboard_revoked_live_application_data_blocked=true");
+        ensure!(ha.resolve_name("runtime-target.phub").await.is_none(), "revoked DNS leaked the target");
+        let source_machine = aid.rsplit(':').next().unwrap();
+        let target_machine = bid.rsplit(':').next().unwrap();
+        let grant = serde_json::json!({"name":"Restore service","group_id":group.to_hex(),"rules":[{
+            "id":"restore443","name":"Restore TCP 443",
+            "sources":[{"kind":"machine","id":source_machine}],
+            "destinations":[{"kind":"machine","id":target_machine}],"protocol":"tcp","ports":"443"}]});
+        let grant_started = std::time::Instant::now();
+        case.status("POST","/api/access/books",&cookie,grant,axum::http::StatusCode::OK).await?;
+        let restored = ha.resolve_name("runtime-target.phub").await.ok_or_else(|| anyhow::anyhow!("grant did not resolve previously denied private name"))?;
+        ensure!(restored.id == bid && restored.ip == bip);
+        println!("dashboard_grant_after_negative_dns_ms={}", grant_started.elapsed().as_millis());
         Ok::<_,anyhow::Error>((a,b))
     }).await;
     stop.cancel();

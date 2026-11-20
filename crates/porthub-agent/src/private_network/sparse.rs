@@ -35,7 +35,7 @@ struct Cached {
     lease: PairLease,
     deadline: Instant,
     last_used: Instant,
-    lan_discovery_started: Option<Instant>,
+    names_current: bool,
 }
 fn name_matches(peer: &PeerInfo, name: &str) -> bool {
     peer.hostname.eq_ignore_ascii_case(name)
@@ -256,10 +256,10 @@ impl Handle {
     }
     fn peer(&self, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
         let mut s = self.state.try_lock().ok()?;
-        self.peer_locked(&mut s, select)
+        self.peer_locked(&mut s, |c|select(&c.lease.peer))
     }
 
-    fn peer_locked(&self, s: &mut State, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
+    fn peer_locked(&self, s: &mut State, select: impl Fn(&Cached) -> bool) -> Option<PeerInfo> {
         let now = Instant::now();
         if self.revoked() || s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return None;
@@ -267,7 +267,7 @@ impl Handle {
         let hit = s
             .cache
             .values_mut()
-            .find(|c| select(&c.lease.peer) && c.valid(now))?;
+            .find(|c| select(c) && c.valid(now))?;
         hit.last_used = now;
         Some(hit.lease.peer.clone())
     }
@@ -290,7 +290,7 @@ impl Handle {
         let peer = s
             .cache
             .values()
-            .find(|c| select(&c.lease.peer) && c.valid(now))?;
+            .find(|c| c.names_current && select(&c.lease.peer) && c.valid(now))?;
         let mut remaining=peer.deadline.min(base).checked_duration_since(now)?;
         for authority in [s.authority.as_ref(),peer.metadata_authority(now)].into_iter().flatten(){
             if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
@@ -323,20 +323,6 @@ impl Handle {
         }
         let cached = state.cache.get_mut(id).filter(|c| c.valid(now))?;
         Some(read(cached, now))
-    }
-    /// Allow time for ICE before pinning a cold TCP flow to the gateway.
-    /// Only timing metadata is retained. TCP retries the SYN under current policy.
-    pub(crate) fn discovering_lan_peer(&self, id: &str, underlay: &[std::net::SocketAddr]) -> bool {
-        let Ok(mut state) = self.state.lock() else { return false };
-        let Some(cached) = state.cache.get_mut(id) else { return false };
-        let shared_network = cached.lease.peer.lan_networks.iter().any(|network| {
-            underlay.iter().any(|address| match address.ip() {
-                std::net::IpAddr::V4(ip) => network.contains(ip),
-                _ => false,
-            })
-        });
-        shared_network && cached.lan_discovery_started.get_or_insert_with(Instant::now).elapsed()
-            < Duration::from_secs(6)
     }
     pub fn enabled(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -480,9 +466,6 @@ impl Handle {
             .map(|c| c.last_used)
             .unwrap_or(now);
         let mut previous=s.cache.remove(&lease.peer.id);
-        let lan_discovery_started = previous.as_ref()
-            .filter(|old| old.lease.peer.instance == lease.peer.instance && old.lease.peer.ip == lease.peer.ip)
-            .and_then(|old| old.lan_discovery_started);
         let retained_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.private_active&&same_pair_authority(&cached.lease,&lease)).and_then(|cached|cached._retirement_owner.take())}else{None};
         let retained_exit_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.exit_active&&same_exit_authority(&cached.lease,&lease)).and_then(|cached|cached._exit_retirement_owner.take())}else{None};
         let exit_retirement_owner=retained_exit_owner.or_else(||if lease.exit.is_some(){authority.as_ref().map(|_|super::authority_event::Owner::new())}else{None});
@@ -501,7 +484,7 @@ impl Handle {
                 lease,
                 deadline: now + left,
                 last_used: used,
-                lan_discovery_started,
+                names_current: true,
             },
         );
         s.wanted.remove(query);
@@ -536,6 +519,21 @@ impl Handle {
             .remove(id);
         self.changed.notify_waiters();
     }
+    pub(super) fn refresh_after_edit(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        let cached: Vec<_> = state.cache.iter_mut().map(|(id, entry)| {
+            entry.names_current = false;
+            id.clone()
+        }).collect();
+        for id in cached {
+            self.queue_request_locked(&mut state, Lookup { kind: "peer".into(), value: id });
+        }
+        for intent in state.wanted.values_mut() { intent.retry_after = now; intent.sent = None; }
+        drop(state);
+        self.changed.notify_waiters();
+        self.demand.notify_one();
+    }
     pub fn unavailable(&self, query: &Lookup) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(i) = s.wanted.get_mut(query) {
@@ -557,7 +555,7 @@ impl Handle {
                     // DNS may wait for the short cache critical section. A busy
                     // packet path does not invalidate an installed lease.
                     let mut state = self.state.lock().ok()?;
-                    if let Some(peer) = self.peer_locked(&mut state, |p| name_matches(p, &name)) {
+                    if let Some(peer) = self.peer_locked(&mut state, |c| c.names_current && name_matches(&c.lease.peer, &name)) {
                         return Some(peer);
                     }
                     if !self.queue_request_locked(&mut state, query.clone()) {
@@ -837,28 +835,6 @@ mod tests {
         assert!(h.request_peer("peer-0"));
         assert_eq!(c.batch().unwrap()["wanted"].as_array().unwrap().len(), 16);
         assert_eq!(h.state.lock().unwrap().wanted.len(), 256);
-    }
-    #[test]
-    fn lan_discovery_wait_starts_on_demand_and_ordinary_renewal_cannot_restart_it() {
-        let epoch = "a".repeat(64);
-        let (handle, _) = channel();
-        handle.update_base(&base(&epoch));
-        let query = Lookup { kind: "peer".into(), value: "b".into() };
-        let mut pair = lease(&epoch);
-        pair.peer.lan_networks = vec!["192.168.7.0/24".parse().unwrap()];
-        handle.installed(&query, pair.clone());
-        let other = ["192.168.8.1:0".parse().unwrap()];
-        let local = ["192.168.7.1:0".parse().unwrap()];
-        assert!(!handle.discovering_lan_peer("b", &other));
-        assert!(handle.state.lock().unwrap().cache["b"].lan_discovery_started.is_none());
-        assert!(handle.discovering_lan_peer("b", &local));
-        handle.state.lock().unwrap().cache.get_mut("b").unwrap().lan_discovery_started =
-            Some(Instant::now() - Duration::from_secs(7));
-        handle.installed(&query, pair.clone());
-        assert!(!handle.discovering_lan_peer("b", &local));
-        pair.peer.instance = "new-instance".into();
-        handle.installed(&query, pair);
-        assert!(handle.discovering_lan_peer("b", &local));
     }
     #[test]
     fn base_refresh_cannot_extend_pair_and_old_epoch_completion_is_discarded() {

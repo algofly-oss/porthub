@@ -100,6 +100,10 @@ async fn audit_capture(device:&mut Option<Arc<Tun>>,profile:&std::path::Path,sna
     }
 }
 
+fn verified_lan(policy: &Engine, peer: &str, session: Option<&porthub_mesh::udp::Session>) -> bool {
+    session.is_some_and(|s| policy.pair_peer(peer).is_some_and(|p| s.on_lan(&p.lan_networks)))
+}
+
 fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
     session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
 }
@@ -997,7 +1001,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let direct=peers.get(&peer).filter(|session|session.state()==porthub_mesh::State::Ready);
                 let relay_ready=relay_sender.is_ready();let mode=*strategy.borrow();
                 let default=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
-                let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(&peer,default,Instant::now())}else{default};
+                let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(&peer,default,Instant::now(),|| verified_lan(&policy,&peer,direct))}else{default};
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer){
                     Some(true)=>{if let Some(session)=direct{let size=bytes.len();if session.send_guarded(bytes,Some(permit)).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),size);}}}},
                     Some(false)=>{if relay_sender.send_guarded(&peer,&bytes,Some(permit)).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,bytes.len());}}},
@@ -1064,7 +1068,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // An explicit gateway preference selects its packet carrier,
                 // rather than adding a second TURN/DTLS transport around it.
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_ready;
-                let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,Instant::now())} else {default};
+                let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,Instant::now(),|| verified_lan(&policy,peer,direct))} else {default};
                 if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let n=packet.len();if session.send_guarded(packet,permit).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),n);}}}
                 else if relay_ready {if relay_sender.send_guarded(peer,&packet,permit).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,packet.len());}}}
             },
@@ -1160,7 +1164,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let mode = *strategy.borrow();
                     let default = mode.prefer_peer_transport(direct.is_some_and(|session| session.is_relay()), relay_ready);
                     let prefer = if mode == super::strategy::Mode::Auto {
-                        path_quality.prefer_peer(&peer, default, Instant::now())
+                        path_quality.prefer_peer(&peer, default, Instant::now(), || verified_lan(&policy, &peer, direct))
                     } else { default };
                     if let (Some(source), Some(destination), Some(use_direct)) = (
                         peer_ips.get(&profile.peer_id), peer_ips.get(&peer),
@@ -1186,15 +1190,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
                 let relay_ready=relay_sender.is_ready();
                 let mode=*strategy.borrow();
-                if mode == super::strategy::Mode::Auto && parsed.opening_sequence().is_some()
-                    && direct.is_none_or(|session| session.is_relay())
-                    && sparse_handle.discovering_lan_peer(peer, &interfaces.borrow())
-                {
-                    continue;
-                }
+                // Start the connection on an available carrier while ICE gathers.
+                // Dropping its SYN here adds the operating system's retransmission delay.
                 let default_prefer_peer=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
                 let prefer_peer=if mode==super::strategy::Mode::Auto {
-                    path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now())
+                    path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now(),|| verified_lan(&policy,peer,direct))
                 } else { default_prefer_peer };
                 #[cfg(all(feature="private-sparse",feature="private-stream"))]
                 if sparse_handle.enabled() {
@@ -1310,7 +1310,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let direct=peers.get(&peer).filter(|session|session.state()==porthub_mesh::State::Ready);
                 let relay_ready=relay_sender.is_ready();let mode=*strategy.borrow();
                 let default=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
-                let prefer=if mode==super::strategy::Mode::Auto{path_quality.prefer_peer(&peer,default,Instant::now())}else{default};
+                let prefer=if mode==super::strategy::Mode::Auto{path_quality.prefer_peer(&peer,default,Instant::now(),|| verified_lan(&policy,&peer,direct))}else{default};
                 let Some(use_direct)=paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer) else{cold_datagrams.pending(item);continue;};
                 if !item.valid(Instant::now())||work.is_cancelled(){continue;}
                 let assigned=exit_selection.select_for_peer(item.flow,Instant::now(),parsed.flow_ttl(),item.syn,Some(&peer));
@@ -1418,8 +1418,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             {
                 let mode=*strategy.borrow();
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_sender.is_ready();
+                let peers=sessions.read().await;
                 let routes=by_ip.iter().filter(|(_,peer)|*peer!=&profile.peer_id).map(|(ip,peer)|{
-                    let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,now)} else {default};
+                    let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,now,|| verified_lan(&policy,peer,peers.get(peer)))} else {default};
                     let deadline=if sparse_handle.enabled(){policy.pair_snapshots().into_iter().find(|(snapshot,_)|snapshot.peers.iter().any(|p|&p.id==peer)).map(|(_,deadline)|deadline).or(Some(now))}else{None};
                     (*ip,(peer.clone(),prefer,deadline,traffic_counters.get(peer).cloned()))
                 }).collect();

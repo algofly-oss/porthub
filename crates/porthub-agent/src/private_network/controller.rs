@@ -78,6 +78,9 @@ struct IceServer {
     #[serde(default)]
     credential: String,
 }
+#[path="controller_changes.rs"]
+mod changes;
+
 struct Prepared {
     info: PeerInfo,
     interfaces: Vec<SocketAddr>,
@@ -394,6 +397,13 @@ pub(crate) async fn run_endpoint(
     if let Some(pin)=clock_pin.as_ref(){let _=control.set_clock_origin(pin);}
     #[cfg(feature="private-sparse")]
     let mut refresh_clock_origin = Instant::now();
+    let mut control = Arc::new(control);
+    let (change_cursor, cursor_rx) = watch::channel(None);
+    let change_wake = Arc::new(tokio::sync::Notify::new());
+    let mut announced_edit = false;
+    let mut change_listener = JoinSet::new();
+    let listen = |control| changes::listen(control, profile.clone(), instance.clone(), cursor_rx.clone(), change_wake.clone());
+    change_listener.spawn(listen(control.clone()));
     let mut bases = control.authorities();
     // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
     // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
@@ -445,7 +455,7 @@ pub(crate) async fn run_endpoint(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"watch_changes":true,"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if virtual_endpoint {
             body["stream_transport"] = serde_json::json!("");
@@ -509,6 +519,17 @@ pub(crate) async fn run_endpoint(
                 if request_clock_origin && value.authenticated_tls && reply.is_some() {
                     refresh_clock_origin = Instant::now() + Duration::from_secs(6 * 3600);
                 }
+                if reply.is_some() {
+                    let cursor = (value.authenticated_tls || profile.allow_insecure_http_for_tests)
+                        .then(|| value.headers.get("x-porthub-private-cursor")?.to_str().ok()?.parse::<uuid::Uuid>().ok()).flatten();
+                    if cursor.is_some() && change_cursor.borrow().is_some() && *change_cursor.borrow()!=cursor {
+                        if !announced_edit {
+                            if let Some(r)=&sparse {r.handle().refresh_after_edit();}
+                        }
+                        announced_edit=false;
+                    }
+                    change_cursor.send_if_modified(|old| { if *old == cursor {false} else {*old = cursor; true} });
+                }
                 if !value.authenticated_tls {
                     if let Some(reply) = &mut reply {
                         #[cfg(feature="private-sparse")]
@@ -562,8 +583,17 @@ pub(crate) async fn run_endpoint(
             );
             #[cfg(feature="private-sparse")]
             if let (Some(path),Some(pin))=(native_profile.as_deref(),reply.clock_origin.as_ref()) {
-                if clock_pin.as_ref()!=Some(pin) && super::clock_identity::remember(path,&profile,pin).is_ok() && control.set_clock_origin(pin).is_ok(){
-                    clock_pin=Some(pin.clone());
+                if clock_pin.as_ref() != Some(pin) {
+                    let mut replacement = crate::control::Control::new_private(&profile)?;
+                    if replacement.set_clock_origin(pin).is_ok()
+                        && super::clock_identity::remember(path, &profile, pin).is_ok()
+                    {
+                        // Drop requests and pools using the old trust identity before resuming the watcher.
+                        change_listener.shutdown().await;
+                        control = Arc::new(replacement);
+                        change_listener.spawn(listen(control.clone()));
+                        clock_pin = Some(pin.clone());
+                    }
                 }
             }
             #[cfg(feature="local-tor")]
@@ -865,7 +895,17 @@ pub(crate) async fn run_endpoint(
                 _=async{if let Some(resolver)=&sparse{resolver.demand().await}else{std::future::pending::<()>().await}}=>{},
             }
         };
-        if !wait_cycle(cycle_started,sparse.is_some(),successful_sync,Duration::from_secs(interval),&cancel,picker,ordinary).await { return Ok(()); }
+        tokio::select! {
+            keep = wait_cycle(cycle_started,sparse.is_some(),successful_sync,Duration::from_secs(interval),&cancel,picker,ordinary) => if !keep { return Ok(()); },
+            _ = change_wake.notified() => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(cycle_started + Duration::from_millis(150)) => {},
+                }
+                announced_edit=true;
+                if let Some(resolver) = &sparse { resolver.handle().refresh_after_edit(); }
+            }
+        }
 
     }
 }
