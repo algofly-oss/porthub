@@ -117,6 +117,8 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
                         .build(),
                 )
                 .await?;
+            peers.create_index(IndexModel::builder().keys(doc!{"workspace_id":1,"virtual_parent":1,"virtual_slot":1})
+                .options(IndexOptions::builder().unique(true).partial_filter_expression(doc!{"virtual_parent":{"$type":"objectId"}}).build()).build()).await?;
             crate::enrollment_ticket::initialize(app).await?;
             Ok::<_, ApiError>(())
         })

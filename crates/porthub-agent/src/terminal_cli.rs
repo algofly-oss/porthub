@@ -2,6 +2,7 @@
 //! Local mode needs no registration or network. Sharing uses the local broker.
 mod participant_control;
 mod sharing;
+pub(crate) use sharing::withdraw as withdraw_dashboard;
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
 use fs2::FileExt;
@@ -29,6 +30,24 @@ pub enum Command {
         after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal."
     )]
     Share(sharing::Share),
+    /// Offer independent, nonprivileged browser workspaces while this process runs.
+    Dashboard {
+        /// Manage the local user service, or run the pool in the foreground.
+        #[arg(value_enum, default_value = "run")]
+        action: crate::service::dashboard::Action,
+        /// PortHub account ID of the authorized machine owner.
+        #[arg(long)]
+        owner: String,
+        /// Maximum number of workspaces, including unused and attached ones.
+        #[arg(long, default_value_t = 3, value_parser=clap::value_parser!(u8).range(1..=8))]
+        slots: u8,
+        /// Installed registration for this machine.
+        #[arg(long)]
+        registration: Option<String>,
+        /// Use a registration installed for the current OS user.
+        #[arg(long)]
+        user: bool,
+    },
     /// Join an invitation without a PortHub account.
     Join {
         url: String,
@@ -633,6 +652,13 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::ParticipantView { root, id, sidebar } => owner_view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments).await?,
+        Command::Dashboard { action, owner, slots, registration, user } => {
+            if matches!(action, crate::service::dashboard::Action::Run) {
+                sharing::dashboard(&root, owner, slots, registration, user).await?;
+            } else {
+                crate::service::dashboard::service(action,&root,&owner,slots,registration.as_deref(),user).await?;
+            }
+        }
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join {
             url,

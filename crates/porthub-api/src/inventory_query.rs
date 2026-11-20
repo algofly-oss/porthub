@@ -37,6 +37,7 @@ pub struct Params {
     pub connection: String,
     pub role: String,
     pub options: bool,
+    pub agents_only: bool,
     pub ids: String,
     pub seconds: u64,
     pub since: u64,
@@ -67,6 +68,7 @@ impl Default for Params {
             connection: String::new(),
             role: "all".into(),
             options: false,
+            agents_only: false,
             ids: String::new(),
             seconds: 30,
             since: 0,
@@ -329,6 +331,9 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
     }
     if kind == "machines" {
         filter.insert("deletion_pending", doc! {"$ne":true});
+        if p.agents_only || ["online", "offline", "auth_required"].contains(&p.status.as_str()) {
+            filter.insert("kind", doc! {"$ne":"virtual_host"});
+        }
         match p.status.as_str() {
             "enabled" => {
                 filter.insert("enabled", doc! {"$ne":false});
@@ -724,6 +729,9 @@ async fn page(
     if kind == "groups" && !params.options {
         data.push(doc! {"$lookup":{"from":"machines","let":{"group":"$_id","text":{"$toString":"$_id"}},"pipeline":[{"$match":{"user_id":&owner,"deletion_pending":{"$ne":true},"$expr":{"$or":[{"$in":["$$group",{"$ifNull":["$group_ids",[]]}]},{"$in":["$$text",{"$ifNull":["$group_ids",[]]}]},{"$eq":["$group_id","$$group"]},{"$eq":["$group_id","$$text"]}]}}},{"$count":"count"}],"as":"_members"}});
     }
+    if kind == "machines" && !params.agents_only {
+        data.push(inventory::serving_machine_lookup(owner.clone()));
+    }
     if kind == "machines" && !params.options {
         data.push(doc! {"$lookup":{"from":"machine_groups","let":{"groups":{"$ifNull":["$group_ids",["$group_id"]]}},"pipeline":[{"$match":{"user_id":&owner,"$expr":{"$or":[{"$in":["$_id","$$groups"]},{"$in":[{"$toString":"$_id"},"$$groups"]}]}}},{"$project":{"name":1}}],"as":"_groups"}});
         let mut lookup = joined(
@@ -991,6 +999,9 @@ fn options(kind: &str, row: &Value) -> Value {
             "enabled",
             "connection_status",
             "group_ids",
+            "kind",
+            "via",
+            "target_ip",
         ],
         "connections" => &[
             "_id",
@@ -1143,7 +1154,7 @@ async fn summary(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<R
     );
     let pipeline = vec![
         doc! {"$match":{"user_id":&owner,"deletion_pending":{"$ne":true}}},
-        doc! {"$group":{"_id":{"$cond":[{"$eq":["$enabled",false]},"disabled",{"$cond":[{"$lt":[{"$ifNull":["$last_seen_at",bson::DateTime::from_millis(0)]},cutoff]},"offline",{"$cond":[{"$eq":["$auth_required",true]},"auth_required","online"]}]}]},"count":{"$sum":1}}},
+        doc! {"$group":{"_id":{"$cond":[{"$eq":["$kind","virtual_host"]},"unknown",{"$cond":[{"$eq":["$enabled",false]},"disabled",{"$cond":[{"$lt":[{"$ifNull":["$last_seen_at",bson::DateTime::from_millis(0)]},cutoff]},"offline",{"$cond":[{"$eq":["$auth_required",true]},"auth_required","online"]}]}]}]},"count":{"$sum":1}}},
     ];
     let counts = app
         .collection("machines")

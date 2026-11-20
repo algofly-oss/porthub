@@ -29,6 +29,7 @@ async fn private_peer(app: &App, peer_id: &str, token: &str) -> ApiResult<Docume
         .find_one(doc! {
             "_id": peer_id,
             "enabled": true,
+            "virtual_parent":{"$exists":false},
             "credential_hash": crate::domain::workspaces::token_digest(token),
         })
         .await?

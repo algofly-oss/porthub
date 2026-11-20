@@ -30,6 +30,11 @@ struct Signal {
 }
 #[derive(Deserialize)]
 struct Reply {
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    #[serde(default)]
+    virtual_hosts: Vec<super::virtual_hosts::Spec>,
+    #[serde(default)]
+    pinned_relay: Option<super::relay::PinnedRelay>,
     snapshot: Snapshot,
     #[serde(default)]
     exit_pick: Option<porthub_network::policy::ExitPickResponse>,
@@ -193,6 +198,8 @@ use stream_offer::Offer as StreamOffer;
 pub(crate) use stream_offer::NativeReady;
 
 pub enum Event {
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    VirtualHosts(super::authority_event::Authority<Vec<super::virtual_hosts::Spec>>),
     #[cfg(feature = "local-tor")]
     TorLocal { bytes: Bytes },
     Snapshot(super::authority_event::Authority<Snapshot>),
@@ -327,6 +334,21 @@ pub async fn run_watched_sparse(
 }
 pub(crate) async fn run_watched_sparse_owned(
     profile: Profile,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
+    sessions: Sessions,
+    events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
+    local: LocalIdentity,
+    cancel: CancellationToken,
+    sparse: Option<super::sparse::Control>,
+    authority_domain:Option<super::authority_event::Domain>,
+    native_streams:Option<watch::Receiver<Option<NativeReady>>>,
+    native_profile:Option<std::path::PathBuf>,
+) -> Result<()> {
+    run_endpoint(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,authority_domain,native_streams,native_profile,false).await
+}
+pub(crate) async fn run_endpoint(
+    profile: Profile,
     mut interfaces: watch::Receiver<Vec<SocketAddr>>,
     sessions: Sessions,
     events: mpsc::Sender<Event>,
@@ -337,6 +359,7 @@ pub(crate) async fn run_watched_sparse_owned(
     authority_domain:Option<super::authority_event::Domain>,
     native_streams:Option<watch::Receiver<Option<NativeReady>>>,
     native_profile:Option<std::path::PathBuf>,
+    virtual_endpoint: bool,
 ) -> Result<()> {
     ensure!(
         interfaces.borrow().len() <= 16,
@@ -400,8 +423,17 @@ pub(crate) async fn run_watched_sparse_owned(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
+        if virtual_endpoint {
+            body["stream_transport"] = serde_json::json!("");
+            body["lan_exit"] = false.into();
+            body["lan_networks"] = serde_json::json!([]);
+            body["tor_exit"] = false.into();
+            body["application_proxy"] = false.into();
+        }
+        #[cfg(all(feature="private-sparse",feature="private-stream"))]
+        if native_profile.is_some() { body["virtual_host_provider"] = 1.into(); }
         #[cfg(feature="private-sparse")]
         let mut sent_exit_pick = None;
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;
@@ -426,6 +458,11 @@ pub(crate) async fn run_watched_sparse_owned(
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let mut reply = None;
+        if virtual_endpoint {
+            for key in ["native_repair","exit_pick","tor_exit","application_proxy","lan_exit","lan_networks","virtual_host_provider","exit_pair_protocol","exit_ready","exit_ready_peers","exit_pair_failed"] {
+                body.as_object_mut().expect("private sync object").remove(key);
+            }
+        }
         let request_window = super::authority_event::request_start(authority_domain.as_ref())?;
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
@@ -433,6 +470,13 @@ pub(crate) async fn run_watched_sparse_owned(
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
+                if !value.authenticated_tls {
+                    if let Some(reply) = &mut reply {
+                        reply.pinned_relay = None;
+                        #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                        if !profile.allow_insecure_http_for_tests {reply.virtual_hosts.clear();}
+                    }
+                }
                 bases = control.authorities();
                 preferred = 0;
             }
@@ -466,7 +510,7 @@ pub(crate) async fn run_watched_sparse_owned(
                 let mut origins=Vec::new();
                 if let Some(origin)=&reply.direct_relay_url {origins.push(origin.clone());}
                 origins.extend(bases.iter().cloned());origins.dedup();
-                proxy_manager.update(origins,reply.proxy_provider,&reply.proxy_jobs);
+                if !virtual_endpoint {proxy_manager.update(origins,reply.proxy_provider,&reply.proxy_jobs);}
             }
             pending.drain(..sent);
             acks.drain(..acked);
@@ -517,6 +561,7 @@ pub(crate) async fn run_watched_sparse_owned(
             }
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
+                pinned: reply.pinned_relay.take().filter(|_| reply.snapshot.sparse.is_some()),
                 relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
             })};
             if *relay_config.borrow()!=direct_relay{relay_config.send_replace(direct_relay);}
@@ -699,6 +744,16 @@ pub(crate) async fn run_watched_sparse_owned(
             );
             let response_expiry=reply.snapshot.expires_at;
             tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private packet owner closed")};
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            if native_profile.is_some() {
+                let mut hosts = if request_window.is_some() {reply.virtual_hosts} else {Vec::new()};
+                if super::virtual_hosts::validate(&hosts,&profile).is_err() {
+                    tracing::warn!("withdrew invalid virtual host inventory");
+                    hosts.clear();
+                }
+                let list=super::authority_event::Authority::new(hosts,request_window.clone(),response_expiry);
+                tokio::select!{_=cancel.cancelled()=>return Ok(()),res=events.send(Event::VirtualHosts(list))=>res?}
+            }
             #[cfg(feature="private-sparse")]
             if let Some((picker, sent, response, authority, expiry)) = accepted_exit_pick {
                 if let Some(lease) = &response.lease {

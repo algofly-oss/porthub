@@ -37,6 +37,11 @@ struct Cached {
     last_used: Instant,
     lan_discovery_started: Option<Instant>,
 }
+fn name_matches(peer: &PeerInfo, name: &str) -> bool {
+    peer.hostname.eq_ignore_ascii_case(name)
+        || peer.aliases.iter().any(|alias| alias.eq_ignore_ascii_case(name))
+}
+
 impl Cached {
     fn private_valid(&self,now:Instant)->bool {self.private_active&&self.deadline>now&&self.authority.as_ref().is_none_or(|a|a.check().is_ok())}
     fn exit_valid(&self,now:Instant)->bool {self.exit_active&&self.deadline>now&&self.exit_authority.as_ref().is_none_or(|a|a.check().is_ok())}
@@ -201,6 +206,10 @@ impl Handle {
         let left=match &s.authority {Some(authority)=>authority.remaining().ok()?.map(|left|left.as_secs()).unwrap_or(5),None=>5};
         (left>0).then_some(left.min(5) as u32)
     }
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    pub(super) fn current_base(&self) -> Option<super::authority_event::Authority<()>> {
+        self.state.lock().ok()?.authority.clone()
+    }
     pub(crate) fn authority_valid(&self)->bool {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
         !self.revoked() && s.authority.as_ref().is_none_or(|a|a.check().is_ok())
@@ -247,8 +256,12 @@ impl Handle {
     }
     fn peer(&self, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
         let mut s = self.state.try_lock().ok()?;
+        self.peer_locked(&mut s, select)
+    }
+
+    fn peer_locked(&self, s: &mut State, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
         let now = Instant::now();
-        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
+        if self.revoked() || s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return None;
         }
         let hit = s
@@ -259,26 +272,57 @@ impl Handle {
         Some(hit.lease.peer.clone())
     }
     pub fn dns_ttl(&self, ip: Ipv4Addr) -> Option<u32> {
-        let s = self.state.try_lock().ok()?;
+        self.dns_record(|peer| peer.ip == ip).map(|(_, ttl)| ttl)
+    }
+
+    pub(super) fn dns_name_record(&self, name: &str) -> Option<(Ipv4Addr, u32)> {
+        self.dns_record(|peer| name_matches(peer, name.trim_end_matches('.')))
+    }
+
+    fn dns_record(&self, select: impl Fn(&PeerInfo) -> bool) -> Option<(Ipv4Addr, u32)> {
+        let s = self.state.lock().ok()?;
+        if self.revoked() || s.epoch.is_none() {
+            return None;
+        }
         let now = Instant::now();
         if s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
         let base = s.deadline?;
         let peer = s
             .cache
             .values()
-            .find(|c| c.lease.peer.ip == ip && c.valid(now))?;
+            .find(|c| select(&c.lease.peer) && c.valid(now))?;
         let mut remaining=peer.deadline.min(base).checked_duration_since(now)?;
         for authority in [s.authority.as_ref(),peer.metadata_authority(now)].into_iter().flatten(){
             if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
         }
         let remaining=remaining.as_secs();
-        (remaining > 0).then_some(remaining.min(5) as u32)
+        (remaining > 0).then_some((peer.lease.peer.ip, remaining.min(5) as u32))
     }
     pub fn by_ip(&self, ip: Ipv4Addr) -> Option<PeerInfo> {
         self.peer(|p| p.ip == ip)
     }
     pub fn by_id(&self, id: &str) -> Option<PeerInfo> {
-        self.peer(|p| p.id == id)
+        self.with_live_peer(id, |cached, now| {
+            cached.last_used = now;
+            cached.lease.peer.clone()
+        })
+    }
+
+    /// Maintenance observes authority without making an idle lease eligible for renewal.
+    pub(super) fn peer_is_live(&self, id: &str) -> bool {
+        self.with_live_peer(id, |_, _| ()).is_some()
+    }
+
+    fn with_live_peer<T>(&self, id: &str, read: impl FnOnce(&mut Cached, Instant) -> T) -> Option<T> {
+        let mut state = self.state.lock().ok()?;
+        let now = Instant::now();
+        if self.revoked() || state.epoch.is_none() || state.deadline.is_none_or(|d| d <= now)
+            || state.authority.as_ref().is_some_and(|a| a.check().is_err())
+        {
+            return None;
+        }
+        let cached = state.cache.get_mut(id).filter(|c| c.valid(now))?;
+        Some(read(cached, now))
     }
     /// Allow time for ICE before pinning a cold TCP flow to the gateway.
     /// Only timing metadata is retained. TCP retries the SYN under current policy.
@@ -333,18 +377,7 @@ impl Handle {
     }
     /// Usage affects renewal eligibility only, never locally extends authority.
     pub fn touch_peer(&self, id: &str) -> bool {
-        let Ok(mut state) = self.state.try_lock() else {
-            return false;
-        };
-        let now = Instant::now();
-        if self.revoked() || state.deadline.is_none_or(|d| d <= now) || state.authority.as_ref().is_some_and(|a|a.check().is_err()) {
-            return false;
-        }
-        let Some(cached) = state.cache.get_mut(id).filter(|c| c.valid(now)) else {
-            return false;
-        };
-        cached.last_used = now;
-        true
+        self.with_live_peer(id, |cached, now| cached.last_used = now).is_some()
     }
     pub fn request_ip(&self, ip: Ipv4Addr) -> bool {
         ip.is_private()
@@ -383,8 +416,17 @@ impl Handle {
         let Ok(mut s) = self.state.try_lock() else {
             return false;
         };
+        let queued = self.queue_request_locked(&mut s, query);
+        drop(s);
+        if queued {
+            self.demand.notify_one();
+        }
+        queued
+    }
+
+    fn queue_request_locked(&self, s: &mut State, query: Lookup) -> bool {
         let now = Instant::now();
-        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
+        if self.revoked() || s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return false;
         }
         if !s.wanted.contains_key(&query) && s.wanted.len() >= MAX_INTENTS {
@@ -398,8 +440,6 @@ impl Handle {
                 sent: None,
                 retry_after: now,
             });
-        drop(s);
-        self.demand.notify_one();
         true
     }
     /// Called only by the packet owner AFTER Engine and native /32 route installation succeed.
@@ -481,12 +521,7 @@ impl Handle {
                         "ip" => c.lease.peer.ip.to_string() == query.value,
                         "name" => {
                             let name = query.value.trim_end_matches('.');
-                            c.lease.peer.hostname.eq_ignore_ascii_case(name)
-                                || c.lease
-                                    .peer
-                                    .aliases
-                                    .iter()
-                                    .any(|a| a.eq_ignore_ascii_case(name))
+                            name_matches(&c.lease.peer, name)
                         }
                         _ => false,
                     }
@@ -518,15 +553,18 @@ impl Handle {
         let wait = async {
             loop {
                 let notified = self.changed.notified();
-                if let Some(peer) = self.peer(|p| {
-                    p.hostname.eq_ignore_ascii_case(&name)
-                        || p.aliases.iter().any(|a| a.eq_ignore_ascii_case(&name))
-                }) {
-                    return Some(peer);
+                {
+                    // DNS may wait for the short cache critical section. A busy
+                    // packet path does not invalidate an installed lease.
+                    let mut state = self.state.lock().ok()?;
+                    if let Some(peer) = self.peer_locked(&mut state, |p| name_matches(p, &name)) {
+                        return Some(peer);
+                    }
+                    if !self.queue_request_locked(&mut state, query.clone()) {
+                        return None;
+                    }
                 }
-                if !self.request(query.clone()) {
-                    return None;
-                }
+                self.demand.notify_one();
                 notified.await;
             }
         };
@@ -857,6 +895,69 @@ mod tests {
         assert!(h.by_id("b").is_none());
         assert!(h.dns_ttl("10.203.1.2".parse().unwrap()).is_none());
     }
+    #[test]
+    fn route_sweep_waits_for_live_peer_and_preserves_idle_time() {
+        let epoch = "a".repeat(64);
+        let (handle, _) = channel();
+        handle.update_base(&base(&epoch));
+        handle.installed(&Lookup { kind: "peer".into(), value: "b".into() }, lease(&epoch));
+        let idle_since = Instant::now() - Duration::from_secs(10);
+        let peer = handle.clone();
+        let (held, acquired) = std::sync::mpsc::sync_channel(0);
+        let holder = std::thread::spawn(move || {
+            let mut state = peer.state.lock().unwrap();
+            state.cache.get_mut("b").unwrap().last_used = idle_since;
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+        });
+        acquired.recv().unwrap();
+        assert!(handle.peer_is_live("b"));
+        holder.join().unwrap();
+        assert_eq!(handle.state.lock().unwrap().cache["b"].last_used, idle_since);
+        assert!(handle.touch_peer("b"));
+        assert!(handle.state.lock().unwrap().cache["b"].last_used > idle_since);
+        handle.state.lock().unwrap().cache.get_mut("b").unwrap().deadline = Instant::now();
+        assert!(!handle.peer_is_live("b"));
+        assert!(!handle.touch_peer("b"));
+        assert!(handle.by_id("b").is_none());
+    }
+
+    #[tokio::test]
+    async fn cached_dns_name_and_ttl_survive_brief_packet_cache_contention() {
+        let epoch = "a".repeat(64);
+        let (handle, mut control) = channel();
+        let pair = lease(&epoch);
+        handle.update_base(&base(&epoch));
+        handle.installed(&Lookup { kind: "name".into(), value: "b.phub".into() }, pair.clone());
+
+        for check_ttl in [false, true] {
+            let peer = handle.clone();
+            let (held, acquired) = std::sync::mpsc::sync_channel(0);
+            let holder = std::thread::spawn(move || {
+                let _guard = peer.state.lock().unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(60));
+            });
+            acquired.recv().unwrap();
+            if check_ttl {
+                assert!(handle.dns_ttl(pair.peer.ip).is_some());
+            } else {
+                assert_eq!(handle.resolve_name("alias.phub.").await.unwrap().id, "b");
+            }
+            holder.join().unwrap();
+        }
+        assert!(control.batch().unwrap()["wanted"].as_array().unwrap().is_empty());
+        assert_eq!(handle.dns_name_record("ALIAS.PHUB.").unwrap().0, pair.peer.ip);
+        let mut renamed = pair.clone();
+        renamed.peer.hostname = "new.phub".into();
+        renamed.peer.aliases.clear();
+        handle.installed(&Lookup { kind: "peer".into(), value: "b".into() }, renamed);
+        assert!(handle.dns_name_record("alias.phub.").is_none());
+        assert_eq!(handle.dns_name_record("new.phub.").unwrap().0, pair.peer.ip);
+        handle.retire("b");
+        assert!(handle.dns_ttl(pair.peer.ip).is_none());
+    }
+
     #[tokio::test]
     async fn names_wait_for_packet_owner_installation_and_accept_no_early_answer() {
         let epoch = "a".repeat(64);

@@ -51,8 +51,14 @@ pub struct Sender {
     ready: Arc<[AtomicBool; RELAY_LANES]>,
     dropped_packets: Arc<AtomicU64>,
 }
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct PinnedRelay {
+    url: String,
+    spki_sha256: String,
+}
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
+    pub pinned: Option<PinnedRelay>,
     pub direct_url: Option<String>,
     pub relay_token: Option<String>,
 }
@@ -319,6 +325,13 @@ where
     Ok(selection.order(&paths, Instant::now()).into_iter().map(Some).collect())
 }
 
+fn valid_relay_url(value: &str, tls_only: bool) -> bool {
+    let Ok(url) = url::Url::parse(value) else { return false; };
+    (url.scheme() == "https" || !tls_only && url.scheme() == "http")
+        && url.host_str().is_some() && url.username().is_empty() && url.password().is_none()
+        && url.query().is_none() && url.fragment().is_none() && url.path() == "/"
+}
+
 pub async fn run_bound(
     profile: Profile,
     instance: String,
@@ -336,48 +349,31 @@ pub async fn run_bound(
         while config.borrow_and_update().is_none() {
             tokio::select! {_=cancel.cancelled()=>return Ok(()),changed=config.changed()=>if changed.is_err(){return Ok(())}}
         }
-        let direct = config.borrow_and_update().clone().and_then(|candidate| {
-            let (Some(direct_url), Some(relay_token)) =
-                (candidate.direct_url, candidate.relay_token)
-            else {
-                return None;
-            };
-            let Ok(url) = url::Url::parse(&direct_url) else {
-                return None;
-            };
-            let usable = matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && url.path() == "/"
-                && (32..=128).contains(&relay_token.len());
-            usable.then_some(Config {
-                direct_url: Some(direct_url),
-                relay_token: Some(relay_token),
-            })
-        });
-        // Prefer the operator-configured direct origin; use the secure API
-        // route only when the direct connection fails.
-        let mut candidates = Vec::with_capacity(profile.fallback_servers.len() + 2);
-        if let Some(candidate) = direct {
-            candidates.push((
-                candidate.direct_url.unwrap(),
-                candidate.relay_token.unwrap(),
-            ));
+        let mut candidates = Vec::with_capacity(profile.fallback_servers.len() + 3);
+        if let Some(configuration) = config.borrow_and_update().clone() {
+            if let Some(token) = configuration.relay_token.filter(|t| (32..=128).contains(&t.len())) {
+                if let Some(pinned) = configuration.pinned {
+                    if valid_relay_url(&pinned.url, true) && pinned.spki_sha256.len() == 64
+                        && pinned.spki_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        candidates.push((pinned.url, token.clone(), Some(pinned.spki_sha256)));
+                    }
+                }
+                if let Some(url) = configuration.direct_url.filter(|u| valid_relay_url(u, false)) {
+                    candidates.push((url, token, None));
+                }
+            }
         }
-        candidates.push((profile.server.clone(), profile.token.clone()));
+        candidates.push((profile.server.clone(), profile.token.clone(), None));
         candidates.extend(
             profile
                 .fallback_servers
                 .iter()
                 .cloned()
-                .map(|base| (base, profile.token.clone())),
+                .map(|base| (base, profile.token.clone(), None)),
         );
         let mut local: Vec<_> = interfaces.borrow().iter().map(|address| address.ip()).collect();
         let mut primary = None;
-        for (base, token) in candidates {
+        for (base, token, pin) in candidates {
             let url = url::Url::parse(&base)?;
             let host = url.host_str().ok_or_else(|| anyhow::anyhow!("relay hostname missing"))?;
             let destinations: Vec<_> = match tokio::time::timeout(Duration::from_secs(2),tokio::net::lookup_host((host.trim_matches(['[',']']),url.port_or_known_default().unwrap_or(443)))).await {
@@ -391,21 +387,22 @@ pub async fn run_bound(
             };
             for path in paths {
                 local = path.as_ref().map(|p|vec![p.source]).unwrap_or_default();
-                if let Some(connection) = connect_lane(&base,&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
+                if let Some(connection) = connect_lane(&base,pin.as_deref(),&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
                     if let Some(path) = path { selection.success(path); }
                     let lane_count = connection.lane_count;
-                    primary = Some((base.clone(),token.clone(),connection,lane_count));
+                    primary = Some((base.clone(),token.clone(),pin.clone(),connection,lane_count));
                     break;
                 }
                 if let Some(path) = &path { selection.failure(path,Instant::now()); }
             }
             if primary.is_some() { break; }
         }
-        if let Some((base, token, first, lane_count)) = primary {
+        if let Some((base, token, pin, first, lane_count)) = primary {
             let mut connections = vec![first];
             for lane in 1..usize::from(lane_count) {
                 let Some(connection) = connect_lane(
                     &base,
+                    pin.as_deref(),
                     &token,
                     &profile.peer_id,
                     &instance,
@@ -458,6 +455,7 @@ struct ConnectedLane {
 
 async fn connect_lane(
     base: &str,
+    pin: Option<&str>,
     token: &str,
     peer: &str,
     instance: &str,
@@ -473,6 +471,14 @@ async fn connect_lane(
         "ws"
     } else {
         return Ok(None);
+    };
+    let connector = match pin {
+        Some(pin) if scheme == "wss" => {
+            let Ok(tls) = porthub_identity::pinned_client_config(pin) else { return Ok(None); };
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls)))
+        }
+        Some(_) => return Ok(None),
+        None => None,
     };
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("invalid private relay authority"))?;
@@ -508,7 +514,7 @@ async fn connect_lane(
                         .max_message_size(Some(65536))
                         .max_frame_size(Some(65536)),
                 ),
-                None,
+                connector,
             ).await?)
             },
         )=>result,
@@ -543,6 +549,7 @@ async fn connect_lane(
             .get("x-porthub-relay-prefix")
             .is_some_and(|value| value == "1");
     let origins=response.headers().get("x-porthub-relay-origin").is_some_and(|v|v=="1");
+    if pin.is_some() && !origins { return Ok(None); }
     #[cfg(all(target_os="linux",feature="netns-tests"))] {
         static OBSERVATIONS:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
         if OBSERVATIONS.fetch_add(1,Ordering::Relaxed)<8{eprintln!("native_relay_origin negotiated={origins}");}
@@ -709,6 +716,42 @@ mod tests {
         assert_ne!(first,second);live.pong(&first,now+Duration::from_secs(3));assert!(live.expired(now+Duration::from_secs(17)));Ok(())
     }
 
+    #[tokio::test]
+    async fn private_lane_checks_published_key_before_sending_bearer() -> Result<()> {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let identity = rcgen::generate_simple_self_signed(vec!["edge.invalid".into()])?;
+        let cert = identity.cert.der().clone();
+        let pin = porthub_identity::origin::Metadata::from_certificate(&cert, 443)?.spki_sha256;
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der());
+        let tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?.with_no_client_auth()
+            .with_single_cert(vec![cert], key.into())?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            // A different key fails during TLS, before a request is possible.
+            let (wrong, _) = listener.accept().await?;
+            ensure!(acceptor.accept(wrong).await.is_err());
+            let (correct, _) = listener.accept().await?;
+            let tls = acceptor.accept(correct).await?;
+            let _ws = tokio_tungstenite::accept_hdr_async(tls, |request: &Request, mut response: Response| {
+                assert_eq!(request.uri().path(), "/api/access/private/relay");
+                assert_eq!(request.headers()["authorization"], "Bearer fixture");
+                response.headers_mut().insert("x-porthub-relay-origin", "1".parse().unwrap());
+                Ok(response)
+            }).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let stop = CancellationToken::new();
+        let url = format!("https://{address}");
+        assert!(connect_lane(&format!("http://{address}"), Some(&pin), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
+        assert!(connect_lane(&url, Some(&"00".repeat(32)), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
+        assert!(connect_lane(&url, Some(&pin), "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_some());
+        tokio::time::timeout(Duration::from_secs(4), server).await???;
+        Ok(())
+    }
+
     async fn real_lane_heartbeat(responsive:bool)->Result<()> {
         use tokio::io::AsyncReadExt;
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -731,7 +774,7 @@ mod tests {
             }
             Ok::<_,anyhow::Error>(())
         }));
-        let connection=connect_lane(&base,"test-token","peer","instance",0,1,&[],&stop).await?.ok_or_else(||anyhow::anyhow!("test relay unavailable"))?;
+        let connection=connect_lane(&base,None,"test-token","peer","instance",0,1,&[],&stop).await?.ok_or_else(||anyhow::anyhow!("test relay unavailable"))?;
         let(sender,mut inputs)=channel();let(_update,mut config)=watch::channel(None);let(events,_incoming)=mpsc::channel(8);
         let owner_sender=sender.clone();let owner_stop=stop.clone();
         let owner=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{
@@ -904,6 +947,7 @@ mod tests {
         };
         let (sender, input) = channel();
         let (_updates, config) = watch::channel(Some(Config {
+            pinned: None,
             direct_url: Some(rejected_base),
             relay_token: Some("t".repeat(32)),
         }));
@@ -1040,6 +1084,7 @@ mod tests {
         for lane in 0..RELAY_LANES {
             let connection = connect_lane(
                 &base,
+                None,
                 "test-token",
                 "peer",
                 "instance",

@@ -11,6 +11,12 @@ use std::{
 
 #[derive(Args)]
 pub struct Share {
+    /// Private slot registry maintained by the local dashboard supervisor.
+    #[arg(skip)]
+    pool: Option<PathBuf>,
+    /// Reserve a fresh relay-only workspace for the specified dashboard account ID.
+    #[arg(long, conflicts_with = "existing")]
+    dashboard_owner: Option<String>,
     /// Keep this share on the gateway; never advertise a direct peer path.
     #[arg(long, conflicts_with = "stun_servers")]
     relay_only: bool,
@@ -187,7 +193,14 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let detach = args.local.detach;
     let json = args.local.json;
     // Validate before starting any shells or publishing session capabilities.
+    if let Some(owner) = &args.dashboard_owner {
+        ensure!(unsafe { libc::getuid() } != 0 && unsafe { libc::geteuid() } != 0,
+            "dashboard shell hosting must run as a nonprivileged local user");
+        ensure!(token(owner, 24) && args.relay_only && args.access == "web",
+            "use --access web --relay-only and the account ID of the registered machine owner");
+    }
     let options = Options {
+        dashboard_owner: args.dashboard_owner,
         name: "validation".into(),
         expires_at: if args.link_expires == 0 {
             0
@@ -228,6 +241,9 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         "cannot share an ended workspace"
     );
     let _registry = lock(root)?;
+    if let Some(pool) = args.pool {
+        crate::profile::write_private(&pool.join(&job.id), job.id.as_bytes(), false)?;
+    }
     if path(root, &job.id)?.exists() {
         let previous = load(root, &job.id)?;
         ensure!(
@@ -283,6 +299,10 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     for _ in 0..300 {
         let state = load(root, &job.id)?;
         if state.state == "connected" {
+            if state.hello.options.dashboard_owner.is_some() && detach {
+                println!("Prepared browser workspace {}", job.name);
+                return Ok(());
+            }
             break;
         }
         ensure!(
@@ -332,7 +352,7 @@ pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
         )
     };
     let ssh = |token: &str| format!("ssh -p {} -l {} {}", ready.ssh_port, token, ready.ssh_host);
-    let web = sharing.hello.options.access != Access::Ssh;
+    let web = sharing.hello.options.access != Access::Ssh && sharing.hello.options.dashboard_owner.is_none();
     let ssh_enabled = sharing.hello.options.access != Access::Web;
     let interactive = !sharing.hello.options.read_only;
     let data = serde_json::json!({"name":job.name,"id":job.id,"state":sharing.state,
@@ -396,4 +416,155 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
         id.into(),
     ])
     .await
+}
+
+/// The OS user makes the hosting decision. Only local code chooses the shell
+/// and its arguments. Claiming a workspace at the gateway performs no host RPC.
+pub(super) async fn dashboard(
+    root: &Path,
+    owner: String,
+    slots: u8,
+    registration: Option<String>,
+    user: bool,
+) -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    ensure!(
+        unsafe { libc::getuid() } != 0 && unsafe { libc::geteuid() } != 0,
+        "run dashboard hosting as the nonprivileged OS user whose shells will be offered"
+    );
+    ensure!(
+        token(&owner, 24) && (1..=8).contains(&slots),
+        "invalid dashboard owner or capacity"
+    );
+    let layout = if user {
+        crate::service::Layout::user()?
+    } else {
+        crate::service::Layout::system()?
+    };
+    let record = crate::service::readable::select(&layout, registration.as_deref(), Some(false))?;
+    let scope = digest(&format!("dashboard:{owner}:{}:{user}", record.id));
+    let _guard = worker_lock(root, &scope[..32])
+        .context("dashboard host already active for this account and registration")?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .context("local user home directory unavailable")?;
+    let mut termination = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let pool = root.join(format!("dashboard-{scope}"));
+    crate::service::directory(&pool, true)?;
+    println!("Offering up to {slots} browser shells to account {owner}. Stop this process to withdraw and end its workspaces.");
+    loop {
+        tokio::select! {
+            _=termination.recv()=>break,
+            _=interrupt.recv()=>break,
+            _=tick.tick()=>{}
+        }
+        let mut live = 0;
+        for id in slots_in(&pool)? {
+            if running(root, &id).await? {
+                live += 1;
+            } else {
+                fs::remove_file(pool.join(&id))?;
+            }
+        }
+        for _ in live..slots {
+            let args = Share {
+                pool: Some(pool.clone()),
+                dashboard_owner: Some(owner.clone()),
+                relay_only: true,
+                stun_servers: vec![],
+                existing: None,
+                local: New {
+                    name: None,
+                    cwd: Some(home.clone()),
+                    shell: None,
+                    environment: vec![],
+                    detach: true,
+                    json: false,
+                    prefix: "C-a".into(),
+                    history_limit: DEFAULT_HISTORY,
+                    no_mouse: false,
+                    sidebar: Sidebar::Off,
+                    command: vec![],
+                },
+                registration: Some(record.id.clone()),
+                user,
+                link_expires: 0,
+                session_timeout: 0,
+                idle_timeout: 0,
+                reconnect_timeout: 60,
+                max_viewers: 16,
+                read_only: false,
+                access: "web".into(),
+            };
+            if let Err(error) = start(root, args).await {
+                eprintln!("Could not prepare a browser workspace: {error}");
+                break;
+            }
+        }
+    }
+    withdraw(root, &owner, &record.id, user).await
+}
+
+fn slots_in(pool: &Path) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    if !pool.try_exists()? {
+        return Ok(ids);
+    }
+    private(pool)?;
+    for entry in fs::read_dir(pool)? {
+        let entry = entry?;
+        let id = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("invalid dashboard slot"))?;
+        if id.starts_with(".porthub-state-") {
+            continue;
+        }
+        ensure!(
+            token(&id, 32) && crate::profile::read_private(&entry.path())? == id.as_bytes(),
+            "invalid dashboard slot ownership"
+        );
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// Withdraw only immutable workspace IDs created under this explicit OS-user grant.
+pub(crate) async fn withdraw(
+    root: &Path,
+    owner: &str,
+    registration: &str,
+    user: bool,
+) -> Result<()> {
+    use porthub_components::protocol::terminal::Operation;
+    let scope = digest(&format!("dashboard:{owner}:{registration}:{user}"));
+    let pool = root.join(format!("dashboard-{scope}"));
+    let mut failures = Vec::new();
+    for id in slots_in(&pool)? {
+        let result = async {
+            if running(root, &id).await? {
+                terminal_operation(Operation::Stop {
+                    directory: root.into(),
+                    name: id.clone(),
+                })
+                .await?;
+            }
+            fs::remove_file(pool.join(&id))?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            failures.push(format!("{id}: {error}"));
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "could not withdraw all dashboard workspaces: {}",
+        failures.join(", ")
+    );
+    Ok(())
 }

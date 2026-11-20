@@ -329,11 +329,18 @@ async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstrea
     bytes: &[u8], address: std::net::SocketAddr, tcp: bool) -> Option<Vec<u8>> {
     let private={let state=zone.read().await;state.missing_private(bytes).zip(state.sparse.clone())};
     if let Some((name,resolver))=private {
-        let peer=resolver.resolve_name(&name).await;
+        resolver.resolve_name(&name).await;
         let state=zone.read().await;
         // Recheck the latest namespace after await. Never send this private query upstream.
         if state.missing_private(bytes).as_deref()!=Some(name.as_str()){return state.answer(bytes);}
-        if let Some(peer)=peer {if let Some(ttl)=resolver.dns_ttl(peer.ip){let mut answer=state.clone();answer.records.insert(name,peer.ip);answer.ttl=ttl;return answer.answer(bytes);}}
+        // The zone or pair can change while discovery waits. Revalidate the
+        // current name and its TTL from one cache entry before answering.
+        if let Some((ip, ttl)) = state.sparse.as_ref().and_then(|handle| handle.dns_name_record(&name)) {
+            let mut answer = state.clone();
+            answer.records.insert(name, ip);
+            answer.ttl = ttl;
+            return answer.answer(bytes);
+        }
         let mut answer=Message::from_vec(&state.answer(bytes)?).ok()?;answer.metadata.response_code=ResponseCode::ServFail;return answer.to_vec().ok();
     }
     {
@@ -380,6 +387,18 @@ fn close_resolver_files(registration:&mut Registration)->Result<()>{
     }
     while let Some((path,_))=registration.paths.first(){std::fs::remove_file(path)?;registration.paths.remove(0);}
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_resolver_publication(
+    registration: &mut Registration,
+    present: &[super::dns_convergence_macos::Endpoint],
+    removed: &[super::dns_convergence_macos::Endpoint],
+) -> Result<()> {
+    if let Some(session) = &mut registration.private_session {
+        session.wait_for_change().await?;
+    }
+    super::dns_convergence_macos::wait(present, removed).await
 }
 
 /// Finish owned OS DNS cleanup before the interface address can disappear.
@@ -430,9 +449,10 @@ pub async fn replace_registration(current:&mut Option<Registration>,profile:&std
         *current=Some(next);
         let present=resolver_endpoints(current.as_ref().unwrap())?;
         let removed:Vec<_>=previous.into_iter().filter(|old|!present.contains(old)).collect();
-        current.as_mut().unwrap().withdraw_pending=removed.clone();
-        super::dns_convergence_macos::wait(&present,&removed).await?;
-        current.as_mut().unwrap().withdraw_pending.clear();
+        let registration=current.as_mut().unwrap();
+        registration.withdraw_pending=removed.clone();
+        wait_for_resolver_publication(registration,&present,&removed).await?;
+        registration.withdraw_pending.clear();
         let _=(index,own);
     }
     #[cfg(not(target_os="macos"))]
@@ -551,7 +571,7 @@ pub async fn register(
         registration.tor_default=Some(super::dns_default_macos::register(port).await?);
     }
     let present=resolver_endpoints(&registration)?;
-    if let Err(error)=super::dns_convergence_macos::wait(&present,&[]).await{
+    if let Err(error)=wait_for_resolver_publication(&mut registration,&present,&[]).await{
         close_resolver_files(&mut registration)?;
         if let Some(session)=registration.private_session.as_mut(){session.close().await?;}
         super::dns_convergence_macos::wait(&[],&present).await?;
@@ -868,6 +888,62 @@ mod tcp_tests {
         task.await??;
         mock_task.abort();
         checks
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sparse_udp_answers_under_concurrent_cached_lookups() -> Result<()> {
+        use porthub_network::policy::{Lookup, PairLease};
+        let epoch = "a".repeat(64);
+        let local = serde_json::json!({"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"});
+        let expires = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "workspace":"w","self":"a","revision":1,"expires_at":expires,
+            "sparse":{"protocol":1,"epoch":epoch},"peers":[local],"grants":[]
+        }))?;
+        let pair: PairLease = serde_json::from_value(serde_json::json!({
+            "workspace":"w","self":"a","revision":1,"epoch":epoch,"expires_at":expires,
+            "local":local,"peer":{"id":"b","ip":"10.203.0.3","fingerprint":"remote","instance":"remote-instance","hostname":"b.phub","aliases":["alias.phub"]},
+            "grants":[{"source":"a","destination":"b","protocol":"any","ports":[]}]
+        }))?;
+        let (handle, _control) = super::super::sparse::channel();
+        handle.update_base(&snapshot);
+        let lookup = Lookup { kind: "name".into(), value: "alias.phub".into() };
+        handle.installed(&lookup, pair);
+        let mut zone = Zone::default();
+        zone.set_sparse(handle.clone());
+        zone.update(&snapshot)?;
+        let (socket, tcp) = test_sockets().await?;
+        let address = socket.local_addr()?;
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default(), fixture_observer:None };
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(server.serve(cancel.clone()));
+        let workers: Vec<_> = (0..2).map(|_| {
+            let (handle, lookup) = (handle.clone(), lookup.clone());
+            std::thread::spawn(move || {
+                for _ in 0..100_000 {
+                    assert!(handle.cached_query(&lookup).is_some());
+                }
+            })
+        }).collect();
+        let client = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut buf = [0; 1500];
+        for ty in [RecordType::A, RecordType::AAAA, RecordType::HTTPS, RecordType::SVCB, RecordType::TXT].into_iter().cycle().take(100) {
+            let mut query = Message::query();
+            query.add_query(Query::query(Name::from_ascii("alias.phub.")?, ty));
+            client.send_to(&query.to_vec()?, address).await?;
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf)).await??;
+            let answer = Message::from_vec(&buf[..n])?;
+            assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(answer.answers.len(), usize::from(ty == RecordType::A));
+            if let Some(record) = answer.answers.first() {
+                assert_eq!(&record.data, &RData::A(A("10.203.0.3".parse()?)));
+                assert!((1..=5).contains(&record.ttl));
+            }
+        }
+        cancel.cancel();
+        task.await??;
+        for worker in workers { worker.join().unwrap(); }
+        Ok(())
     }
 
     #[tokio::test]

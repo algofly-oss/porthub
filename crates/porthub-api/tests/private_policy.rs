@@ -161,3 +161,29 @@ fn compiled_selector_index_matches_pair_rules_with_current_group_and_machine_mem
     for a in machines{for b in machines{let expected=policy::compile_pair(machines,books,&groups,a["_id"].as_str().unwrap(),b["_id"].as_str().unwrap());assert_eq!(normalized(index.pair(a,b,&groups)),normalized(expected));}}
     assert!(index.pair(&machines[0],&machines[1],&HashMap::new()).is_empty());
 }
+
+#[test]
+fn a_wildcard_bidirectional_rule_only_opens_tcp_and_udp_toward_a_virtual_host() {
+    let source = json!({"_id": "condor", "user_id": "owner"});
+    let target = json!({"_id": "via-luna", "user_id": "owner", "kind": "virtual_host"});
+    let machines = vec![source.clone(), target.clone()];
+    let all = json!([{"kind": "all", "id": "machines"}]);
+    let books = vec![json!({"_id":"book","user_id":"owner","group_id":"test",
+        "rules":[{"id":"all","name":"Allow both directions","sources":all,"destinations":all,
+            "protocol":"any","ports":"","bidirectional":true}]})];
+    let groups = HashMap::from([("test".to_owned(), json!({"_id":"test"}))]);
+    let index = porthub_api::domain::private_rule_index::Index::compile(&books).unwrap_or_else(|_| panic!("valid virtual host policy"));
+    for grants in [
+        policy::compile_for(&machines, &books, &groups, "condor"),
+        index.pair(&source, &target, &groups),
+        index.pair(&target, &source, &groups),
+    ] {
+        assert!(grants.iter().all(|g| g.source == "condor" && g.destination == "via-luna"));
+        let mut protocols: Vec<_> = grants.iter().map(|g| g.protocol.as_str()).collect();
+        protocols.sort_unstable();
+        assert_eq!(protocols, ["tcp", "udp"]);
+    }
+    assert!(!policy::evaluate(&target, &source, "tcp", 443, &books, &groups).allowed);
+    assert!(!policy::evaluate(&source, &target, "icmp", 0, &books, &groups).allowed);
+    assert!(policy::evaluate(&source, &target, "udp", 53, &books, &groups).allowed);
+}

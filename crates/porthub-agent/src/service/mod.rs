@@ -19,6 +19,8 @@ pub(crate) mod publication;
 pub mod readable;
 #[cfg(target_os = "linux")]
 pub mod systemd;
+#[cfg(unix)]
+pub(crate) mod dashboard;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]

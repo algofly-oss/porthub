@@ -14,14 +14,11 @@ pub struct Native {
     pub executable: PathBuf,
     _broker: porthub_agent::exposure_broker::Guard,
 }
-pub async fn start(
-    root: &Path,
-    workspace: &Workspace,
-    hello: &HostHello,
-    origin: &str,
-    machine: &str,
-    token: &str,
-) -> Result<Native> {
+pub struct Registration {
+    pub data: PathBuf, pub config: PathBuf, pub id: String,
+    pub broker: porthub_agent::exposure_broker::Guard,
+}
+pub async fn registration(root:&Path,origin:&str,machine:&str,token:&str)->Result<Registration> {
     ensure!(
         cfg!(target_os = "linux"),
         "isolated native broker fixture currently requires Linux"
@@ -63,22 +60,6 @@ pub async fn start(
         &serde_json::to_vec(&spec)?,
         false,
     )?;
-    let command = workspace.command();
-    let binary = PathBuf::from(command.get_program());
-    let terminfo = command
-        .get_envs()
-        .find_map(|(key, value)| (key == "TERMINFO").then_some(value).flatten())
-        .context("bundled terminfo")?;
-    use sha2::{Digest, Sha256};
-    let job = serde_json::json!({"id":hello.id,"name":hello.options.name,"executable":binary,"executable_sha256":format!("{:x}",Sha256::digest(std::fs::read(&binary)?)),"terminfo":PathBuf::from(terminfo),"workspace":workspace.socket().parent(),"created_at":now()});
-    porthub_agent::profile::write_private(
-        &terminal.join(format!("{}.json", hello.id)),
-        &serde_json::to_vec(&job)?,
-        false,
-    )?;
-    let sharing = serde_json::json!({"hello":hello,"registration":id,"user":true,"ready":null,"state":"connecting"});
-    let sharing_path = terminal.join(format!("{}.share", hello.id));
-    porthub_agent::profile::write_private(&sharing_path, &serde_json::to_vec(&sharing)?, false)?;
     let control = Arc::new(porthub_agent::control::Control::new(profile)?);
     let broker = porthub_agent::exposure_broker::start_registered(
         &profile_path,
@@ -112,6 +93,34 @@ pub async fn start(
         false,
     )?;
     porthub_agent::service::readable::select(&layout, Some(&id), Some(false))?;
+    Ok(Registration { data, config, id, broker })
+}
+pub async fn start(
+    root: &Path,
+    workspace: &Workspace,
+    hello: &HostHello,
+    origin: &str,
+    machine: &str,
+    token: &str,
+) -> Result<Native> {
+    let Registration {data, config, id, broker}=registration(root,origin,machine,token).await?;
+    let terminal=data.join("porthub/terminal");
+    let command = workspace.command();
+    let binary = PathBuf::from(command.get_program());
+    let terminfo = command
+        .get_envs()
+        .find_map(|(key, value)| (key == "TERMINFO").then_some(value).flatten())
+        .context("bundled terminfo")?;
+    use sha2::{Digest, Sha256};
+    let job = serde_json::json!({"id":hello.id,"name":hello.options.name,"executable":binary,"executable_sha256":format!("{:x}",Sha256::digest(std::fs::read(&binary)?)),"terminfo":PathBuf::from(terminfo),"workspace":workspace.socket().parent(),"created_at":now()});
+    porthub_agent::profile::write_private(
+        &terminal.join(format!("{}.json", hello.id)),
+        &serde_json::to_vec(&job)?,
+        false,
+    )?;
+    let sharing = serde_json::json!({"hello":hello,"registration":id,"user":true,"ready":null,"state":"connecting"});
+    let sharing_path = terminal.join(format!("{}.share", hello.id));
+    porthub_agent::profile::write_private(&sharing_path, &serde_json::to_vec(&sharing)?, false)?;
     let executable = PathBuf::from(
         std::env::var_os("PORTHUB_TEST_AGENT_EXECUTABLE").context("set bundled CLI path")?,
     );

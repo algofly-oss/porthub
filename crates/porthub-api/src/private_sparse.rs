@@ -539,6 +539,7 @@ pub struct Selection {
 }
 pub(crate) async fn machine(app: &App, workspace: ObjectId, peer: &Document) -> ApiResult<Option<Document>> {
     use mongodb::bson::Bson;
+    if !crate::routes::virtual_hosts::parent_valid(app,peer).await? { return Ok(None); }
     let owner = store::id(peer.get("owner_id"));
     let Ok(owner_id) = ObjectId::parse_str(&owner) else {
         return Ok(None);
@@ -556,7 +557,7 @@ pub(crate) async fn machine(app: &App, workspace: ObjectId, peer: &Document) -> 
         return Ok(None);
     }
     if owner_id!=workspace && app.collection("workspace_members").find_one(doc!{"workspace_id":workspace,"user_id":{"$in":[Bson::ObjectId(owner_id),Bson::String(owner)]},"role":{"$in":["member","admin"]}}).projection(doc!{"_id":1}).await?.is_none(){return Ok(None);}
-    Ok(app.collection("machines").find_one(doc!{"_id":peer.get("machine_id"),"user_id":peer.get("owner_id"),"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"private_owner_revoked":{"$ne":true}}).projection(doc!{"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"enabled":1,"group_ids":1,"group_id":1,"name":1,"aliases":1,"private_domains":1}).await?)
+    Ok(app.collection("machines").find_one(doc!{"_id":peer.get("machine_id"),"user_id":peer.get("owner_id"),"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"private_owner_revoked":{"$ne":true}}).projection(doc!{"kind":1,"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"enabled":1,"group_ids":1,"group_id":1,"name":1,"aliases":1,"private_domains":1}).await?)
 }
 /// Bounded identity selection: no whole-workspace inventory on an ordinary sparse sync.
 /// Returned directory metadata is naming only; every selected peer/member/machine is freshly authenticated.

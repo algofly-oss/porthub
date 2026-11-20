@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 pub struct PrivateStatus {
     #[serde(default)]
     pub relay_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_repair: Option<NativeRepairStatus>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub dns_integration: Option<String>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -32,6 +34,13 @@ pub struct PrivateStatus {
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub tor: Option<TorStatus>,
 }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeRepairStatus {
+    AwaitingSourceShutdown,
+    AwaitingNewAssignment,
+}
+
 #[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct TorStatus {
     pub state:String,
@@ -60,8 +69,16 @@ pub struct ExitStatus {
 impl PrivateStatus {
     pub fn display(&self) -> String {
         let clean = |text: &str| text.chars().filter(|c| !c.is_control()).take(160).collect::<String>();
-        let mut output = format!("Private relay: {}\nPrivate policy: revision {}; lease {}; {} access grants; {} DNS rules", match self.relay_ready { Some(true)=>"authenticated carrier ready",Some(false)=>"unavailable; check gateway relay connectivity",None=>"not observed" }, self.revision,
+        let mut output = format!("Private relay: {}\nPrivate policy: revision {}; lease {}; {} access grants; {} DNS rules", match self.relay_ready { Some(true)=>"authenticated carrier ready",Some(false) if self.native_repair.is_some()=>"unavailable",Some(false)=>"unavailable; check gateway relay connectivity",None=>"not observed" }, self.revision,
             if self.lease_valid { "valid" } else { "expired or unavailable" }, self.grants, self.dns_rules);
+        if let Some(repair) = self.native_repair {
+            output.push_str(match repair {
+                NativeRepairStatus::AwaitingSourceShutdown =>
+                    "\nPrivate address quarantined. PortHub is waiting to verify that the previous tunnel and source address are gone.",
+                NativeRepairStatus::AwaitingNewAssignment =>
+                    "\nPrivate address quarantined. Tunnel shutdown was recorded. PortHub is waiting for a new address assignment.",
+            });
+        }
         if let Some(dns)=&self.dns_integration {output.push_str(&format!("\nPrivate DNS: {}; {}",clean(dns),match self.dns_verified {Some(true)=>"system hostname lookup verified",Some(false)=>"private hostname lookup not ready",None=>"verification not observed"}));}
         if let Some(exit) = &self.exit {
             output.push_str(&format!("\nExit route: {}; {}; {}; {}/{} peers reachable; all offline: {}",
@@ -694,11 +711,29 @@ pub fn status(path: &Path) -> Result<Status> {
 mod private_status_tests {
     use super::*;
     #[test]
+    fn quarantine_diagnostic_survives_status_serialization() {
+        let mut status = PrivateStatus { relay_ready: Some(false), ..Default::default() };
+        assert!(status.display().contains("check gateway relay connectivity"));
+        for (repair, detail) in [
+            (NativeRepairStatus::AwaitingSourceShutdown, "waiting to verify"),
+            (NativeRepairStatus::AwaitingNewAssignment, "waiting for a new address"),
+        ] {
+            status.native_repair = Some(repair);
+            let snapshot: PrivateStatus = serde_json::from_value(serde_json::to_value(&status).unwrap()).unwrap();
+            assert_eq!(snapshot.native_repair, Some(repair));
+            let display = snapshot.display();
+            assert!(display.contains("Private address quarantined"));
+            assert!(display.contains(detail));
+            assert!(!display.contains("check gateway relay connectivity"));
+        }
+    }
+    #[test]
     fn private_policy_status_is_backwards_compatible_and_safe_for_terminals() {
         let old = serde_json::json!({"pid":1,"state":"running","agent_version":"1.5.2","config_version":"","service_count":0,"route":"private","updated_at":1,"update_request_id":""});
         assert!(serde_json::from_value::<Status>(old).unwrap().private_status.is_none());
         let status = PrivateStatus {
             relay_ready: None,
+            native_repair: None,
             dns_integration: None,
             dns_verified: None,
             revision: 7, grants: 2, dns_rules: 1, lease_valid: false, tor:None,

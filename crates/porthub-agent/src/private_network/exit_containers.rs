@@ -13,9 +13,7 @@ use nlink::netlink::{
 
 fn table(name: &str) -> Result<String> {
     ensure!(
-        name.len() == 10
-            && name.starts_with("ph")
-            && name[2..].bytes().all(|c| c.is_ascii_hexdigit()),
+        porthub_mesh::underlay::porthub_tun_name(name),
         "invalid container exit owner"
     );
     Ok(format!("porthub_containers_{name}"))

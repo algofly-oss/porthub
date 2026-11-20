@@ -22,6 +22,7 @@ pub mod private_books;
 pub mod private_enrollment;
 pub mod private_groups;
 pub mod private_sync;
+pub mod virtual_hosts;
 pub mod proxy_grants;
 pub mod telegram;
 pub mod traffic_routes;
@@ -71,6 +72,7 @@ pub fn router() -> Router<Arc<App>> {
         .merge(private_enrollment::router())
         .merge(private_groups::router())
         .merge(private_sync::router())
+        .merge(virtual_hosts::router())
         .merge(crate::private_relay::router())
         .merge(traffic_routes::router())
         .merge(crate::inventory_query::router())

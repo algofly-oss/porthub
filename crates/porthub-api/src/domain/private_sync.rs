@@ -17,6 +17,8 @@ pub struct Signal {
 }
 #[derive(Serialize)]
 pub struct Sync {
+    #[serde(skip_serializing_if="is_false")]
+    pub virtual_host_provider:bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse: Option<super::private_pairs::Request>,
     // Separate root capability: older gateways ignore unknown root fields,
@@ -43,6 +45,8 @@ pub struct Sync {
     pub lan_exit: bool,
     #[serde(skip_serializing_if="is_false")]
     pub application_proxy: bool,
+    #[serde(skip_serializing_if="is_false")]
+    pub pinned_relay: bool,
     pub signals: Vec<Signal>,
     pub acks: Vec<String>,
     pub paths: BTreeMap<String, String>,
@@ -90,6 +94,9 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         repair.validate().map_err(|_|crate::error::ApiError::bad_request("Invalid native repair scope"))?;
         if !cfg!(feature="private-sparse")||sparse.is_none(){return Err(crate::error::ApiError::bad_request("Native repair requires negotiated private networking"));}
     }
+    let virtual_host_provider=match raw.get("virtual_host_provider"){
+        None=>false, Some(v) if v.as_u64()==Some(1)=>true, Some(_)=>return Err(crate::error::ApiError::bad_request("Unsupported virtual host provider capability")),
+    };
     let mut model = Model::new(raw)?;
     let peer_id = string(&mut model, "peer_id", 0, 60);
     let token = string(&mut model, "token", 32, 200);
@@ -112,6 +119,9 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     if model.field(&["application_proxy"]).is_some_and(|value|!value.is_boolean()) {
         model.add("application_proxy","Expected a boolean","type_error.bool");
     }
+    let pinned_relay = if model.field(&["pinned_relay"]).is_some() {
+        model.required_bool("pinned_relay")
+    } else { false };
     let application_proxy=model.optional_bool("application_proxy").unwrap_or(false);
     for network in &lan_networks {
         if network.parse::<porthub_mesh::lan_routes::Network>().is_err() {
@@ -158,6 +168,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     }
     model.finish()?;
     Ok(Sync {
+        virtual_host_provider,
         sparse,
         exit_pair_protocol,
         exit_pick,
@@ -172,6 +183,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         lan_networks,
         lan_exit,
         application_proxy,
+        pinned_relay,
         signals,
         acks,
         paths,

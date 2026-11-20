@@ -34,6 +34,9 @@ impl Grant {
     }
 }
 pub async fn ensure_indexes(app: &App) -> ApiResult<()> {
+    app.collection("terminal_sessions").create_index(IndexModel::builder()
+        .keys(doc!{"machine_id":1,"options.dashboard_owner":1,"dashboard_claim":1})
+        .options(IndexOptions::builder().unique(true).partial_filter_expression(doc!{"dashboard_claim":{"$exists":true}}).build()).build()).await?;
     let collection = app.collection("terminal_grants");
     collection
         .create_index(
@@ -58,6 +61,11 @@ pub async fn create(
     session: &str,
     read_only: bool,
     grace: u32,
+) -> ApiResult<(Grant, String)> {
+    create_for(app, session, read_only, grace, None).await
+}
+pub(crate) async fn create_for(
+    app: &App, session: &str, read_only: bool, grace: u32, binding: Option<&str>,
 ) -> ApiResult<(Grant, String)> {
     if !(10..=300).contains(&grace) || !token(session, 32) {
         return Err(unavailable());
@@ -92,17 +100,22 @@ pub async fn create(
         lease: random_token(16),
         grace,
     };
-    app.collection("terminal_grants").insert_one(doc!{"_id":&grant.hash,"session_id":session,"identity":grant.identity as i64,"read_only":read_only,"lease":&grant.lease,"grace":grace as i64,"active":true,"valid_until":deadline(grace+30)}).await?;
+    app.collection("terminal_grants").insert_one(doc!{"_id":&grant.hash,"session_id":session,"identity":grant.identity as i64,"read_only":read_only,"lease":&grant.lease,"grace":grace as i64,"active":true,"dashboard_binding":binding,"valid_until":deadline(grace+30)}).await?;
     Ok((grant, raw))
 }
 pub async fn resume(app: &App, raw: &str) -> ApiResult<Grant> {
+    resume_for(app, raw, None, None).await
+}
+pub(crate) async fn resume_for(app: &App, raw: &str, binding: Option<&str>, session_id: Option<&str>) -> ApiResult<Grant> {
     if !token(raw, 64) {
         return Err(unavailable());
     }
     let hash = digest(raw);
+    let mut filter = doc! {"_id": &hash, "active": true, "valid_until":{"$gt":DateTime::now()}, "dashboard_binding":binding};
+    if let Some(id) = session_id { filter.insert("session_id", id); }
     let previous = app
         .collection("terminal_grants")
-        .find_one(doc! {"_id":&hash,"active":true,"valid_until":{"$gt":DateTime::now()}})
+        .find_one(filter)
         .await?
         .ok_or_else(unavailable)?;
     let session = store::string(&previous, "session_id").to_owned();

@@ -159,3 +159,35 @@ four measurements per cell. The table gives medians in MiB/s.
 The single-connection gain in the first sequence did not repeat when polling
 ran first. Both experiments ended with the installed agents restored. Neither
 candidate was included in the release.
+
+### Released agent 1.11.51
+
+Both endpoints reported the published agent version. Each transfer used a
+1 GiB file served by `porthub http.server`. The receiver used `porthub get`
+with SHA-256 verification. SSH was used for test administration.
+
+| Sender → receiver | Connections | Private (MiB/s) | Comparison (MiB/s) | Private / comparison |
+| --- | ---: | ---: | ---: | ---: |
+| Condor → Luna | 1 | 34.18 | 35.08 | 97.4% |
+| Condor → Luna | 16 | 32.93 | 34.28 | 96.1% |
+| Luna → Miro | 1 | 75.96 | 97.80 | 77.7% |
+| Luna → Miro | 8 | 84.72 | 101.76 | 83.3% |
+| Miro → Luna | 1 | 75.56 | 101.15 | 74.7% |
+| Miro → Luna | 8 | 89.26 | 94.47 | 94.5% |
+
+For Condor the comparison used a temporary PortHub public gateway mapping,
+with one transfer per cell. For Luna and Miro the comparison used the
+sender's Ethernet IP. Each LAN cell is the mean of two transfers, with the
+private and direct trials interleaved. The private trials addressed the
+sender by its PortHub DNS name. During a Miro → Luna private download, a
+two-second capture on Luna's Ethernet interface counted 151,663 UDP packets
+from Miro's Ethernet IP to Luna's Ethernet IP.
+
+Single-connection LAN throughput was 22–25% below the direct-IP baseline
+in both directions. Miro's sending TCP sockets showed different feedback
+patterns across the paths. For sockets with more than 5 MB sent, the median
+ratio of inbound TCP segments to outbound data segments was 0.456 across
+46 private observations and 0.041 across 33 direct-IP observations. These
+are repeated snapshots of active sockets and include multiple connection
+counts. They identify a difference worth isolating in a controlled trial
+before attributing the throughput gap to acknowledgement processing.

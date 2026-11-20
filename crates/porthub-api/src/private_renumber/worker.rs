@@ -53,7 +53,7 @@ mod tests {
             let peer=doc!{"_id":&row.peer,"workspace_id":owner,"machine_id":machine,"ip":row.old.to_string(),"enrollment_generation":"enrollment-1","credential_hash":"unchanged-fixture-hash","enabled":true};
             app.collection("private_peers").insert_one(peer.clone()).await?;
             let guard=super::super::fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-            super::super::journal::prepare(&guard,job,&[row],&["10.204.0.0/16".into()]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+            super::super::journal::prepare(&guard,job,&[row],&["10.204.0.0/16".into()],None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
             let (stopping,stop)=watch::channel(false);let worker=tokio::spawn(run(app.clone(),stop));
             tokio::time::timeout(Duration::from_secs(2),async{while !app.private_sparse.workspace_fences.held(&owner.to_hex()).await {tokio::task::yield_now().await;}}).await?;
             stopping.send(true)?;tokio::time::timeout(Duration::from_secs(2),worker).await??;

@@ -132,7 +132,7 @@ async fn validate_inventory(app: &App, owner: ObjectId, input: &GrantInput) -> A
     if app
         .collection("machines")
         .count_documents(doc! {
-            "_id":{"$in":&ids},"user_id":owner,"deletion_pending":{"$ne":true}
+            "_id":{"$in":&ids},"kind":{"$ne":"virtual_host"},"user_id":owner,"deletion_pending":{"$ne":true}
         })
         .await?
         != ids.len() as u64

@@ -69,9 +69,7 @@ impl Journal {
             journal.index > 0
                 && journal.index <= u32::MAX - 100_000
                 && journal.own.is_private()
-                && journal.name.len() == 10
-                && journal.name.starts_with("ph")
-                && journal.name[2..].bytes().all(|c| c.is_ascii_hexdigit())
+                && porthub_mesh::underlay::porthub_tun_name(&journal.name)
                 && journal.sources.len() <= 128
                 && journal.lan_networks.len()<=512
                 && journal

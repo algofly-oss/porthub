@@ -24,7 +24,7 @@ async fn queued_actual_sync_cannot_strand_completed_assignment_publication()->Re
             app.collection("private_peers").insert_one(doc!{"_id":&peer,"workspace_id":owner,"owner_id":owner,"machine_id":machine,"enabled":true,"credential_hash":token_digest(token),"enrollment_generation":"handoff-v1","ip":row.old.to_string()}).await?;rows.push(row);
         }
         let job=uuid::Uuid::new_v4().simple().to_string();let guard=fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
-        journal::prepare(&guard,&job,&rows,&["10.204.0.0/24".into()]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+        journal::prepare(&guard,&job,&rows,&["10.204.0.0/24".into()],None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
         let (finished,completion)=tokio::sync::oneshot::channel();let recovery_app=app.clone();
         tasks.spawn(async move{let _=finished.send(recover::workspace(&recovery_app,owner).await);});
         tokio::time::timeout(Duration::from_secs(3),async{while !app.private_sparse.workspace_fences.held(&owner.to_hex()).await{tokio::task::yield_now().await;}}).await.context("actual migration did not acquire workspace")?;

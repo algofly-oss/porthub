@@ -101,6 +101,10 @@ mod dns_windows;
 
 #[cfg(feature = "private-sparse")]
 mod authority_clock;
+#[cfg(feature = "private-sparse")]
+pub(crate) use authority_clock::ExpiredDuringSuspend;
+#[cfg(feature = "private-sparse")]
+pub(crate) use authority_clock::{NativeClock, SuspendClock};
 
 mod authority_event;
 #[cfg(any(target_os="macos",test))]
@@ -122,3 +126,6 @@ mod native_desktop_lifecycle_fixture;
 mod native_resolver_lifecycle_fixture;
 
 mod native_owner;
+
+#[cfg(all(feature = "private-stream", feature = "private-sparse"))]
+mod virtual_hosts;

@@ -50,7 +50,7 @@ async fn enroll(
     let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(&app,owner).await?;
     let machine = app
         .collection("machines")
-        .find_one(doc! {"_id":mid,"deletion_pending":{"$ne":true}})
+        .find_one(doc! {"_id":mid,"deletion_pending":{"$ne":true},"kind":{"$ne":"virtual_host"}})
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "You cannot enroll this machine"))?;
     if machine.get("user_id") != user.get("_id")
