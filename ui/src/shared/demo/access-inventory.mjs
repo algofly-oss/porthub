@@ -1,16 +1,18 @@
+import { demoVirtualMachines } from "./virtual-hosts.mjs";
 import { demoAccess } from "./access.mjs";
 import { searchScore } from "../utils/search.mjs";
 export function demoAccessInventory(state,kind,p,id) {
  const snapshot=demoAccess(state,"get","/access/snapshot",{},id);
  const size=Math.min(100,Math.max(1,Number(p.page_size)||25)),page=Math.max(1,Number(p.page)||1),q=p.q || "";
- const entities=[...snapshot.machines.map(m=>({_id:`machine:${m._id}`,kind:"machine",name:m.name})),...snapshot.groups.map(g=>({_id:`group:${g._id}`,kind:"group",name:g.name})),...snapshot.users.map(u=>({_id:`user:${u._id}`,kind:"user",name:u.name || u.email}))];
+ const machines=[...snapshot.machines,...(p.agents_only==="true" ? [] : demoVirtualMachines(state))];
+ const entities=[...machines.map(m=>({_id:`machine:${m._id}`,kind:"machine",name:m.name,...(m.via ? {via:m.via} : {})})),...snapshot.groups.map(g=>({_id:`group:${g._id}`,kind:"group",name:g.name})),...snapshot.users.map(u=>({_id:`user:${u._id}`,kind:"user",name:u.name || u.email}))];
  const names=new Map(entities.map(e=>[e._id,e.name]));
- if(kind==="summary")return {data:{workspace_id:snapshot.workspace_id,workspace_name:"Demo Workspace",role:snapshot.role,network:snapshot.network,counts:{machines:snapshot.machines.length,groups:snapshot.groups.length,books:snapshot.books.length,people:snapshot.users.length,peers:snapshot.private_peers.length}}};
+ if(kind==="summary")return {data:{workspace_id:snapshot.workspace_id,workspace_name:"Demo Workspace",role:snapshot.role,network:snapshot.network,counts:{machines:machines.length,groups:snapshot.groups.length,books:snapshot.books.length,people:snapshot.users.length,peers:snapshot.private_peers.length}}};
  let rows;
  if(kind==="books")rows=snapshot.books.filter(b=>(!p.group || p.group==="all" || b.group_id===p.group) && Number.isFinite(searchScore(q,[b.name,...b.rules.flatMap(r=>[r.name,...[...r.sources,...r.destinations].map(e=>names.get(`${e.kind}:${e.id}`))])]))).map(b=>({...b,group_name:snapshot.groups.find(g=>g._id===b.group_id)?.name,rules_count:b.rules.length,rules:p.detail==="true" ? b.rules : b.rules.slice(0,2)}));
  else if(kind==="entities")rows=entities.filter(e=>(!p.entity_types || p.entity_types.split(",").includes(e.kind)) && Number.isFinite(searchScore(q,[e.name,`${{machine:"Machine",group:"Group",user:"Person"}[e.kind]} · ${e.name}`])));
  else if(kind==="groups")rows=snapshot.groups.map(g=>({_id:g._id,name:g.name,machine_count:snapshot.machines.filter(m=>m.group_ids.includes(g._id)).length,user_count:g.user_ids.length,book_count:snapshot.books.filter(b=>b.group_id===g._id).length}));
- else if(kind==="machines")rows=snapshot.machines.map(m=>({_id:m._id,name:m.name,group_ids:m.group_ids,enabled:m.enabled,connection_status:m.connection_status,private_owner_id:m.private_owner_id,private_owner_revoked:m.private_owner_revoked,member:m.group_ids.includes(p.membership)}));
+ else if(kind==="machines")rows=machines.map(m=>({...m,_id:m._id,name:m.name,group_ids:m.group_ids,enabled:m.enabled,connection_status:m.connection_status,private_owner_id:m.private_owner_id,private_owner_revoked:m.private_owner_revoked,member:m.group_ids.includes(p.membership)}));
  else if(kind==="people")rows=snapshot.users.map(u=>({...u,member:snapshot.groups.find(g=>g._id===p.membership)?.user_ids.includes(u._id) || false}));
  else if(kind==="invitations")rows=snapshot.invitations;
  else if(kind==="peers")rows=snapshot.private_peers;

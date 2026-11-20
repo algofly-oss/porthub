@@ -17,6 +17,8 @@ pub struct Signal {
 }
 #[derive(Serialize)]
 pub struct Sync {
+    #[serde(skip_serializing_if="is_false")]
+    pub virtual_host_provider:bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse: Option<super::private_pairs::Request>,
     // Separate root capability: older gateways ignore unknown root fields,
@@ -92,6 +94,9 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         repair.validate().map_err(|_|crate::error::ApiError::bad_request("Invalid native repair scope"))?;
         if !cfg!(feature="private-sparse")||sparse.is_none(){return Err(crate::error::ApiError::bad_request("Native repair requires negotiated private networking"));}
     }
+    let virtual_host_provider=match raw.get("virtual_host_provider"){
+        None=>false, Some(v) if v.as_u64()==Some(1)=>true, Some(_)=>return Err(crate::error::ApiError::bad_request("Unsupported virtual host provider capability")),
+    };
     let mut model = Model::new(raw)?;
     let peer_id = string(&mut model, "peer_id", 0, 60);
     let token = string(&mut model, "token", 32, 200);
@@ -163,6 +168,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     }
     model.finish()?;
     Ok(Sync {
+        virtual_host_provider,
         sparse,
         exit_pair_protocol,
         exit_pick,

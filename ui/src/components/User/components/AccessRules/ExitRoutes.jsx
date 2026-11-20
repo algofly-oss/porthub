@@ -31,7 +31,7 @@ export default function ExitRoutes({ data, manage, params, onSaved }) {
   useEffect(()=>setPage(1),[query]);
   useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
   const selectedIds=[...new Set([...form.routing,...form.clients])].filter(id=>id!==TOR_PEER).sort().join(",");
-  const selectedNames=useInventoryPage("access-entities",{...params,ids:selectedIds,entity_types:"machine,group",page_size:100,options:true},{enabled:!!editing && !!selectedIds});
+  const selectedNames=useInventoryPage("access-entities",{...params,ids:selectedIds,entity_types:"machine,group",agents_only:true,page_size:100,options:true},{enabled:!!editing && !!selectedIds});
 
   function open(route = null) {
     setEditing(route?._id || "new");
@@ -87,7 +87,7 @@ export default function ExitRoutes({ data, manage, params, onSaved }) {
     finally { setBusy(false); }
   }
 
-  const selectors=(field,title,placeholder)=><InventoryMultiSelect kind="access-entities" filters={{...params,entity_types:"machine,group"}} label={title} placeholder={placeholder} value={[...form[field]]} extraOptions={field==="routing" && form.traffic_mode!=="lan_only" ? [{value:TOR_PEER,label:"Local Tor"}] : []} disabled={busy || !manage} onChange={values=>setForm(current=>({...current,[field]:new Set(values)}))}/>;
+  const selectors=(field,title,placeholder)=><InventoryMultiSelect kind="access-entities" filters={{...params,entity_types:"machine,group",agents_only:true}} label={title} placeholder={placeholder} value={[...form[field]]} extraOptions={field==="routing" && form.traffic_mode!=="lan_only" ? [{value:TOR_PEER,label:"Local Tor"}] : []} disabled={busy || !manage} onChange={values=>setForm(current=>({...current,[field]:new Set(values)}))}/>;
 
   function moveRoutingPeer(index, offset) {
     setForm(current => {

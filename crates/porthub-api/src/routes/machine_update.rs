@@ -34,7 +34,7 @@ async fn update(
     let (name, aliases) = super::machines::split_names(&input.name)?;
     let _guard = app.connection_lock.lock().await;
     let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    let filter = doc! {"_id":id,"user_id":owner};
+    let filter = doc! {"_id":id,"user_id":owner,"kind":{"$ne":"virtual_host"}};
     let previous = app
         .collection("machines")
         .find_one(filter.clone())
@@ -192,6 +192,11 @@ async fn update(
             }
         }
         return Err(error);
+    }
+    if enabled_changed && updated.get_bool("enabled")==Ok(false) {
+        if let Some(workspace)=owner.as_object_id(){
+            super::virtual_hosts::retire_with_children(&app,workspace,&format!("{workspace}:{id}")).await?;
+        }
     }
     if config_changed {
         app.notify_config(&id.to_hex()).await;

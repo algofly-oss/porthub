@@ -119,6 +119,8 @@ impl<T> Authority<T> {
         }
         Ok(None)
     }
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    pub(crate) fn retirement_domain(&self) -> Option<Domain> { self.retirement.clone() }
     pub(crate) fn retained(&self) -> Authority<()> {
         Authority {
             value: (),

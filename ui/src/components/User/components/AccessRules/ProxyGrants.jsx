@@ -32,7 +32,7 @@ export default function ProxyGrants({ data, manage, params }) {
   useEffect(()=>setPage(1),[query]);
   useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
   const targetIds=[...new Set(grants.map(grant=>grant.target_machine_id).filter(Boolean))].sort().join(",");
-  const targets=useInventoryPage("access-machines",{...params,ids:targetIds,page_size:100},{enabled:!!targetIds && expanded});
+  const targets=useInventoryPage("access-machines",{...params,agents_only:true,ids:targetIds,page_size:100},{enabled:!!targetIds && expanded});
   const names=new Map(targets.rows.map(machine=>[machine._id,machine.name]));
   const canEdit=manage && !(form.target_kind==="gateway" && form.allow_lan && !gatewayLanAllowed);
   function open(grant) {
@@ -81,8 +81,8 @@ export default function ProxyGrants({ data, manage, params }) {
       {error && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
       <form onSubmit={save} className="space-y-3"><fieldset disabled={busy || !canEdit} className="space-y-3">
         <Input aria-label="Proxy grant name" placeholder="Proxy grant name" required maxLength={80} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} />
-        <InventorySelect kind="access-machines" filters={params} label="Proxy runs through" value={form.target_kind === "gateway" ? "gateway" : form.target_machine_id} extraOptions={[{value:"gateway",label:"PortHub gateway"}]} onChange={value => setForm(current => ({ ...current, target_kind: value === "gateway" ? "gateway" : "machine", target_machine_id: value === "gateway" ? "" : value, allow_lan: value === "gateway" && !gatewayLanAllowed ? false : current.allow_lan, client_machine_ids: current.client_machine_ids.filter(id => id !== value) }))} />
-        <InventoryMultiSelect kind="access-machines" filters={params} label="Machines allowed to use this proxy" placeholder="Search machines…" value={form.client_machine_ids} onChange={ids => setForm(current => ({ ...current, client_machine_ids:ids.filter(id=>id!==current.target_machine_id) }))} />
+        <InventorySelect kind="access-machines" filters={{...params,agents_only:true}} label="Proxy runs through" value={form.target_kind === "gateway" ? "gateway" : form.target_machine_id} extraOptions={[{value:"gateway",label:"PortHub gateway"}]} onChange={value => setForm(current => ({ ...current, target_kind: value === "gateway" ? "gateway" : "machine", target_machine_id: value === "gateway" ? "" : value, allow_lan: value === "gateway" && !gatewayLanAllowed ? false : current.allow_lan, client_machine_ids: current.client_machine_ids.filter(id => id !== value) }))} />
+        <InventoryMultiSelect kind="access-machines" filters={{...params,agents_only:true}} label="Machines allowed to use this proxy" placeholder="Search machines…" value={form.client_machine_ids} onChange={ids => setForm(current => ({ ...current, client_machine_ids:ids.filter(id=>id!==current.target_machine_id) }))} />
         <div className="rounded-lg border border-border p-3"><Switch label="Allow access to the target’s LAN" disabled={form.target_kind==="gateway" && !gatewayLanAllowed} checked={form.allow_lan} onChange={event => { const allow_lan = event.currentTarget.checked; setForm(current => ({ ...current, allow_lan })); }} /><p className="mt-2 text-xs text-muted-foreground">Off by default. Enabling this grants the selected clients access to private destinations reachable by this proxy target. {form.target_kind==="gateway" && "Gateway LAN access requires a platform administrator."}</p></div>
         <Switch label="Enabled" checked={form.enabled} onChange={event => { const enabled = event.currentTarget.checked; setForm(current => ({ ...current, enabled })); }} />
       </fieldset>

@@ -141,7 +141,7 @@ async fn save(app: Arc<App>, owner: Bson, input: Input, updating: bool) -> ApiRe
     let machine_id = object_id(&input.machine_id, "Invalid machine id")?;
     let machine = app
         .collection("machines")
-        .find_one(doc! {"_id":machine_id,"user_id":&owner,"deletion_pending":{"$ne":true}})
+        .find_one(doc! {"_id":machine_id,"user_id":&owner,"kind":{"$ne":"virtual_host"},"deletion_pending":{"$ne":true}})
         .await?
         .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
     let previous = if updating {

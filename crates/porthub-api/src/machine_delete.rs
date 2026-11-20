@@ -51,7 +51,7 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
 pub(crate) async fn delete(app: &App, owner: &Bson, id: ObjectId) -> ApiResult<Value> {
     let previous = app
         .collection("machines")
-        .find_one(doc! {"_id":id,"user_id":owner})
+        .find_one(doc! {"_id":id,"user_id":owner,"kind":{"$ne":"virtual_host"}})
         .await?
         .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
     let response =
@@ -160,6 +160,7 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
     app.collection("connections")
         .delete_many(doc! {"machine_id":id})
         .await?;
+    if let Ok(owner)=machine.get_object_id("user_id"){crate::routes::virtual_hosts::delete_children(app,owner,id).await?;}
     app.collection("usb_inventory").delete_one(doc! {"_id":id}).await?;
     app.collection("native_media_inventory").delete_many(doc!{"_id":id}).await?;
     app.collection("native_media_discovery").delete_many(doc!{"_id":id}).await?;

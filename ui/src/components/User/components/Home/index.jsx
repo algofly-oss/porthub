@@ -28,6 +28,7 @@ import {
   IconSettings,
 } from "@tabler/icons-react";
 import HostItem from "./components/Host/HostItem";
+import { VirtualHostDetails } from "./components/Host/VirtualHosts";
 import HostConfigPopup from "./components/Host/HostConfigPopup";
 import MachineCreateModal from "./components/Host/MachineCreateModal";
 import MachineGroupsModal from "./components/MachineGroupsModal";
@@ -160,6 +161,8 @@ const formatLastSeen = (machine) => {
 
 const mapMachineToHost = (machine) => ({
   id: machine._id,
+  kind: machine.kind,
+  via: machine.via,
   name: machine.name || "Untitled machine",
   aliases: machine.aliases || [],
   createdAt: machine.created_at || "",
@@ -183,9 +186,9 @@ const mapMachineToHost = (machine) => ({
       : [],
   enabled: machine.enabled ?? true,
   telegramAlertsExcluded: machine.telegram_alerts_excluded ?? false,
-  localIp: machine.local_ip || "",
+  localIp: machine.target_ip || machine.local_ip || "",
   publicIp: machine.public_ip || "",
-  ...(Array.isArray(machine.private_ips) ? { privateIps: machine.private_ips } : {}),
+  ...(Array.isArray(machine.private_ips) ? { privateIps: machine.private_ips } : machine.private_ip ? { privateIps: [machine.private_ip] } : {}),
   token: machine.token || "",
   connectionStatus:
     machine.connection_status ||
@@ -203,7 +206,7 @@ const mapMachineToHost = (machine) => ({
   clientUpdateTargetVersion: machine.client_update_target_version || "",
   numPorts: machine.num_ports ?? 0,
   portsTotal: machine.ports_total ?? machine.num_ports ?? 0,
-  defaultPrivateDomain: machine.default_private_domain || "",
+  defaultPrivateDomain: machine.default_private_domain || (machine.kind === "virtual_host" ? machine.hostname : ""),
   groupLabels: machine.group_labels || [],
   lastSeenAt: machine.last_seen_at || null,
   lastSeen: formatLastSeen(machine),
@@ -216,7 +219,7 @@ const mergeMachineIntoHost = (host, machine) => {
 
   return {
     ...currentVersionState,
-    privateIps: Array.isArray(machine.private_ips) ? machine.private_ips : (host?.privateIps || []),
+    privateIps: mappedHost.privateIps ?? host?.privateIps ?? [],
     numPorts: machine.num_ports ?? host?.numPorts ?? 0,
     portsTotal: machine.ports_total ?? host?.portsTotal ?? 0,
     forwardingConfigs: host?.forwardingConfigs ?? [],
@@ -429,7 +432,7 @@ export default function Home({ onStatsChange, active = true }) {
       ? `${first.host}.${first.suffix}`
       : defaultPrivateDomain(host);
   };
-  const handleOpenConfig = (hostId) => { setConfigStartSection("groups"); setSelectedHostId(hostId); router.push({pathname:router.pathname,query:{...router.query,machine:hostId,machineTab:"groups"}},undefined,{shallow:true,scroll:false}); };
+  const handleOpenConfig = (hostId, section = "groups") => { setConfigStartSection(section); setSelectedHostId(hostId); router.push({pathname:router.pathname,query:{...router.query,machine:hostId,machineTab:section}},undefined,{shallow:true,scroll:false}); };
 
   const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("groups"); const query={...router.query};for(const key of ["machine","machineTab","port","portTab","proxy","proxyTab"])delete query[key];router.push({pathname:router.pathname,query},undefined,{shallow:true,scroll:false}); };
 
@@ -1071,6 +1074,8 @@ export default function Home({ onStatsChange, active = true }) {
                               privateDomain={privateDomain(host)}
                               defaultPrivateDomain={defaultPrivateDomain(host)}
                               hostname={host.hostname}
+                              kind={host.kind}
+                              via={host.via}
                               clientOs={host.clientOs}
                               clientOsId={host.clientOsId}
                               clientOsName={host.clientOsName}
@@ -1137,7 +1142,10 @@ export default function Home({ onStatsChange, active = true }) {
         onAddMachineToGroup={handleAddMachineToGroup}
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
-      <HostConfigPopup
+      {selectedHost?.kind === "virtual_host" ? (
+        <VirtualHostDetails host={selectedHost} privateDomain={privateDomain(selectedHost)} onClose={handleCloseConfig} onManage={id => handleOpenConfig(id, "virtual-hosts")} />
+      ) : <HostConfigPopup
+        onVirtualHostsChanged={() => inventory.resource.invalidate()}
         onRefreshPorts={refreshPorts}
         initialSection={configStartSection}
         host={selectedHost}
@@ -1160,7 +1168,7 @@ export default function Home({ onStatsChange, active = true }) {
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
         groups={groupsWithMachineCounts}
         isSaving={isSaving}
-      />
+      />}
     </div>
   );
 }

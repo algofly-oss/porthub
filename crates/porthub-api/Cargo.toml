@@ -40,6 +40,7 @@ base64 = "0.22"
 regex = "1"
 sha2 = "0.10"
 hmac = "0.13"
+ring = "0.17"
 sha1 = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rand = "0.8"

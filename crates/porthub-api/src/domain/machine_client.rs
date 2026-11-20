@@ -69,7 +69,7 @@ pub async fn authenticate(app: &App, id: &str, token: &str) -> ApiResult<Documen
     let id = super::workspaces::object_id(id, "Invalid machine id")?;
     let machine = app
         .collection("machines")
-        .find_one(doc! {"_id":id,"token":token})
+        .find_one(doc! {"_id":id,"token":token,"kind":{"$ne":"virtual_host"}})
         .await?;
     let gone = || {
         ApiError::new(StatusCode::GONE, "Machine deleted")
@@ -96,7 +96,7 @@ pub async fn authenticate_legacy(app: &App, id: &str, token: &str) -> ApiResult<
     let id = super::workspaces::object_id(id, "Invalid machine id")?;
     let machine = app
         .collection("machines")
-        .find_one(doc! {"_id":id,"token":token})
+        .find_one(doc! {"_id":id,"token":token,"kind":{"$ne":"virtual_host"}})
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Invalid machine credentials"))?;
     if machine.get_bool("deletion_pending") == Ok(true) {

@@ -175,19 +175,21 @@ impl Index {
                 continue;
             }
             let mut emit = |left: &Value, right: &Value| {
-                let key = (
-                    field(left, "_id"),
-                    field(right, "_id"),
-                    entry.rule.protocol.clone(),
-                    entry.rule.ports.clone(),
-                );
-                if seen.insert(key.clone()) {
-                    output.push(Grant {
-                        source: key.0,
-                        destination: key.1,
-                        protocol: key.2,
-                        ports: private_policy::ports(&entry.rule.ports).expect("validated ports"),
-                    });
+                for protocol in private_policy::grant_protocols(left, right, &entry.rule.protocol) {
+                    let key = (
+                        field(left, "_id"),
+                        field(right, "_id"),
+                        protocol.to_owned(),
+                        entry.rule.ports.clone(),
+                    );
+                    if seen.insert(key.clone()) {
+                        output.push(Grant {
+                            source: key.0,
+                            destination: key.1,
+                            protocol: key.2,
+                            ports: private_policy::ports(&entry.rule.ports).expect("validated ports"),
+                        });
+                    }
                 }
             };
             if forward.contains(id) {

@@ -88,7 +88,7 @@ async fn machine_ids(
 ) -> ApiResult<HashSet<ObjectId>> {
     let machines: Vec<Document> = app
         .collection("machines")
-        .find(doc! {"user_id":owner,"deletion_pending":{"$ne":true}})
+        .find(doc! {"user_id":owner,"kind":{"$ne":"virtual_host"},"deletion_pending":{"$ne":true}})
         .projection(doc! {"_id":1,"group_ids":1,"group_id":1})
         .await?
         .try_collect()
@@ -108,7 +108,7 @@ async fn machine_ids(
         && app
             .collection("machines")
             .count_documents(
-                doc! {"user_id":owner,"_id":{"$in":&direct},"deletion_pending":{"$ne":true}},
+                doc! {"user_id":owner,"kind":{"$ne":"virtual_host"},"_id":{"$in":&direct},"deletion_pending":{"$ne":true}},
             )
             .await?
             != direct.len() as u64
@@ -161,6 +161,7 @@ pub(crate) fn selector_priority(
     machine_id: &str,
     machine: &Document,
 ) -> Option<usize> {
+    if machine.get_str("kind")==Ok("virtual_host"){return None;}
     route.get_array(key).ok()?.iter().position(|selector| {
         let Some(selector) = selector.as_document() else { return false; };
         match store::string(selector, "kind") {
@@ -436,7 +437,7 @@ pub fn serialize(route: &Document) -> Value {
 pub(crate) async fn validate_machine_changes(app: &App, owner: &Bson, proposed: &[Document]) -> ApiResult<()> {
     let routes: Vec<Document> = app.collection("private_exit_nodes").find(doc! {"workspace_id":owner,"enabled":{"$ne":false}}).await?.try_collect().await?;
     if routes.is_empty() { return Ok(()); }
-    let mut machines: Vec<Document> = app.collection("machines").find(doc! {"user_id":owner,"deletion_pending":{"$ne":true}}).projection(doc! {"_id":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
+    let mut machines: Vec<Document> = app.collection("machines").find(doc! {"user_id":owner,"kind":{"$ne":"virtual_host"},"deletion_pending":{"$ne":true}}).projection(doc! {"_id":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
     for changed in proposed {
         machines.retain(|record| record.get("_id") != changed.get("_id"));
         machines.push(changed.clone());

@@ -205,11 +205,12 @@ function LoadedBookEditor({
                   </div>
                   <MultiEntities
                     label="Source entities"
-                    params={params}
+                    params={{ ...params, agents_only: true }}
                     value={rule.sources}
                     onChange={(value) => updateRule("sources", value)}
                     disabled={!manage}
                   />
+                  <p className="text-xs text-muted-foreground">Choose the enrolled machine to initiate a connection. Virtual hosts can be selected as destinations.</p>
                   <MultiEntities
                     label="Destination entities"
                     params={params}
@@ -261,8 +262,9 @@ function LoadedBookEditor({
                         Allow Both Directions
                       </p>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        Otherwise only the source initiates. Replies are
-                        allowed.
+                        {rule.bidirectional
+                          ? "Enrolled destinations can initiate connections. Virtual hosts can only reply."
+                          : "Sources initiate connections. Destinations can reply."}
                       </p>
                     </div>
                     <Switch
