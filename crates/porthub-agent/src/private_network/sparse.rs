@@ -36,7 +36,6 @@ struct Cached {
     deadline: Instant,
     last_used: Instant,
     names_current: bool,
-    lan_discovery_started: Option<Instant>,
 }
 fn name_matches(peer: &PeerInfo, name: &str) -> bool {
     peer.hostname.eq_ignore_ascii_case(name)
@@ -325,20 +324,6 @@ impl Handle {
         let cached = state.cache.get_mut(id).filter(|c| c.valid(now))?;
         Some(read(cached, now))
     }
-    /// Allow time for ICE before pinning a cold TCP flow to the gateway.
-    /// Only timing metadata is retained. TCP retries the SYN under current policy.
-    pub(crate) fn discovering_lan_peer(&self, id: &str, underlay: &[std::net::SocketAddr]) -> bool {
-        let Ok(mut state) = self.state.lock() else { return false };
-        let Some(cached) = state.cache.get_mut(id) else { return false };
-        let shared_network = cached.lease.peer.lan_networks.iter().any(|network| {
-            underlay.iter().any(|address| match address.ip() {
-                std::net::IpAddr::V4(ip) => network.contains(ip),
-                _ => false,
-            })
-        });
-        shared_network && cached.lan_discovery_started.get_or_insert_with(Instant::now).elapsed()
-            < Duration::from_secs(6)
-    }
     pub fn enabled(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         !self.revoked() && s.epoch.is_some()
@@ -481,9 +466,6 @@ impl Handle {
             .map(|c| c.last_used)
             .unwrap_or(now);
         let mut previous=s.cache.remove(&lease.peer.id);
-        let lan_discovery_started = previous.as_ref()
-            .filter(|old| old.lease.peer.instance == lease.peer.instance && old.lease.peer.ip == lease.peer.ip)
-            .and_then(|old| old.lan_discovery_started);
         let retained_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.private_active&&same_pair_authority(&cached.lease,&lease)).and_then(|cached|cached._retirement_owner.take())}else{None};
         let retained_exit_owner=if authority.is_some(){previous.as_mut().filter(|cached|cached.exit_active&&same_exit_authority(&cached.lease,&lease)).and_then(|cached|cached._exit_retirement_owner.take())}else{None};
         let exit_retirement_owner=retained_exit_owner.or_else(||if lease.exit.is_some(){authority.as_ref().map(|_|super::authority_event::Owner::new())}else{None});
@@ -503,7 +485,6 @@ impl Handle {
                 deadline: now + left,
                 last_used: used,
                 names_current: true,
-                lan_discovery_started,
             },
         );
         s.wanted.remove(query);
@@ -854,28 +835,6 @@ mod tests {
         assert!(h.request_peer("peer-0"));
         assert_eq!(c.batch().unwrap()["wanted"].as_array().unwrap().len(), 16);
         assert_eq!(h.state.lock().unwrap().wanted.len(), 256);
-    }
-    #[test]
-    fn lan_discovery_wait_starts_on_demand_and_ordinary_renewal_cannot_restart_it() {
-        let epoch = "a".repeat(64);
-        let (handle, _) = channel();
-        handle.update_base(&base(&epoch));
-        let query = Lookup { kind: "peer".into(), value: "b".into() };
-        let mut pair = lease(&epoch);
-        pair.peer.lan_networks = vec!["192.168.7.0/24".parse().unwrap()];
-        handle.installed(&query, pair.clone());
-        let other = ["192.168.8.1:0".parse().unwrap()];
-        let local = ["192.168.7.1:0".parse().unwrap()];
-        assert!(!handle.discovering_lan_peer("b", &other));
-        assert!(handle.state.lock().unwrap().cache["b"].lan_discovery_started.is_none());
-        assert!(handle.discovering_lan_peer("b", &local));
-        handle.state.lock().unwrap().cache.get_mut("b").unwrap().lan_discovery_started =
-            Some(Instant::now() - Duration::from_secs(7));
-        handle.installed(&query, pair.clone());
-        assert!(!handle.discovering_lan_peer("b", &local));
-        pair.peer.instance = "new-instance".into();
-        handle.installed(&query, pair);
-        assert!(handle.discovering_lan_peer("b", &local));
     }
     #[test]
     fn base_refresh_cannot_extend_pair_and_old_epoch_completion_is_discarded() {
