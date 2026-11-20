@@ -33,14 +33,30 @@ const MAX_CONTROL_WORKSPACES:usize=16384;
 const MAX_RELAY_LANES: u8 = 4;
 const MAX_RELAY_PEERS: usize = 4096;
 const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
+#[derive(PartialEq, Eq)]
+struct RelayPeerIdentity {
+    id: String,
+    credential_hash: String,
+    instance: String,
+}
+
+impl RelayPeerIdentity {
+    fn new(id: &str, credential_hash: &str, instance: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            credential_hash: credential_hash.to_owned(),
+            instance: instance.to_owned(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Lease {
-    credential_hash: String,
+    identity: Arc<RelayPeerIdentity>,
     identity_generation:u64,
     origin: Option<Arc<porthub_mesh::relay_origin::Origin>>,
     hash: String,
     relay_token: String,
-    instance: String,
     ip: Ipv4Addr,
     allowed: HashSet<String>,
     expires: Instant,
@@ -67,16 +83,32 @@ struct Connection {
 }
 #[derive(Clone, PartialEq, Eq)]
 struct ForwardReceipt {
-    source:String,target:String,source_hash:String,target_hash:String,
-    source_instance:String,target_instance:String,source_generation:u64,target_generation:u64,exit:bool,owner:Option<u64>,expires:Instant,
+    source: Arc<RelayPeerIdentity>,
+    target: Arc<RelayPeerIdentity>,
+    source_generation: u64,
+    target_generation: u64,
+    exit: bool,
+    owner: Option<u64>,
+    expires: Instant,
 }
 impl ForwardReceipt {
-    fn valid(&self,hub:&Inner,now:Instant)->bool {
-        if self.expires<=now || !hub.allowed_scope(&self.source,&self.target,now,self.exit){return false;}
-        let (Some(a),Some(b))=(hub.leases.get(&self.source),hub.leases.get(&self.target))else{return false;};
-        if a.credential_hash!=self.source_hash||b.credential_hash!=self.target_hash||a.instance!=self.source_instance||b.instance!=self.target_instance||a.identity_generation!=self.source_generation||b.identity_generation!=self.target_generation{return false;}
-        let key = PairLookup::new(&self.source, &self.target);
-        self.owner.is_none_or(|owner|(if self.exit{&hub.exit_pairs}else{&hub.pairs}).get(&key).is_some_and(|p|p.owner_generation==owner))
+    fn valid(&self, hub: &Inner, now: Instant) -> bool {
+        let source = self.source.id.as_str();
+        let target = self.target.id.as_str();
+        if self.expires <= now || !hub.allowed_scope(source, target, now, self.exit) {
+            return false;
+        }
+        let (Some(a), Some(b)) = (hub.leases.get(source), hub.leases.get(target)) else {
+            return false;
+        };
+        if a.identity != self.source || b.identity != self.target
+            || a.identity_generation != self.source_generation || b.identity_generation != self.target_generation
+        {
+            return false;
+        }
+        let key = PairLookup::new(source, target);
+        let pairs = if self.exit { &hub.exit_pairs } else { &hub.pairs };
+        self.owner.is_none_or(|owner| pairs.get(&key).is_some_and(|pair| pair.owner_generation == owner))
     }
 }
 fn measurement_frame(bytes:&[u8])->bool {
@@ -175,8 +207,8 @@ impl Inner {
         let key = PairLookup::new(source, target);
         let Some(pair)=(if exit{&self.exit_pairs}else{&self.pairs}).get(&key).filter(|p|p.expires>now) else{return false;};
         let (Some(left),Some(right))=(self.leases.get(&pair.left),self.leases.get(&pair.right)) else{return false;};
-        left.credential_hash==pair.left_hash && right.credential_hash==pair.right_hash
-            && left.instance==pair.left_instance && right.instance==pair.right_instance
+        left.identity.credential_hash==pair.left_hash && right.identity.credential_hash==pair.right_hash
+            && left.identity.instance==pair.left_instance && right.identity.instance==pair.right_instance
             && left.ip==pair.left_ip && right.ip==pair.right_ip
             && (if exit{&left.exit_epoch}else{&left.sparse_epoch})==&pair.left_epoch && (if exit{&right.exit_epoch}else{&right.sparse_epoch})==&pair.right_epoch
             && (left.sparse_epoch.is_some()||left.allowed.contains(&pair.right))
@@ -239,7 +271,7 @@ impl Hub {
         if !matches{return false;}
         hub.admissions.remove(id);
         // A newer successful incarnation is never removed by an older failed request.
-        if hub.leases.get(id).is_some_and(|l|l.credential_hash==hash&&l.instance==instance){
+        if hub.leases.get(id).is_some_and(|l|l.identity.credential_hash==hash&&l.identity.instance==instance){
             hub.leases.remove(id);hub.connections.remove(id);hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);
             hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);
         }
@@ -292,25 +324,24 @@ impl Hub {
             .leases
             .get(id)
             .filter(|lease| {
-                lease.expires > now && lease.credential_hash == hash && lease.instance == instance
+                lease.expires > now && lease.identity.credential_hash == hash && lease.identity.instance == instance
             })
             .map(|lease| lease.relay_token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         let old=hub.leases.get(id);
         let old_origin=old.and_then(|lease|lease.origin.clone());
-        let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
+        let stable=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         let origin=old_origin.filter(|_|stable.is_some());
         hub.leases.insert(
             id.into(),
             Lease {
-                credential_hash: hash.into(),
+                identity: Arc::new(RelayPeerIdentity::new(id, hash, instance)),
                 origin,
                 identity_generation,
                 hash: token_digest(&relay_token),
                 relay_token: relay_token.clone(),
-                instance: instance.into(),
                 ip,
                 allowed,
                 expires: now + Duration::from_secs(15),
@@ -342,17 +373,17 @@ impl Hub {
         hub.exit_pairs.retain(|_,p|p.expires>now);
         if hub.leases.len()>=16384 && !hub.leases.contains_key(id) {return String::new();}
         let old=hub.leases.get(id);
-        let unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
-        let exit_unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.exit_epoch.as_deref()==exit_epoch);
-        let token=old.filter(|l|l.credential_hash==hash&&l.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
+        let unchanged=old.is_some_and(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
+        let exit_unchanged=old.is_some_and(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.exit_epoch.as_deref()==exit_epoch);
+        let token=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
         let old_origin=old.and_then(|lease|lease.origin.clone());
-        let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_some()).map(|l|l.identity_generation);
+        let stable=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.is_some()).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         if !unchanged {hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         if !exit_unchanged {hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         let origin=old_origin.filter(|_|stable.is_some());
-        hub.leases.insert(id.into(),Lease{origin,workspace,credential_hash:hash.into(),identity_generation,hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
+        hub.leases.insert(id.into(),Lease{origin,workspace,identity:Arc::new(RelayPeerIdentity::new(id,hash,instance)),identity_generation,hash:token_digest(&token),relay_token:token.clone(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
         token
     }
     /// Called from the authenticated sync's fresh source projection, never from
@@ -364,7 +395,7 @@ impl Hub {
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         if !hub.admissions.get(&origin.peer).is_some_and(|a|a.hash==hash&&a.instance==origin.instance&&a.generation==admission&&a.expires>now){return false;}
         let Some(lease)=hub.leases.get(&origin.peer) else{return false;};
-        if lease.expires<=now||lease.credential_hash!=hash || lease.instance!=origin.instance || lease.ip!=origin.ip{return false;}
+        if lease.expires<=now||lease.identity.credential_hash!=hash || lease.identity.instance!=origin.instance || lease.ip!=origin.ip{return false;}
         if lease.origin.as_ref().is_some_and(|old|old.fingerprint==origin.fingerprint){return true;}
         let replacing=lease.origin.is_some();
         if replacing {
@@ -380,7 +411,7 @@ impl Hub {
     pub(crate) fn project_origin(&self,peer:&mut porthub_network::policy::PeerInfo,hash:&str) {
         peer.relay_origin=None;
         let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
-        if let Some(lease)=hub.leases.get(&peer.id).filter(|l|l.expires>Instant::now()&&l.credential_hash==hash&&l.instance==peer.instance&&l.ip==peer.ip){
+        if let Some(lease)=hub.leases.get(&peer.id).filter(|l|l.expires>Instant::now()&&l.identity.credential_hash==hash&&l.identity.instance==peer.instance&&l.ip==peer.ip){
             if let Some(origin)=lease.origin.as_ref().filter(|origin|origin.fingerprint==peer.fingerprint){peer.relay_origin=Some(origin.stamp.clone());}
         }
     }
@@ -407,7 +438,7 @@ impl Hub {
         hub.pairs.retain(|_,p|p.expires>now);
         hub.exit_pairs.retain(|_,p|p.expires>now);
         let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return None;};
-        if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return None;}
+        if request.is_some_and(|(hash,instance,generation,pin)|a.identity.credential_hash!=hash||a.identity.instance!=instance||b.identity.credential_hash!=pin.hash||b.identity.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return None;}
         if request.is_some_and(|(_,_,_,pin)| a.origin.is_some() && pin.origin_stamp.as_deref()!=b.origin.as_ref().map(|origin|origin.stamp.as_str())){return None;}
         if a.expires<=now || b.expires<=now || (if exit{a.exit_epoch.as_deref()}else{a.sparse_epoch.as_deref()})!=Some(epoch)
             || (if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()}).is_some_and(|e|e!=target_epoch)
@@ -420,9 +451,9 @@ impl Hub {
         let previous=selected.get(&key);
         let owner_generation=previous.filter(|p|{
             let (l,r,le,re)=if p.left==source{(a,b,Some(epoch),if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()})}else{(b,a,if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()},Some(epoch))};
-            p.left_hash==l.credential_hash&&p.right_hash==r.credential_hash&&p.left_instance==l.instance&&p.right_instance==r.instance&&p.left_ip==l.ip&&p.right_ip==r.ip&&p.left_epoch.as_deref()==le&&p.right_epoch.as_deref()==re
+            p.left_hash==l.identity.credential_hash&&p.right_hash==r.identity.credential_hash&&p.left_instance==l.identity.instance&&p.right_instance==r.identity.instance&&p.left_ip==l.ip&&p.right_ip==r.ip&&p.left_epoch.as_deref()==le&&p.right_epoch.as_deref()==re
         }).map(|p|p.owner_generation).unwrap_or(generation);
-        let pair=PairAuthority{generation,owner_generation,left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:if exit{a.exit_epoch.clone()}else{a.sparse_epoch.clone()},right_epoch:if exit{b.exit_epoch.clone()}else{b.sparse_epoch.clone()},expires:now+Duration::from_secs(15)};
+        let pair=PairAuthority{generation,owner_generation,left:source.into(),right:target.into(),left_hash:a.identity.credential_hash.clone(),right_hash:b.identity.credential_hash.clone(),left_instance:a.identity.instance.clone(),right_instance:b.identity.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:if exit{a.exit_epoch.clone()}else{a.sparse_epoch.clone()},right_epoch:if exit{b.exit_epoch.clone()}else{b.sparse_epoch.clone()},expires:now+Duration::from_secs(15)};
         hub.pair_generation=generation;
         (if exit{&mut hub.exit_pairs}else{&mut hub.pairs}).insert(key,pair);Some(owner_generation==generation)
     }
@@ -443,11 +474,11 @@ impl Hub {
     pub(crate) fn retire_pair_admitted(&self,source:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return false;}
-        let Some(local)=hub.leases.get(source).filter(|a|a.credential_hash==hash&&a.instance==instance&&a.expires>now)else{return false;};
+        let Some(local)=hub.leases.get(source).filter(|a|a.identity.credential_hash==hash&&a.identity.instance==instance&&a.expires>now)else{return false;};
         let key=if source<target.id.as_str(){(source.to_owned(),target.id.clone())}else{(target.id.clone(),source.to_owned())};
         let Some(pair)=hub.pairs.get(&key)else{return false;};
         if target.generation!=Some(pair.generation){return false;}
-        if !hub.leases.get(&target.id).is_some_and(|peer|peer.credential_hash==target.hash&&peer.instance==target.instance&&peer.ip==target.ip&&peer.sparse_epoch==target.epoch&&peer.expires>now){return false;}
+        if !hub.leases.get(&target.id).is_some_and(|peer|peer.identity.credential_hash==target.hash&&peer.identity.instance==target.instance&&peer.ip==target.ip&&peer.sparse_epoch==target.epoch&&peer.expires>now){return false;}
         let matches=if pair.left==source{
             pair.left_hash==hash&&pair.left_instance==instance&&pair.left_ip==local.ip&&pair.left_epoch==local.sparse_epoch
             &&pair.right_hash==target.hash&&pair.right_instance==target.instance&&pair.right_ip==target.ip&&pair.right_epoch==target.epoch
@@ -477,11 +508,11 @@ impl Hub {
     pub(crate) fn retire_exit_pair_admitted(&self,source:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return false;}
-        let Some(local)=hub.leases.get(source).filter(|a|a.credential_hash==hash&&a.instance==instance&&a.expires>now)else{return false;};
+        let Some(local)=hub.leases.get(source).filter(|a|a.identity.credential_hash==hash&&a.identity.instance==instance&&a.expires>now)else{return false;};
         let key=if source<target.id.as_str(){(source.to_owned(),target.id.clone())}else{(target.id.clone(),source.to_owned())};
         let Some(pair)=hub.exit_pairs.get(&key)else{return false;};
         if target.generation!=Some(pair.generation){return false;}
-        if !hub.leases.get(&target.id).is_some_and(|peer|peer.credential_hash==target.hash&&peer.instance==target.instance&&peer.ip==target.ip&&peer.exit_epoch==target.epoch&&peer.expires>now){return false;}
+        if !hub.leases.get(&target.id).is_some_and(|peer|peer.identity.credential_hash==target.hash&&peer.identity.instance==target.instance&&peer.ip==target.ip&&peer.exit_epoch==target.epoch&&peer.expires>now){return false;}
         let matches=if pair.left==source{
             pair.left_hash==hash&&pair.left_instance==instance&&pair.left_ip==local.ip&&pair.left_epoch==local.exit_epoch
             &&pair.right_hash==target.hash&&pair.right_instance==target.instance&&pair.right_ip==target.ip&&pair.right_epoch==target.epoch
@@ -522,7 +553,7 @@ impl Hub {
     pub(crate) fn change_workspace(&self, id: &str, hash: &str, instance: &str) -> Option<mongodb::bson::oid::ObjectId> {
         let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let lease = hub.leases.get(id)?;
-        if lease.expires <= Instant::now() || lease.credential_hash != hash || lease.instance != instance { return None; }
+        if lease.expires <= Instant::now() || lease.identity.credential_hash != hash || lease.identity.instance != instance { return None; }
         let (workspace, generation) = lease.workspace.as_ref()?;
         if hub.workspace_generations.get(workspace) != Some(&(*generation, false)) { return None; }
         mongodb::bson::oid::ObjectId::parse_str(workspace).ok()
@@ -535,8 +566,8 @@ impl Hub {
             .get(id)
             .is_some_and(|lease| {
                 lease.expires > Instant::now()
-                    && (lease.hash == hash || lease.credential_hash == hash)
-                    && lease.instance == instance
+                    && (lease.hash == hash || lease.identity.credential_hash == hash)
+                    && lease.identity.instance == instance
             })
     }
     async fn route(&self, source: &str, hash: &str, instance: &str, lane: u8, frame: Bytes) {
@@ -644,8 +675,8 @@ impl Hub {
         }
         let a = hub.leases.get(source).filter(|a| {
             a.expires > now
-                && (a.hash == hash || a.credential_hash == hash)
-                && a.instance == instance
+                && (a.hash == hash || a.identity.credential_hash == hash)
+                && a.identity.instance == instance
         })?;
         let b = hub
             .leases
@@ -664,7 +695,6 @@ impl Hub {
         let key = PairLookup::new(source, target);
         let pair=(if exit{&hub.exit_pairs}else{&hub.pairs}).get(&key);
         let expires=a.expires.min(b.expires).min(pair.map(|p|p.expires).unwrap_or(a.expires));
-        let receipt=ForwardReceipt{source:source.into(),target:target.into(),source_hash:a.credential_hash.clone(),target_hash:b.credential_hash.clone(),source_instance:a.instance.clone(),target_instance:b.instance.clone(),source_generation:a.identity_generation,target_generation:b.identity_generation,exit,owner:pair.map(|p|p.owner_generation),expires};
         if packet[12..16] != a.ip.octets() || packet[16..20] != b.ip.octets() {
             return None;
         }
@@ -676,7 +706,16 @@ impl Hub {
             .get(&lane)
             .or_else(|| connections.get(&0))
             .or_else(|| connections.values().next())
-            .filter(|connection| connection.instance == b.instance)?;
+            .filter(|connection| connection.instance == b.identity.instance)?;
+        let receipt = ForwardReceipt {
+            source: Arc::clone(&a.identity),
+            target: Arc::clone(&b.identity),
+            source_generation: a.identity_generation,
+            target_generation: b.identity_generation,
+            exit,
+            owner: pair.map(|pair| pair.owner_generation),
+            expires,
+        };
         Some(Forward {
             packet,
             output: connection.output.clone(),
@@ -820,8 +859,8 @@ async fn serve(
         // instance must never evict the current instance's connected lanes.
         if !hub.leases.get(&id).is_some_and(|lease| {
             lease.expires > Instant::now()
-                && lease.instance == instance
-                && (lease.hash == hash || lease.credential_hash == hash)
+                && lease.identity.instance == instance
+                && (lease.hash == hash || lease.identity.credential_hash == hash)
         }) {
             return;
         }
@@ -1502,6 +1541,26 @@ mod exit_scope_tests {
     fn receipt(hub:&Hub,packet:&[u8])->Option<ForwardReceipt>{Hub::route_record(&hub.0.lock().unwrap(),"a","hash-a","instance-a",0,&frame(packet),Instant::now()).map(|route|route.receipt)}
     fn exit(hub:&Hub,ticket:u64){assert!(hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",ticket,&pin("b",&"f".repeat(64))));}
     fn private(hub:&Hub,ticket:u64){assert!(hub.publish_pair_admitted("a",&"a".repeat(64),"hash-a","instance-a",ticket,&pin("b",&"b".repeat(64))));}
+    #[test]
+    fn queued_private_receipts_share_lease_identities_and_survive_ordinary_renewal() {
+        let (hub, _rx, ticket, _) = fixture();
+        private(&hub, ticket);
+        let packet = wire(6);
+        let first = receipt(&hub, &packet).unwrap();
+        let second = receipt(&hub, &packet).unwrap();
+        assert!(Arc::ptr_eq(&first.source, &second.source));
+        assert!(Arc::ptr_eq(&first.target, &second.target));
+
+        let token = hub.publish_sparse_exit_admitted(
+            "a", "hash-a", "instance-a", Ipv4Addr::new(10, 203, 0, 1),
+            &"a".repeat(64), &"e".repeat(64), Some(ticket),
+        );
+        assert!(!token.is_empty());
+        assert!(first.valid(&hub.0.lock().unwrap(), Instant::now()));
+        hub.revoke_pair("a", "b");
+        assert!(!first.valid(&hub.0.lock().unwrap(), Instant::now()));
+    }
+
     #[test]
     fn exit_only_authority_never_admits_private_stream_or_unvalidated_probe_payload() {
         let(hub,_rx,a,_)=fixture();exit(&hub,a);
