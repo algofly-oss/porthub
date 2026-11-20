@@ -79,6 +79,7 @@ pub(crate) struct GatewayTime {
     endpoint: reqwest::Url,
     client: reqwest::Client,
     state: Mutex<State>,
+    updates: tokio::sync::watch::Sender<Option<ClockSample>>,
 }
 
 impl GatewayTime {
@@ -99,7 +100,12 @@ impl GatewayTime {
             endpoint: url.join("api/gateway/clock")?,
             client,
             state: Mutex::new(State::default()),
+            updates: tokio::sync::watch::channel(None).0,
         })
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<ClockSample>> {
+        self.updates.subscribe()
     }
 
     pub(crate) async fn tls_config(
@@ -166,6 +172,7 @@ impl GatewayTime {
             utc,
             observed: elapsed,
         });
+        self.updates.send_replace(state.sample);
         state.failures = 0;
         Ok(utc)
     }
@@ -244,6 +251,17 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
             spki_sha256: "ab".repeat(32),
         })?;
         assert!(ctl.request(reqwest::Method::GET, "probe", None, &[]).await.is_err());
+        let public = serde_json::from_value(serde_json::json!({
+            "server": origin, "machine_id": "000000000000000000000002", "token": "x".repeat(32)
+        }))?;
+        let mut host = crate::control::Control::new(public)?;
+        host.use_fixture_roots(roots.clone())?;
+        host.set_clock_origin(&super::relay::PinnedRelay {
+            url: origin.clone(),
+            spki_sha256: pin.clone(),
+        })?;
+        assert_eq!(host.request(reqwest::Method::GET, "probe", None, &[]).await?.status,
+            StatusCode::NO_CONTENT);
         let recovered = GatewayTime::new(&origin, &pin)?;
         let cfg = recovered.tls_config(roots).await?;
         let now = cfg.time_provider.current_time().unwrap().as_secs();
@@ -371,7 +389,7 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
                 String::from_utf8_lossy(&result.stdout)
             );
         }
-        assert_eq!(requests.load(Ordering::SeqCst), 5);
+        assert_eq!(requests.load(Ordering::SeqCst), 7);
     }
     shutdown.graceful_shutdown(Some(Duration::from_secs(1)));
     task.await??;

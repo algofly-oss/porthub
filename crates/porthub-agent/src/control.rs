@@ -115,6 +115,11 @@ impl Control {
         Ok(())
     }
     #[cfg(feature = "private-sparse")]
+    pub(crate) fn component_clock(&self) -> Option<tokio::sync::watch::Receiver<Option<crate::private_network::gateway_time::ClockSample>>> {
+        self.clock_origin.as_ref().map(|clock| clock.subscribe())
+    }
+
+    #[cfg(feature = "private-sparse")]
     pub(crate) fn set_clock_origin(&mut self, origin: &crate::private_network::relay::PinnedRelay) -> anyhow::Result<()> {
         let clock = crate::private_network::gateway_time::GatewayTime::new(&origin.url, &origin.spki_sha256)?;
         // A client pool may still hold connections validated with the previous
@@ -148,6 +153,14 @@ impl Control {
     async fn http_for(&self, base: &str) -> Result<(reqwest::Client, Option<crate::outbound::Candidate>), Failure> {
         #[cfg(feature = "private-sparse")]
         let recovered=self.recovered_tls.lock().map_err(|_|Failure::Unavailable)?.clone();
+        // Some callers prepare HTTP transports outside the normal sync retry
+        // loop. Never construct a wall-clock TLS handshake before Unix epoch.
+        if base.starts_with("https://") && std::time::SystemTime::now() < std::time::UNIX_EPOCH {
+            #[cfg(feature = "private-sparse")]
+            if recovered.is_none() { return Err(Failure::Unavailable); }
+            #[cfg(not(feature = "private-sparse"))]
+            return Err(Failure::Unavailable);
+        }
         #[cfg(feature = "private-sparse")]
         let default_client=recovered.as_ref().map(|(_,client)|client).unwrap_or(&self.http);
         #[cfg(not(feature = "private-sparse"))]
@@ -397,7 +410,7 @@ impl Control {
         #[cfg(feature = "private-sparse")]
         let mut tried_clock=false;
         #[cfg(feature = "private-sparse")]
-        if self.private_peer_id.is_some() {
+        {
             let needs_clock = {
                 let cached=self.recovered_tls.lock().map_err(|_| Failure::Unavailable)?;
                 cached.as_ref().map_or_else(||std::time::SystemTime::now()<std::time::UNIX_EPOCH,
