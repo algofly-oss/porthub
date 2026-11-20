@@ -48,17 +48,17 @@ pub(super) async fn scope_available(suffixes: &[String], owned: &[Endpoint]) -> 
 
 // A recovered name may never reach the agent again while the OS caches a
 // failure. Keep that one request pending across transient local errors.
-pub(super) async fn retry_refresh<F, Fut>(mut attempt: F) -> bool
+pub(super) async fn retry_refresh<F, Fut>(mut attempt: F)
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<bool>>,
+    Fut: std::future::Future<Output = Result<()>>,
 {
     use std::time::Duration;
     let initial_delay = Duration::from_millis(250);
     let mut delay = initial_delay;
     loop {
         match attempt().await {
-            Ok(published) => return published,
+            Ok(()) => return,
             Err(error) if delay == initial_delay => {
                 tracing::warn!(%error, "retrying macOS private DNS refresh");
             }
@@ -100,22 +100,18 @@ where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<String>>{
     fn e()->Endpoint{Endpoint{suffix:"private.test".into(),port:53001}}
     fn text(port:u16,server:&str)->String{format!("DNS configuration\nresolver #1\n domain : private.test\n nameserver[0] : {server}\n port : {port}\n")}
     #[tokio::test(start_paused = true)]
-    async fn one_refresh_survives_transient_failures_and_rechecks_ownership() {
-        for still_owned in [true, false] {
-            let mut attempts = 0;
-            let started = tokio::time::Instant::now();
-            let published = retry_refresh(|| {
-                attempts += 1;
-                std::future::ready(if attempts <= 2 {
-                    Err(anyhow::anyhow!("temporary configd failure"))
-                } else {
-                    Ok(still_owned)
-                })
-            }).await;
-            assert_eq!(published, still_owned);
-            assert_eq!(attempts, 3);
-            assert_eq!(started.elapsed(), std::time::Duration::from_millis(750));
-        }
+    async fn one_refresh_survives_transient_failures_with_capped_backoff() {
+        let mut attempts = Vec::new();
+        let start = tokio::time::Instant::now();
+        retry_refresh(|| {
+            attempts.push(start.elapsed().as_millis());
+            std::future::ready(if attempts.len() < 10 {
+                Err(anyhow::anyhow!("temporary configd failure"))
+            } else {
+                Ok(())
+            })
+        }).await;
+        assert_eq!(attempts, [0, 250, 750, 1750, 3750, 7750, 15750, 31750, 61750, 91750]);
     }
 
     #[test]fn publication_requires_exact_effective_endpoint_not_file_or_foreign_domain(){

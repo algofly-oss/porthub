@@ -1354,8 +1354,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         },
         _=probe_tick.tick(),if device.is_some()=>{
             #[cfg(target_os = "macos")]
-            if let (Some(zone), Some(registration)) = (zone.as_ref(), dns_registration.as_ref()) {
-                dns::refresh_recovered_names(zone, registration).await;
+            if let (Some(zone), Some(registration)) = (zone.as_ref(), dns_registration.as_mut()) {
+                dns::maintain_macos_registration(zone, registration).await;
             }
             #[cfg(feature="local-tor")]
             let picker_tor_ready=local_tor.as_ref().is_some_and(|tor|tor.ready());

@@ -485,14 +485,14 @@ pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()
 }
 
 #[cfg(target_os = "macos")]
-pub(super) async fn refresh_recovered_names(zone: &RwLock<Zone>, registration: &Registration) {
-    let Some(session) = &registration.private_session else { return };
+pub(super) async fn maintain_macos_registration(zone: &RwLock<Zone>, registration: &mut Registration) {
+    let Some(session) = &mut registration.private_session else { return };
     let zone = zone.read().await;
-    let Some(sparse) = &zone.sparse else { return };
-    let mut failures = zone.failed_lookups.lock().unwrap_or_else(|p| p.into_inner());
-    if failures.recovered(std::time::Instant::now(), |name| sparse.dns_name_record(name).is_some()) {
-        session.refresh();
-    }
+    let recovered = zone.sparse.as_ref().is_some_and(|sparse| {
+        let mut failures = zone.failed_lookups.lock().unwrap_or_else(|p| p.into_inner());
+        failures.recovered(std::time::Instant::now(), |name| sparse.dns_name_record(name).is_some())
+    });
+    session.maintain(recovered);
 }
 
 /// Replace namespaces without first removing the still-valid owned set.
@@ -1237,7 +1237,7 @@ async fn recovered_pair_resolves_through_the_macos_system_cache() -> Result<()> 
         ensure!(zone.read().await.failed_lookups.lock().unwrap().names.contains_key(&format!("{name}.")));
         handle.installed(&query, lease);
         ensure!(handle.dns_name_record(&name).is_some());
-        refresh_recovered_names(&zone, registration.as_ref().unwrap()).await;
+        maintain_macos_registration(&zone, registration.as_mut().unwrap()).await;
         timeout(Duration::from_secs(12), async {
             while !lookup(&name, ip).await { sleep(Duration::from_millis(200)).await; }
         }).await.context("system resolver retained a failure after the authorized address returned")?;
