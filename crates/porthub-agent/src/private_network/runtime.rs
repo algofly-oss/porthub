@@ -1224,6 +1224,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     Some(true)=>{if let Some(session)=direct {if send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
                     Some(false)=>{if relay_sender.send(peer,&buffer[..size]).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,size);}}},None=>{}
                 }
+            } else {
+                #[cfg(feature = "private-stream")]
+                if let (Some(tun), Some(reply)) = (&device, policy.closed_local_tcp_reply(&buffer[..size], peer)) {
+                    // Local socket feedback only. Do not transmit a reset to another machine.
+                    tokio::select! {
+                        _ = work.cancelled() => anyhow::bail!("private authority ended before local socket feedback"),
+                        result = write_authorized(installed_authority.as_ref(), &sparse_handle, Some(peer), tun, &reply) => result?,
+                    }
+                }
             }
         },
         result=async {

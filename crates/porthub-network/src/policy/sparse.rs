@@ -710,6 +710,66 @@ mod tests {
         assert_eq!(budget.available_permits(), 2);
     }
 
+    #[cfg(feature = "private-stream")]
+    #[test]
+    fn closed_local_tcp_feedback_requires_an_authorized_untracked_socket() {
+        use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, TcpPacket, TcpSeqNumber};
+
+        let local = Ipv4Addr::new(10, 203, 0, 2);
+        let remote = Ipv4Addr::new(10, 203, 1, 2);
+        let segment = |syn: bool, destination_port| {
+            let mut bytes = [0u8; 40];
+            let mut ip = Ipv4Packet::new_unchecked(&mut bytes[..]);
+            ip.set_version(4);
+            ip.set_header_len(20);
+            ip.set_total_len(40);
+            ip.set_hop_limit(64);
+            ip.set_next_header(IpProtocol::Tcp);
+            ip.set_src_addr(local);
+            ip.set_dst_addr(remote);
+            ip.fill_checksum();
+            let mut tcp = TcpPacket::new_unchecked(&mut bytes[20..]);
+            tcp.set_header_len(20);
+            tcp.set_src_port(40000);
+            tcp.set_dst_port(destination_port);
+            tcp.set_syn(syn);
+            tcp.set_ack(!syn);
+            tcp.set_seq_number(TcpSeqNumber(42));
+            tcp.set_ack_number(TcpSeqNumber(824));
+            tcp.fill_checksum(&IpAddress::Ipv4(local), &IpAddress::Ipv4(remote));
+            bytes
+        };
+
+        let epoch = "a".repeat(64);
+        let mut e = Engine::default();
+        e.apply(base(&epoch)).unwrap();
+        let ack = segment(false, 8888);
+        assert!(e.closed_local_tcp_reply(&ack, "b").is_none());
+        let mut lease = pair(&epoch);
+        lease.grants[0].protocol = "tcp".into();
+        lease.grants[0].ports = vec![Port { start: 8888, end: 8888 }];
+        e.install_pair(lease).unwrap();
+        assert!(!e.check(&ack, "b", false));
+        let reply = e.closed_local_tcp_reply(&ack, "b").unwrap();
+        let ip = Ipv4Packet::new_checked(&reply[..]).unwrap();
+        let tcp = TcpPacket::new_checked(ip.payload()).unwrap();
+        assert_eq!((ip.src_addr(), ip.dst_addr()), (remote, local));
+        assert!(tcp.rst() && !tcp.ack() && tcp.seq_number() == TcpSeqNumber(824));
+        assert!(ip.verify_checksum() && tcp.verify_checksum(&IpAddress::Ipv4(remote), &IpAddress::Ipv4(local)));
+        assert!(!e.check(&ack, "b", false));
+        assert!(e.closed_local_tcp_reply(&ack, "other").is_none());
+        assert!(e.closed_local_tcp_reply(&segment(false, 22), "b").is_none());
+        assert!(e.closed_local_tcp_reply(&reply, "b").is_none());
+        let mut corrupt = ack;
+        corrupt[36] ^= 1;
+        assert!(e.closed_local_tcp_reply(&corrupt, "b").is_none());
+        let syn = segment(true, 8888);
+        assert!(e.closed_local_tcp_reply(&syn, "b").is_none());
+        assert!(e.check(&syn, "b", false));
+        assert!(e.closed_local_tcp_reply(&ack, "b").is_none());
+        e.revoke();
+        assert!(e.closed_local_tcp_reply(&ack, "b").is_none());
+    }
     #[test]
     fn compact_complex_pair_checks_real_packets_and_retires_old_flow_on_permission_change() {
         let epoch = "a".repeat(64);

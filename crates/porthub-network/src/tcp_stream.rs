@@ -164,21 +164,30 @@ impl Handle {
 }
 
 pub fn reject_syn(syn: &[u8]) -> Result<Bytes> {
-    let flow = Flow::from_packet(syn).ok_or_else(|| anyhow::anyhow!("invalid private TCP SYN"))?;
+    closed_reply(syn, false)
+}
+
+pub(crate) fn reject_local_ack(packet: &[u8]) -> Result<Bytes> {
+    closed_reply(packet, true)
+}
+
+fn closed_reply(packet: &[u8], acknowledged: bool) -> Result<Bytes> {
+    let flow = Flow::from_packet(packet).ok_or_else(|| anyhow::anyhow!("invalid private TCP packet"))?;
     flow.validate()?;
-    let original = Ipv4Packet::new_checked(syn)?;
+    let original = Ipv4Packet::new_checked(packet)?;
     let tcp = TcpPacket::new_checked(original.payload())?;
     ensure!(
         original.verify_checksum()
-            && tcp.syn()
-            && !tcp.ack()
+            && tcp.ack() == acknowledged
+            && tcp.syn() != acknowledged
             && !tcp.rst()
             && tcp.verify_checksum(
                 &IpAddress::Ipv4(*flow.source.ip()),
                 &IpAddress::Ipv4(*flow.destination.ip())
             ),
-        "invalid private TCP SYN"
+        "invalid private TCP packet"
     );
+    let sequence = tcp.ack_number();
     let acknowledgement = tcp.seq_number() + tcp.segment_len();
     let mut bytes = vec![0; 40];
     {
@@ -198,8 +207,12 @@ pub fn reject_syn(syn: &[u8]) -> Result<Bytes> {
         tcp.set_dst_port(flow.source.port());
         tcp.set_header_len(20);
         tcp.set_rst(true);
-        tcp.set_ack(true);
-        tcp.set_ack_number(acknowledgement);
+        if acknowledged {
+            tcp.set_seq_number(sequence);
+        } else {
+            tcp.set_ack(true);
+            tcp.set_ack_number(acknowledgement);
+        }
         tcp.fill_checksum(
             &IpAddress::Ipv4(*flow.destination.ip()),
             &IpAddress::Ipv4(*flow.source.ip()),

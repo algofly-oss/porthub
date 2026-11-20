@@ -518,6 +518,36 @@ impl Engine {
         track_packet_budget(&mut self.flows, packet, "", may_open, now,Some(&self.flow_budget))
     }
 
+    /// Tell the local TCP stack to reopen a connection whose handshake state
+    /// disappeared. Only the TUN's outbound read path may request this reply.
+    #[cfg(feature = "private-stream")]
+    pub fn closed_local_tcp_reply(&self, bytes: &[u8], peer: &str) -> Option<bytes::Bytes> {
+        let packet = Packet::parse(bytes)?;
+        if packet.key.protocol != 6 || !packet.ack || packet.syn || packet.rst || !self.valid_lease() {
+            return None;
+        }
+        let engine = if self.snapshot.as_ref()?.sparse.is_some() {
+            self.pairs.get(peer)?.as_ref()
+        } else {
+            self
+        };
+        let snapshot = engine.snapshot.as_ref()?;
+        let key = packet.key;
+        if !engine.valid_lease()
+            || peer == snapshot.self_
+            || engine.ips.get(&snapshot.self_) != Some(&key.src)
+            || engine.ips.get(peer) != Some(&key.dst)
+            || !engine.allowed(packet)
+        {
+            return None;
+        }
+        let reverse = Key { src: key.dst, dst: key.src, sport: key.dport, dport: key.sport, ..key };
+        if engine.flows.contains_key(&key) || engine.flows.contains_key(&reverse) {
+            return None;
+        }
+        crate::tcp_stream::reject_local_ack(bytes).ok()
+    }
+
     // A separate state table prevents exit grants from widening private ACLs.
     // The authenticated transport identity is bound to every tracked flow.
     pub fn check_exit(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
