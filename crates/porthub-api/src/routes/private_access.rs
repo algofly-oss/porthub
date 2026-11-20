@@ -258,7 +258,7 @@ async fn snapshot(
     let mut peers: Vec<Document> = app
         .collection("private_peers")
         .find(doc! {"workspace_id":owner,"virtual_published":{"$ne":false}})
-        .projection(doc! {"kind":1,"via":1,"target_ip":1,"virtual_parent":1,"machine_id":1,"ip":1,"hostname":1,"created_at":1,"enabled":1,"credential_hash":1,"last_seen_at":1,"paths":1})
+        .projection(doc! {"virtual_host_provider":1,"kind":1,"via":1,"target_ip":1,"virtual_parent":1,"machine_id":1,"ip":1,"hostname":1,"created_at":1,"enabled":1,"credential_hash":1,"last_seen_at":1,"paths":1})
         .await?
         .try_collect()
         .await?;
@@ -296,6 +296,8 @@ async fn snapshot(
             .ok()
             .and_then(|id| providers.get(&id).copied())
     };
+    let parent_peers: HashMap<_,_> = peers.iter().filter_map(|p|Some((p.get_object_id("machine_id").ok()?,p))).collect();
+    let parent_peer = |d:&Document| d.get_object_id("virtual_parent").ok().and_then(|id|parent_peers.get(&id).copied());
     let private_peers: Vec<_> = peers.iter().map(|p| {
         let id = store::id(p.get("_id"));
         let mid = store::id(p.get("machine_id"));
@@ -307,7 +309,7 @@ async fn snapshot(
             "installed":!store::string(p,"credential_hash").is_empty(),
             "online":p.get_datetime("last_seen_at").is_ok_and(|last| now.timestamp_millis().saturating_sub(last.timestamp_millis())<30_000),
             "last_seen_at":store::field(p,"last_seen_at"),"paths":paths});
-        inventory::describe_virtual(&app,&mut row,p,provider(p));
+        inventory::describe_virtual(&mut row,p,provider(p),parent_peer(p));
         if p.contains_key("virtual_parent") { row["online"] = Value::Null; row["installed"] = Value::Null; }
         row
     }).collect();
@@ -315,7 +317,7 @@ async fn snapshot(
         "group_ids":inventory::group_ids(m).iter().map(|id|id.to_hex()).collect::<Vec<_>>(),
         "private_owner_id":m.get("private_owner_id").map(|v|store::id(Some(v))).filter(|v|!v.is_empty()).unwrap_or(owner.to_hex()),
         "private_owner_revoked":m.get_bool("private_owner_revoked").unwrap_or(false),"enabled":inventory::default_field(m,"enabled",json!(true)),
-        "connection_status":inventory::status_at(&app,m,now)});inventory::describe_virtual(&app,&mut row,m,provider(m));row}).collect();
+        "connection_status":inventory::status_at(&app,m,now)});inventory::describe_virtual(&mut row,m,provider(m),parent_peer(m));row}).collect();
     let users: Vec<_> = users.iter().map(|u| json!({"_id":store::id(u.get("_id")),"name":inventory::default_field(u,"name",json!("")),
         "email":inventory::default_field(u,"username",json!("")),"role":roles.get(&store::id(u.get("_id")))})).collect();
     let allowed: HashSet<_> = member_ids.iter().map(|v| store::id(Some(v))).collect();

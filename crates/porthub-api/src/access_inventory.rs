@@ -473,7 +473,7 @@ pub async fn page(
             }
             _ => json!({"_id":id}),
         };
-        inventory::describe_virtual(&app, &mut row, record, inventory::joined_provider(record));
+        inventory::describe_virtual(&mut row, record, inventory::joined_provider(record), None);
         if kind == "peers" && record.contains_key("virtual_parent") {
             row["online"] = Value::Null;
             row["installed"] = Value::Null;

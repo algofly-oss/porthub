@@ -15,6 +15,8 @@ async function pick(page, editor, label, search, option) {
   const [source, provider, target] = seed.machines;
   source.name = "condor";
   provider.name = "luna";
+  provider.connection_status = "offline";
+  provider.supports_virtual_hosts = false;
   target.name = "miro";
   seed.access = { books: [], invitations: [], network: { cidr: "10.203.0.0/24", dns_suffix: "ph.io" } };
   const origin = process.env.REVIEW_ORIGIN || "http://127.0.0.1:3788";
@@ -32,6 +34,7 @@ async function pick(page, editor, label, search, option) {
       const configure = `${machines}&machine=${provider._id}&machineTab=virtual-hosts`;
       await page.goto(configure);
       const panel = page.getByRole("region", { name: "Virtual hosts" });
+      await panel.getByText(/luna is offline/).waitFor();
       await panel.getByLabel("Name", { exact: true }).fill("miro-via-luna");
       await panel.getByLabel("LAN IPv4 address").fill("192.168.1.57");
       await panel.getByLabel("LAN IPv4 address").press("Enter");
@@ -40,7 +43,13 @@ async function pick(page, editor, label, search, option) {
       await panel.getByLabel("LAN IPv4 address").fill("192.168.1.58");
       await panel.getByRole("button", { name: "Add virtual host" }).click();
       await panel.getByRole("alert").getByText("Private name already in use").waitFor();
+      await page.evaluate(id => {
+        const seed = JSON.parse(sessionStorage.getItem("porthub-demo-v1"));
+        seed.machines.find(machine => machine._id === id).connection_status = "online";
+        sessionStorage.setItem("porthub-demo-v1", JSON.stringify(seed));
+      }, provider._id);
       await page.reload();
+      await panel.getByText(/Update the agent on luna/).waitFor();
       await panel.getByRole("heading", { name: "miro-via-luna" }).waitFor();
       assert.equal(await page.getByRole("group", { name: "Machine configuration sections" }).getByRole("button", { name: "Virtual Host", exact: true }).getAttribute("aria-pressed"), "true");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

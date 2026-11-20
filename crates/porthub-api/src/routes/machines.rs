@@ -391,7 +391,8 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
         .map(|machine| {
             let mut value = inventory::machine(&app, machine);
             if let Ok(id) = machine.get_object_id("virtual_parent") {
-                inventory::describe_virtual(&app, &mut value, machine, providers.get(&id).copied());
+                let private_peer = by_machine.get(&id.to_hex()).and_then(|rows|rows.iter().copied().find(|p|p.get("workspace_id") == Some(owner)));
+                inventory::describe_virtual(&mut value, machine, providers.get(&id).copied(), private_peer);
             }
             let ips = if machine.get_bool("private_owner_revoked").unwrap_or(false) {
                 Vec::new()

@@ -4,7 +4,7 @@ function project(state, row) {
     id: row.id, name: row.name, target_ip: row.target_ip, private_ip: row.ip,
     hostname: `${row.name}.${state.access?.network?.dns_suffix || "phub"}`,
     kind: "virtual_host",
-    via: { id: row.provider, name: provider?.name, online: provider?.connection_status === "online" },
+    via: { id: row.provider, name: provider?.name, online: provider?.connection_status === "online", supports_virtual_hosts: provider?.supports_virtual_hosts ?? true },
   };
 }
 
@@ -19,7 +19,7 @@ export function demoVirtualHosts(state, method, provider, id, body, makeId) {
   const agent = state.machines.find(m => m._id === provider);
   if (!agent) throw Error("Serving machine not found");
   const hosts = state.virtualHosts ||= [];
-  if (method === "get") return { virtual_hosts: hosts.filter(m => m.provider === provider).map(m => project(state, m)) };
+  if (method === "get") return { provider_online: agent.connection_status === "online", provider_supported: agent.supports_virtual_hosts ?? true, virtual_hosts: hosts.filter(m => m.provider === provider).map(m => project(state, m)) };
   if (method === "delete") {
     const index = hosts.findIndex(m => m.provider === provider && m.id === id);
     if (index < 0) throw Error("Virtual host not found");

@@ -75,16 +75,28 @@ pub fn status_at(app: &App, machine: &Document, now: DateTime) -> &'static str {
 
 /// Resolve serving machines after pagination. Only workspace-local display and status fields are joined.
 pub fn serving_machine_lookup(owner: Bson) -> Document {
+    let owner_id = store::id(Some(&owner));
     doc! {"$lookup":{"from":"machines","localField":"virtual_parent","foreignField":"_id",
     "pipeline":[{"$match":{"user_id":owner,"deletion_pending":{"$ne":true}}},
-                {"$project":{"name":1,"last_seen_at":1,"enabled":1,"auth_required":1}}],"as":"_provider"}}
+                {"$set":{"_peer_id":{"$concat":[owner_id,":",{"$toString":"$_id"}]}}},
+                {"$lookup":{"from":"private_peers","localField":"_peer_id","foreignField":"_id","pipeline":[{"$match":{"enabled":true}},{"$project":{"virtual_host_provider":1,"last_seen_at":1}}],"as":"_private"}},
+                {"$project":{"name":1,"enabled":1,"private_owner_revoked":1,"_private":1}}],"as":"_provider"}}
+}
+
+pub fn provider_health(machine: &Document, peer: Option<&Document>) -> (bool, bool) {
+    let active = peer.filter(|p| p.get_bool("enabled") != Ok(false));
+    let online = machine.get_bool("enabled") != Ok(false)
+        && machine.get_bool("private_owner_revoked") != Ok(true)
+        && active.and_then(|p|p.get_datetime("last_seen_at").ok()).is_some_and(|seen|
+            DateTime::now().timestamp_millis().saturating_sub(seen.timestamp_millis()) < 30_000);
+    (online, active.is_some_and(|p| p.get_bool("virtual_host_provider") == Ok(true)))
 }
 
 pub fn describe_virtual(
-    app: &App,
     row: &mut Value,
     record: &Document,
     provider: Option<&Document>,
+    private_peer: Option<&Document>,
 ) {
     let Ok(parent) = record.get_object_id("virtual_parent") else {
         return;
@@ -92,7 +104,10 @@ pub fn describe_virtual(
     let stored = record.get_document("via").ok();
     let mut via = json!({"id":parent.to_hex(),"name":provider.or(stored).map(|d|store::string(d,"name")).unwrap_or("")});
     if let Some(machine) = provider {
-        via["online"] = json!(status(app, machine) == "online");
+        let private_peer = private_peer.or_else(|| machine.get_array("_private").ok()?.first()?.as_document());
+        let (online, supported) = provider_health(machine, private_peer);
+        via["online"] = json!(online);
+        via["supports_virtual_hosts"] = json!(supported);
     }
     if row["kind"] != "machine" {
         row["kind"] = json!("virtual_host");
@@ -110,7 +125,7 @@ pub fn machine(app: &App, machine: &Document) -> Value {
         let mut row = json!({"_id":store::id(machine.get("_id")),"name":store::field(machine,"name"),
             "group_ids":group_ids(machine).iter().map(|id|id.to_hex()).collect::<Vec<_>>(),
             "enabled":default_field(machine,"enabled",json!(true)),"connection_status":"unknown"});
-        describe_virtual(app, &mut row, machine, joined_provider(machine));
+        describe_virtual(&mut row, machine, joined_provider(machine), None);
         return row;
     }
     let status = status(app, machine);

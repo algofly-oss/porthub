@@ -25,6 +25,16 @@ function Addresses({ host }) {
   );
 }
 
+function ProviderNotice({ name, online, supported }) {
+  let message;
+  if (online === false) {
+    message = `${name} is offline. Connections through this agent require it to reconnect. You can save virtual hosts now.`;
+  } else if (online === true && supported === false) {
+    message = `Update the agent on ${name} to enable connections to its virtual hosts. You can configure them now.`;
+  }
+  return message ? <p role="status" className="text-sm text-amber-700 dark:text-amber-400">{message}</p> : null;
+}
+
 export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
   return (
     <WorkspaceDrawer opened title={host.name} onClose={onClose} size="lg">
@@ -36,7 +46,8 @@ export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
         <Addresses host={{ hostname: privateDomain, private_ip: host.privateIps?.[0], target_ip: host.localIp }} />
         <div className="space-y-1 text-sm text-muted-foreground">
           <p>Serving agent {host.via?.online === true ? "online" : host.via?.online === false ? "offline" : "status unavailable"}.</p>
-          <p>The target has no PortHub agent to report its own status.</p>
+          <p>This virtual host reports {host.via?.name || "the serving machine"}’s connection. PortHub cannot verify the LAN device’s status through this entry.</p>
+          <ProviderNotice name={host.via?.name || "The serving machine"} online={host.via?.online} supported={host.via?.supports_virtual_hosts} />
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
@@ -50,6 +61,7 @@ export function VirtualHostDetails({ host, privateDomain, onClose, onManage }) {
 export default function VirtualHosts({ host, onChanged }) {
   const resource = `/api/machines/${encodeURIComponent(host.id)}/virtual-hosts`;
   const [hosts, setHosts] = useState([]);
+  const [provider, setProvider] = useState({});
   const [loading, setLoading] = useState(true);
   const [revision, reload] = useState(0);
   const [loadError, setLoadError] = useState("");
@@ -64,7 +76,11 @@ export default function VirtualHosts({ host, onChanged }) {
     setLoading(true);
     setLoadError("");
     axios.get(resource, { signal: controller.signal })
-      .then(({ data }) => { if (!controller.signal.aborted) setHosts(data.virtual_hosts); })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        setHosts(data.virtual_hosts);
+        setProvider({ online: data.provider_online, supported: data.provider_supported });
+      })
       .catch(e => { if (!controller.signal.aborted) setLoadError(errorText(e)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -79,6 +95,13 @@ export default function VirtualHosts({ host, onChanged }) {
     try {
       const { data } = await axios.post(resource, { name: name.trim(), target_ip: targetIp.trim() });
       setHosts(current => [...current.filter(row => row.id !== data.virtual_host.id), data.virtual_host]);
+      if (data.virtual_host.via) {
+        const via = data.virtual_host.via;
+        setProvider(current => ({
+          online: via.online ?? current.online,
+          supported: via.supports_virtual_hosts ?? current.supported,
+        }));
+      }
       setName("");
       setTargetIp("");
       onChanged();
@@ -103,7 +126,7 @@ export default function VirtualHosts({ host, onChanged }) {
     <section className={sectionStyle} aria-label="Virtual hosts">
       <div>
         <h2 className="text-base font-semibold">Virtual hosts</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Give a LAN device a private IP and DNS name through {host.name}. Choose the virtual host as a destination in Access Rules to grant access.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Give a device on {host.name}’s directly attached IPv4 LAN a private IP and DNS name. Select the virtual host in Access Rules to allow private TCP and UDP connections through {host.name}.</p>
       </div>
       {loading ? <p role="status" className="text-sm text-muted-foreground">Loading virtual hosts…</p> : loadError ? (
         <div className="flex items-center gap-3"><p className={errorStyle} role="alert">{loadError}</p><Button type="button" size="sm" variant="secondary" onClick={() => reload(v => v + 1)}>Retry</Button></div>
@@ -121,6 +144,7 @@ export default function VirtualHosts({ host, onChanged }) {
             </div>}
           </li>)}
         </ul>}
+        <ProviderNotice name={host.name} online={provider.online} supported={provider.supported} />
         <form onSubmit={create} className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]">
           <label className="min-w-0 text-sm font-medium">Name<Input className="mt-1.5" value={name} onChange={e => setName(e.target.value)} disabled={busy} required autoComplete="off" placeholder="miro-lan" /></label>
           <label className="min-w-0 text-sm font-medium">LAN IPv4 address<Input className="mt-1.5 font-mono" value={targetIp} onChange={e => setTargetIp(e.target.value)} disabled={busy} required autoComplete="off" inputMode="decimal" placeholder="192.168.1.20" /></label>

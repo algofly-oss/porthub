@@ -387,12 +387,13 @@ async fn virtual_hosts_are_distinct_machine_identities_with_provider_status() ->
         let data = case.app.collection("machines");
         data.insert_one(doc!{"_id":provider,"user_id":owner,"name":"luna-current","enabled":true,"last_seen_at":DateTime::now()}).await?;
         data.insert_one(doc!{"_id":host,"user_id":owner,"name":"miro-via-luna","kind":"virtual_host","virtual_parent":provider,"via":{"id":provider.to_hex(),"name":"luna-old"},"target_ip":"192.168.1.57"}).await?;
+        case.app.collection("private_peers").insert_one(doc!{"_id":format!("{owner}:{provider}"),"workspace_id":owner,"owner_id":owner,"machine_id":provider,"enabled":true,"last_seen_at":DateTime::now(),"virtual_host_provider":false}).await?;
         case.app.collection("private_peers").insert_one(doc!{"_id":format!("{owner}:{host}"),"workspace_id":owner,"owner_id":owner,"machine_id":host,"virtual_parent":provider,"target_ip":"192.168.1.57","hostname":"miro-via-luna","ip":"10.203.0.12","enabled":true,"virtual_published":true}).await?;
         for path in ["/api/inventory/machines","/api/machines/list","/api/inventory/access-machines","/api/inventory/access-entities","/api/inventory/access-peers","/api/access/snapshot"] {
             let response = case.status("GET", path,&cookie,json!(null),StatusCode::OK).await?;
             let rows = if path.ends_with("/snapshot") {&response["private_peers"]} else {&response["data"]};
             let host_row = rows.as_array().unwrap().iter().find(|r|r["target_ip"]=="192.168.1.57").unwrap_or_else(||panic!("Missing virtual host in {path}: {rows}"));
-            ensure!(host_row["via"]["name"]=="luna-current" && host_row["via"]["online"]==true,"{path}: {host_row}");
+            ensure!(host_row["via"]["name"]=="luna-current" && host_row["via"]["online"]==true && host_row["via"]["supports_virtual_hosts"]==false,"{path}: {host_row}");
             if path.ends_with("entities") {
                 ensure!(host_row["kind"]=="machine" && host_row["_id"]==format!("machine:{host}"));
             } else {
@@ -400,6 +401,9 @@ async fn virtual_hosts_are_distinct_machine_identities_with_provider_status() ->
             }
             if path.ends_with("peers") || path.ends_with("snapshot") {ensure!(host_row["online"].is_null());}
         }
+        case.app.collection("private_peers").update_one(doc!{"_id":format!("{owner}:{provider}")},doc!{"$set":{"last_seen_at":DateTime::from_millis(0),"virtual_host_provider":true}}).await?;
+        let stale=case.status("GET","/api/inventory/machines?q=miro-via-luna",&cookie,json!(null),StatusCode::OK).await?;
+        ensure!(stale["data"][0]["via"]["online"]==false && stale["data"][0]["via"]["supports_virtual_hosts"]==true);
         for endpoint in ["machines","access-machines","access-entities","access-peers"] {
             let path=format!("/api/inventory/{endpoint}?agents_only=true&q=miro-via-luna");
             let filtered=case.status("GET",&path,&cookie,json!(null),StatusCode::OK).await?;
