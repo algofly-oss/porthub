@@ -205,3 +205,9 @@ still constrain the candidates. Linux continues using its source-aware FIB
 queries and route priorities. Tests cover mixed-family lookup failure, no probe
 packet emission, sticky failover, and independent address backoff. Native checks
 on the target operating systems remain required before rollout.
+
+### Router-assisted private peer discovery (pilot)
+
+An installation can set `PORTHUB_ROUTER_MAPPING=1` in the agent service environment to try a short-lived NAT-PMP UDP lease when preparing private ICE sessions. The agent selects a directly connected IPv4 router on a permitted interface. Before requesting a lease, it checks that the router reports the same external IPv4 address that STUN observed on the peer socket. An ambiguous route, unsupported router, or address mismatch leaves ordinary ICE discovery available.
+
+The mapping targets the ephemeral, certificate-authenticated peer transport. Each agent can hold eight leases and requests a 120-second lifetime. Active sessions renew halfway through the granted lifetime. Session shutdown requests deletion of the individual lease. A crashed agent's lease expires on the router.

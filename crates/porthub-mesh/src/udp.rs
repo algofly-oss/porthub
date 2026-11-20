@@ -327,6 +327,20 @@ impl Session {
         allocation: Option<Allocation>,
         stun_servers: &[String],
     ) -> Result<(Self, mpsc::Receiver<Bytes>)> {
+        Self::gather_with_router(locals, local_id, remote_id, identity, pin, allocation, stun_servers, None).await
+    }
+
+    /// Optionally gather a short router lease for a policy-selected IPv4 source.
+    pub async fn gather_with_router(
+        locals: &[SocketAddr],
+        local_id: &str,
+        remote_id: &str,
+        identity: Identity,
+        pin: &str,
+        allocation: Option<Allocation>,
+        stun_servers: &[String],
+        router: Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)>,
+    ) -> Result<(Self, mpsc::Receiver<Bytes>)> {
         ensure!(
             !locals.is_empty() && locals.len() <= 16,
             "invalid private interfaces"
@@ -351,8 +365,16 @@ impl Session {
             if !stun_servers.is_empty() {
                 let socket = socket.clone();
                 let servers = stun_servers.to_vec();
-                gathering
-                    .spawn(async move { (address, crate::stun::mapped(&socket, &servers).await) });
+                gathering.spawn(async move {
+                    let reflexive = crate::stun::mapped(&socket, &servers).await;
+                    let mapping = match (router, reflexive) {
+                        (Some((source, gateway)), Some(SocketAddr::V4(observed))) if address.ip() == source => {
+                            crate::router_mapping::Mapping::acquire(socket, gateway, *observed.ip()).await
+                        }
+                        _ => None,
+                    };
+                    (address, reflexive, mapping)
+                });
             }
             sockets.insert(address, socket as Socket);
         }
@@ -361,9 +383,14 @@ impl Session {
         for address in &bound[1..] {
             peer.add_interface(*address)?;
         }
+        let mut leases = Vec::new();
         while let Some(result) = gathering.join_next().await {
-            if let Ok((base, Some(mapped))) = result {
+            if let Ok((base, Some(mapped), mapping)) = result {
                 peer.add_reflexive(base, mapped)?;
+                if let Some(mapping) = mapping {
+                    peer.add_reflexive(base, mapping.endpoint.into())?;
+                    leases.push(mapping);
+                }
             }
         }
         if let Some(allocation) = &allocation {
@@ -378,7 +405,7 @@ impl Session {
             peer.add_relay(address)?;
             sockets.insert(address, socket);
         }
-        Self::start(sockets, peer, allocation)
+        Self::start(sockets, peer, allocation, leases)
     }
     /// Forces the encrypted peer protocol through one pre-authenticated TURN
     /// allocation. No UDP listener or plaintext gateway packet path is used.
@@ -394,12 +421,13 @@ impl Session {
             .local_addr()
             .map_err(|_| anyhow::anyhow!("private relay address unavailable"))?;
         let peer = Peer::new_relay(Instant::now(), address, local_id, remote_id, identity, pin)?;
-        Self::start(HashMap::from([(address, socket)]), peer, Some(allocation))
+        Self::start(HashMap::from([(address, socket)]), peer, Some(allocation), Vec::new())
     }
     fn start(
         sockets: HashMap<SocketAddr, Socket>,
         peer: Peer,
         allocation: Option<Allocation>,
+        leases: Vec<crate::router_mapping::Mapping>,
     ) -> Result<(Self, mpsc::Receiver<Bytes>)> {
         let description = peer.description();
         let (commands, command_rx) = mpsc::channel(64);
@@ -411,6 +439,7 @@ impl Session {
         let guarded=Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_guarded=guarded.clone();
         let task = tokio::spawn(async move {
+            let _leases = leases;
             let mut peer = peer;
             let result = drive(
                 &sockets,
@@ -820,9 +849,9 @@ mod io_tests {
                 }) as Socket,
             );
         }
-        let (left, mut left_rx) = Session::start(sockets, left, None)?;
+        let (left, mut left_rx) = Session::start(sockets, left, None, Vec::new())?;
         let (right, mut right_rx) =
-            Session::start(HashMap::from([(ra, right_socket as Socket)]), right, None)?;
+            Session::start(HashMap::from([(ra, right_socket as Socket)]), right, None, Vec::new())?;
         let result = async {
             let mut description = right.description();
             if !dead_interface {
@@ -928,7 +957,7 @@ mod io_tests {
             rejected: AtomicUsize::new(0),
         });
         let (session, _packets) =
-            Session::start(HashMap::from([(address, closed as Socket)]), peer, None)?;
+            Session::start(HashMap::from([(address, closed as Socket)]), peer, None, Vec::new())?;
         let result = tokio::time::timeout(Duration::from_secs(1), session.ready()).await;
         let state = session.state();
         session.close().await;

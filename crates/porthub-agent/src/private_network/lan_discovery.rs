@@ -24,6 +24,48 @@ pub(super) fn connected(underlay: &[SocketAddr]) -> anyhow::Result<Vec<Network>>
     Ok(networks.into_iter().take(32).collect())
 }
 
+/// Find one unambiguous, directly connected default router on a permitted ICE interface.
+pub(super) async fn mapping_router(underlay: &[SocketAddr]) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    use getifaddrs::InterfaceFlags as Flags;
+    let interfaces: Vec<_> = getifaddrs::getifaddrs().ok()?.collect();
+    let mut eligible = BTreeSet::new();
+    for (index, gateway) in default_routers().await? {
+        for nic in interfaces.iter().filter(|nic| nic.index == Some(index)) {
+            if !nic.flags.contains(Flags::UP) || nic.flags.intersects(Flags::POINTTOPOINT | Flags::LOOPBACK)
+                || porthub_mesh::underlay::overlay_interface(&nic.name, "") {continue;}
+            let (Some(IpAddr::V4(ip)), Some(IpAddr::V4(mask))) = (nic.address.ip_addr(), nic.address.netmask()) else {continue;};
+            if underlay.iter().any(|addr| addr.ip() == ip) && ip != gateway
+                && network(ip, mask).is_some_and(|subnet| subnet.contains(gateway)) {
+                eligible.insert((ip, gateway));
+            }
+        }
+    }
+    if eligible.len() == 1 { eligible.pop_first() } else { None }
+}
+
+#[cfg(target_os="linux")]
+async fn default_routers() -> Option<Vec<(u32, Ipv4Addr)>> {
+    let kernel = nlink::netlink::Connection::<nlink::netlink::Route>::new().ok()?;
+    Some(kernel.get_routes().await.ok()?.iter().filter_map(|route| {
+        if route.dst_len() != 0 || route.table_id() != 254 || route.route_type() != 1.into() {return None;}
+        let IpAddr::V4(gateway) = *route.gateway()? else {return None;};
+        Some((route.oif()?, gateway))
+    }).collect())
+}
+
+#[cfg(any(target_os="macos",target_os="windows"))]
+async fn default_routers() -> Option<Vec<(u32, Ipv4Addr)>> {
+    let mut manager = route_manager::AsyncRouteManager::new().ok()?;
+    Some(manager.list().await.ok()?.iter().filter_map(|route| {
+        if route.prefix() != 0 || route.destination() != IpAddr::V4(Ipv4Addr::UNSPECIFIED) {return None;}
+        let IpAddr::V4(gateway) = route.gateway()? else {return None;};
+        Some((route.if_index()?, gateway))
+    }).collect())
+}
+
+#[cfg(not(any(target_os="linux",target_os="macos",target_os="windows")))]
+async fn default_routers() -> Option<Vec<(u32, Ipv4Addr)>> { None }
+
 /// Existing local/VPN routes take precedence, even when a remote prefix is
 /// more specific. Default and split-default internet routes are not LANs.
 #[cfg(any(target_os="macos",test))]
