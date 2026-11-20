@@ -661,6 +661,11 @@ impl Shared {
             .len()
     }
 
+    /// Snapshot used for gateway-managed invitations on a locally reserved workspace.
+    pub fn live_invitation_state(&self) -> Option<(u64, u64)> {
+        let state = self.state.lock().expect("terminal session mutex");
+        state.host.as_ref().map(|_| (state.generation, state.invitation_revision))
+    }
     pub fn invitation_expires_at(&self) -> i64 {
         self.state
             .lock()
@@ -960,6 +965,7 @@ mod tests {
             write_token: random_token(32),
             read_token: random_token(32),
             options: Options {
+                dashboard_owner: None,
                 name: "Pair debugging".into(),
                 expires_at: now() + 100,
                 session_expires_at: None,

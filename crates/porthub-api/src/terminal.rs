@@ -1,5 +1,6 @@
 //! Ephemeral public terminal invitations. Capability hashes and revocations are
 //! persisted; terminal contents are only routed through bounded live channels.
+mod dashboard;
 use crate::{
     domain::machine_client,
     error::{ApiError, ApiResult},
@@ -115,6 +116,10 @@ fn advertised_host(app: &App) -> String {
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/terminal/host", get(host))
+        .route("/api/machines/{id}/terminal-sessions", get(machine_sessions).post(dashboard::claim))
+        .route("/api/machines/{id}/terminal-sessions/{session}/join", get(dashboard::join))
+        .route("/api/machines/{id}/terminal-sessions/{session}", get(dashboard::status))
+        .route("/api/machines/{id}/terminal-sessions/{session}/guest-links", post(dashboard::guest_links))
         .route("/api/terminal/join", get(join))
         .route("/api/terminal/info", post(info))
         .route("/api/terminal/{id}/participants", get(management))
@@ -426,7 +431,11 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
                         if !matches!(tokio::time::timeout(Duration::from_secs(3),persist_invitation_revocation(&app,&hello.id)).await,Ok(Ok(()))) {break;}
                         continue;
                     }
-                    if matches!(output,HostOutput::End) {finish(&app,&hello.id,"owner ended session").await;break;}
+                    if matches!(output,HostOutput::End) {
+                        finish(&app,&hello.id,"owner ended session").await;
+                        let _=send_host(&mut socket,&HostEvent::Stop{reason:"owner ended session".into()}).await;
+                        break;
+                    }
                     if host.session.output(host.generation,output).is_err() {break;}
                 }
                 Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},
@@ -460,7 +469,7 @@ async fn join(State(app): State<Arc<App>>, upgrade: WebSocketUpgrade) -> Respons
         .max_frame_size(32768)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            viewer_socket(app, socket).await
+            viewer_socket(app, socket, None).await
         })
         .into_response()
 }
@@ -479,10 +488,33 @@ async fn info(
             "invitation expired or host unavailable",
         )
     })?;
+    if !dashboard::guest_join_enabled(&session) { return Err(bad("This workspace requires dashboard authorization")); }
     Ok(axum::Json(
-        serde_json::json!({"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
+        serde_json::json!({"id":session.id,"name":session.options.name,"read_only":read_only,"expires_at":session.invitation_expires_at(),"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
     ))
 }
+async fn machine_sessions(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let user = crate::auth::current_user(&app, &headers).await?;
+    let owner = user.get_object_id("_id").map_err(|_| ApiError::unauthenticated())?;
+    let machine = crate::domain::workspaces::object_id(&id, "Invalid machine id")?;
+    app.collection("machines")
+        .find_one(doc! {
+            "_id": machine, "user_id": owner, "kind": {"$ne": "virtual_host"},
+            "deletion_pending": {"$ne": true}, "native_deletion": {"$exists": false}
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Machine unavailable"))?;
+    let machine_id = machine.to_hex();
+    let (rows, available) = dashboard::catalog(&app, &machine_id, &owner.to_hex()).await?;
+    Ok(([(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        axum::Json(serde_json::json!({"sessions": rows, "can_open":available, "owner_id":owner.to_hex()}))))
+}
+
 async fn management_record(
     app: &App,
     headers: &HeaderMap,
@@ -697,7 +729,7 @@ async fn persist_invitation_revocation(app: &App, id: &str) -> ApiResult<()> {
     }
     Ok(())
 }
-async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
+async fn viewer_socket(app: Arc<App>, mut socket: WebSocket, dashboard: Option<dashboard::Connection>) {
     let Ok(Some(Ok(Message::Text(first)))) =
         tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
@@ -711,7 +743,17 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
     };
     let recovered = hello.resume_token.is_some();
     let admission = async {
-        let (grant, recovery) = if let Some(raw) = hello.resume_token.as_deref() {
+        let (grant, recovery) = if let Some(connection) = &dashboard {
+            if !hello.token.is_empty() { return Err(bad("Dashboard admission uses the signed-in session")); }
+            connection.allowed(&app).await?;
+            let session = app.terminals.sessions().into_iter().find(|s| s.id == connection.session && s.owner == connection.machine && s.options.dashboard_owner.is_some()).ok_or_else(|| bad("Workspace unavailable"))?;
+            if let Some(raw) = hello.resume_token.as_deref() {
+                let grant=crate::terminal_grants::resume_for(&app,raw,Some(&connection.binding),Some(&session.id)).await?;
+                (grant, raw.to_owned())
+            } else {
+                crate::terminal_grants::create_for(&app,&session.id,session.options.read_only,session.options.reconnect_timeout,Some(&connection.binding)).await?
+            }
+        } else if let Some(raw) = hello.resume_token.as_deref() {
             if !hello.token.is_empty() {
                 return Err(bad("choose an invitation or recovery credential"));
             }
@@ -722,7 +764,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
                 .terminals
                 .resolve(&hello.token)
                 .map_err(|_| bad("invitation expired or host unavailable"))?;
-            if session.options.access == Access::Ssh {
+            if session.options.access == Access::Ssh || !dashboard::guest_join_enabled(&session) {
                 return Err(bad("browser access is disabled"));
             }
             crate::terminal_grants::create(
@@ -733,7 +775,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
             )
             .await?
         };
-        let viewer = if recovered {
+        let viewer = if recovered || dashboard.is_some() {
             app.terminals.attach_authorized(
                 &grant.session,
                 Some(grant.identity),
@@ -759,7 +801,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
         })?;
         // Revocation can race a resume's database lookup. A second conditional
         // lease check closes that window before exposing any terminal frames.
-        if crate::terminal_grants::renew(&app, &grant).await.is_err()
+        if dashboard::permitted(&app,dashboard.as_ref(),&viewer.session).await.is_err() || crate::terminal_grants::renew(&app, &grant).await.is_err()
             || viewer.session.options.access == Access::Ssh
         {
             drop(viewer);
@@ -820,6 +862,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
         tokio::select! {
             _=heartbeat.tick()=> {
                 if last_viewer_message.elapsed()>=Duration::from_secs(45) {break;}
+                if dashboard::permitted(&app,dashboard.as_ref(),&viewer.session).await.is_err(){break;}
                 if !matches!(tokio::time::timeout(Duration::from_secs(3),crate::terminal_grants::renew(&app,&grant)).await,Ok(Ok(()))) {break;}
                 if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Text("{\"type\":\"ping\"}".into()))).await,Ok(Ok(()))) {break;}
             },
@@ -836,6 +879,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
             message=socket.recv()=>match message {
                 Some(Ok(Message::Text(message)))=>{
                     let Ok(input)=serde_json::from_str::<ViewerInput>(&message) else {break;};
+                    if dashboard::permitted(&app,dashboard.as_ref(),&viewer.session).await.is_err(){break;}
                     last_viewer_message=tokio::time::Instant::now();
                     if let Err(error)=viewer.session.input(viewer.id,input) {tracing::warn!(%error,"terminal viewer input rejected");break;}
                 }
@@ -918,6 +962,7 @@ mod lifecycle_tests {
             write_token: random_token(32),
             read_token: random_token(32),
             options: Options {
+                dashboard_owner: None,
                 name: "quietotter".into(),
                 expires_at: 0,
                 session_expires_at: None,

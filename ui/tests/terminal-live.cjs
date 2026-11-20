@@ -13,10 +13,49 @@ if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])a
 },process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked');
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
 const host=await owner.newPage(),watcher=await guest.newPage();let phase="join";const hostEvents=[];let hostConnections=0,directRelay=0,relayInputs=0,relayAcks=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join'){hostConnections++;hostEvents.push({phase,event:"open"});socket.on("close",()=>hostEvents.push({phase,event:"close"}));socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'){directRelay++;if(Buffer.from(frame.packet,'base64')[0]===1)relayInputs++;}}catch{}});socket.on('framereceived',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='closed')hostEvents.push({phase,event:'closed',reason:frame.reason});if(frame.type==='delivery'&&Buffer.from(frame.packet,'base64')[0]===2)relayAcks++;}catch{}});}});host.__transportStats=()=>({hostConnections,relayInputs,relayAcks});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
+const popup = await owner.newPage();
+await popup.goto(`${origin}/home?view=machines&machine=${process.env.PORTHUB_TEST_TERMINAL_MACHINE}&machineTab=shells`);
+await popup.getByRole("button", { name: "amberotter", exact: true }).click({timeout:20000});
+await popup.getByLabel("Invitation for amberotter").fill(`${origin}/terminal#${write}`);
+await popup.getByRole("button", {name:"Connect", exact:true}).click();
+await output(popup,"porthub-test$");
+await type(popup, "SHARED_IN_HOST_POPUP=ok");
+await popup.close();
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
+await type(host, 'printf "HOSTPOPUP-%s\\n" "$SHARED_IN_HOST_POPUP"'); await output(watcher, 'HOSTPOPUP-ok');
+// Opening the same workspace creates an independent viewer; closing it
+// leaves the original connection and shell alive.
+const newTabPromise = owner.waitForEvent('page');
+await host.getByRole('link', {name: 'Open in new tab'}).click();
+const additionalTab = await newTabPromise;
+await output(additionalTab, 'porthub-test$');
+assert.equal(await additionalTab.evaluate(() => window.opener === null), true);
+const ownIdentity = page => page.getByText(/Guest .*\(you\)/).innerText();
+assert.notEqual(await ownIdentity(additionalTab), await ownIdentity(host));
+await type(additionalTab, "FROM_TAB=shared; printf 'DEDICATED%s\\n' 'TAB'");
+await output(host, 'DEDICATEDTAB');
+await additionalTab.close();
+await type(host, 'printf "PERSISTED-%s\\n" "$FROM_TAB"');
+await output(host, 'PERSISTED-shared');
+const readerTabPromise = guest.waitForEvent('page');
+await watcher.getByRole('link', {name: 'Open in new tab'}).click();
+const readerTab = await readerTabPromise;
+await readerTab.getByText('Connected · Read-only', {exact:true}).waitFor();
+await readerTab.setViewportSize({width:402,height:874});
+assert(await readerTab.getByRole('link', {name:'Open in new tab'}).isVisible());
+assert(await readerTab.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+await readerTab.close();
+// The second tab must see terminal echo before the writer submits the line.
+await host.bringToFront();
+await host.locator('.xterm-helper-textarea').focus();
+await host.keyboard.type('# shared line still being edited');
+await output(watcher,'# shared line still being edited');
+await host.bringToFront();
+await host.locator('.xterm-helper-textarea').focus();
+await host.keyboard.press('Control+c');
 await type(host,"OWNVAR=preserved; printf 'INITIAL%s\\n' 'SHARED'");await output(host,'INITIALSHARED');await output(watcher,'INITIALSHARED');
 if(process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked'){
  await host.waitForFunction(()=>window.__terminalDirect.opened===0);

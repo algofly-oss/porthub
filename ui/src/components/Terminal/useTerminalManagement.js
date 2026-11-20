@@ -51,5 +51,5 @@ export default function useTerminalManagement(session, enabled) {
     }catch(error){if(active.current===id)setError(error.name==="AbortError" ? "The invitation change could not be confirmed. Check its status before retrying." : error.message);return false;}
     finally{clearTimeout(deadline);if(active.current===id)setBusy(false);}
   }
-  return {allowed:allowed && enabled,busy,error,remove,invitationsRevoked,revokeInvitations};
+  return {invitationsIssued:()=>setInvitationsRevoked(false),allowed:allowed && enabled,busy,error,remove,invitationsRevoked,revokeInvitations};
 }

@@ -46,6 +46,10 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
     if(state.privateTrafficError)throw Error(state.privateTrafficError);
     return demoPrivateTraffic(state.machines, url.searchParams.get("range") || "1h", url.searchParams.get("machine_id") || "all", Date.now(), {search:url.searchParams.get("search") || "",page:Number(url.searchParams.get("page") || 1),source_peer_id:url.searchParams.get("source_peer_id"),destination_peer_id:url.searchParams.get("destination_peer_id"),coverage:state.privateTrafficCoverage,stale:state.privateTrafficStale,demoDirections:state.privateTrafficDirections});
   }
+  if (/^\/machines\/[^/]+\/terminal-sessions$/.test(path)) {
+    if (method.toUpperCase() !== "GET") throw new Error("Demo machines cannot host shell sessions.");
+    return {sessions:[], can_open:false};
+  }
   if(path==="/terminal/traffic") {
     if(state.terminalTrafficError)throw Error(state.terminalTrafficError);
     if(state.terminalTraffic)return state.terminalTraffic;

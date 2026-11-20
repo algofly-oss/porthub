@@ -27,7 +27,7 @@ fn xml(value: &str) -> Result<String> {
         .replace('\'', "&apos;"))
 }
 
-fn path(value: &Path) -> Result<String> {
+pub(super) fn path(value: &Path) -> Result<String> {
     ensure!(
         value.is_absolute(),
         "launchd service paths must be absolute"

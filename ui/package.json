@@ -5,7 +5,7 @@
   "scripts": {
     "predev": "node scripts/prepare-excalidraw.cjs",
     "dev": "next dev",
-    "prebuild": "node scripts/prepare-excalidraw.cjs && node --test tests/private-traffic.test.mjs tests/private-traffic-demo.test.mjs tests/keyboard.test.mjs tests/bootstrap-command.test.mjs tests/terminal-traffic.test.mjs tests/terminal-connectivity.test.mjs && node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs && node --test tests/machine-metrics.test.mjs tests/ranking-measure.test.mjs tests/usb-lineage.test.mjs tests/proxy-bindings.test.mjs",
+    "prebuild": "node scripts/prepare-excalidraw.cjs && node --test tests/host-shell-catalog.test.mjs tests/private-traffic.test.mjs tests/private-traffic-demo.test.mjs tests/keyboard.test.mjs tests/bootstrap-command.test.mjs tests/terminal-traffic.test.mjs tests/terminal-connectivity.test.mjs && node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs && node --test tests/machine-metrics.test.mjs tests/ranking-measure.test.mjs tests/usb-lineage.test.mjs tests/proxy-bindings.test.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"

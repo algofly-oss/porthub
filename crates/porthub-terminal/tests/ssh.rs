@@ -26,6 +26,7 @@ async fn ssh_participants(snapshots: bool) -> Result<()> {
         write_token: random_token(32),
         read_token: random_token(32),
         options: Options {
+            dashboard_owner: None,
             name: "SSH pair".into(),
             expires_at: now() + 120,
             session_expires_at: None,
