@@ -485,11 +485,14 @@ pub(crate) async fn run_endpoint(
         #[cfg(feature="private-sparse")]
         let clock_nonce = uuid::Uuid::new_v4().simple().to_string();
         #[cfg(feature="private-sparse")]
+        let request_clock_origin = !virtual_endpoint && native_profile.is_some() && Instant::now() >= refresh_clock_origin;
+        #[cfg(feature="private-sparse")]
         {
             body["clock_nonce"] = serde_json::json!(clock_nonce);
-            if !virtual_endpoint && native_profile.is_some() && Instant::now()>=refresh_clock_origin {
-                body["refresh_clock_origin"]=true.into();
-                refresh_clock_origin=Instant::now()+Duration::from_secs(6*3600);
+            if request_clock_origin {
+                body["refresh_clock_origin"] = true.into();
+                // A failed first sync must not defer provisioning for six hours.
+                refresh_clock_origin = Instant::now() + Duration::from_secs(60);
             }
         }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
@@ -498,6 +501,10 @@ pub(crate) async fn run_endpoint(
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
+                #[cfg(feature="private-sparse")]
+                if request_clock_origin && value.authenticated_tls && reply.is_some() {
+                    refresh_clock_origin = Instant::now() + Duration::from_secs(6 * 3600);
+                }
                 if !value.authenticated_tls {
                     if let Some(reply) = &mut reply {
                         #[cfg(feature="private-sparse")]

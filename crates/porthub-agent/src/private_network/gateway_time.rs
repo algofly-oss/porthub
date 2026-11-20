@@ -238,6 +238,12 @@ async fn concurrent_recovery_shares_one_pinned_request() -> Result<()> {
                 reqwest::StatusCode::NO_CONTENT
             );
         }
+        // An open keep-alive connection must not mask an identity rotation.
+        ctl.set_clock_origin(&super::relay::PinnedRelay {
+            url: origin.clone(),
+            spki_sha256: "ab".repeat(32),
+        })?;
+        assert!(ctl.request(reqwest::Method::GET, "probe", None, &[]).await.is_err());
         let recovered = GatewayTime::new(&origin, &pin)?;
         let cfg = recovered.tls_config(roots).await?;
         let now = cfg.time_provider.current_time().unwrap().as_secs();

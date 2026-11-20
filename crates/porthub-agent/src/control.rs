@@ -116,7 +116,13 @@ impl Control {
     }
     #[cfg(feature = "private-sparse")]
     pub(crate) fn set_clock_origin(&mut self, origin: &crate::private_network::relay::PinnedRelay) -> anyhow::Result<()> {
-        self.clock_origin = Some(crate::private_network::gateway_time::GatewayTime::new(&origin.url, &origin.spki_sha256)?);
+        let clock = crate::private_network::gateway_time::GatewayTime::new(&origin.url, &origin.spki_sha256)?;
+        // A client pool may still hold connections validated with the previous
+        // registration clock. Rebuild both pools after the identity changes.
+        *self.recovered_tls.get_mut().map_err(|_| anyhow::anyhow!("clock state unavailable"))? = None;
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        { *self.underlay.get_mut() = None; }
+        self.clock_origin = Some(clock);
         Ok(())
     }
 
