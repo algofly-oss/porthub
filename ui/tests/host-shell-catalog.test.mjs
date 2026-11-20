@@ -11,10 +11,14 @@ test("a fallback response cannot become shell state", () => {
   assert.deepEqual(sessionRows({sessions:rows}), rows);
 });
 
-test("demo hosts have an empty immutable shell catalog", () => {
+test("retired shell requests fail without changing the demo machine inventory", () => {
   const data = makeDemoData();
-  const path = "/api/machines/example/terminal-sessions";
-  assert.deepEqual(sessionRows(handleDemoRequest(data,"GET",path)), []);
-  assert.throws(() => handleDemoRequest(data,"POST",path));
-  assert.deepEqual(sessionRows(handleDemoRequest(data,"GET",path)), []);
+  const before = structuredClone(data);
+  const path = `/api/machines/${data.machines[0]._id}/terminal-sessions`;
+  for (const endpoint of [path, `${path}/example`, `${path}/example/join`, "/api/terminal/host"]) {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      assert.throws(() => handleDemoRequest(data, method, endpoint), { status: 410 });
+    }
+  }
+  assert.deepEqual(data, before);
 });

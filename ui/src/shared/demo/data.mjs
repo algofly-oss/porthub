@@ -41,6 +41,9 @@ function traffic(connection, index) {
 export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const url=new URL(rawPath,"http://demo.invalid");
   const path = url.pathname.replace(/^.*\/api/, "");
+  if (path.startsWith("/terminal/") || /^\/machines\/[^/]+\/terminal-sessions(?:\/|$)/.test(path)) {
+    throw Object.assign(new Error("PortHub shell access has been retired."), { status: 410 });
+  }
   if(path==="/traffic/hover") return state.trafficHover || {timestamp:Number(url.searchParams.get("timestamp")),contributors:[],total_contributors:0,truncated:false};
   if(path==="/private/traffic") {
     if(state.privateTrafficError)throw Error(state.privateTrafficError);
