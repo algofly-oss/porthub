@@ -237,6 +237,9 @@ impl Peer {
         let config = ConfigBuilder::default()
             .with_crypto_provider(identity.provider.clone())
             .with_certificates(vec![identity.certificate.clone()])
+            // Wired UDP paths can reorder bursts by hundreds of records. Track each
+            // authenticated sequence once within this bounded window (128 bytes).
+            .with_replay_protection_window(1024)
             .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
             .with_client_auth(ClientAuthType::RequireAnyClientCert)
             .with_extended_master_secret(ExtendedMasterSecretType::Require)

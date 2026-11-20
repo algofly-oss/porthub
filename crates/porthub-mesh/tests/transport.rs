@@ -109,6 +109,29 @@ fn ice_dtls_core_proves_both_certificates_and_preserves_packet_boundaries() -> R
     Ok(())
 }
 #[test]
+fn delayed_records_are_accepted_once_inside_the_bounded_window() -> Result<()> {
+    let (mut left, mut right, start) = memory_pair()?;
+    let now = connect(&mut left, &mut right, start)?;
+    let data = [0x45; 20];
+    left.send(now, &data)?;
+    let expired = left.transmit().expect("oldest record");
+    left.send(now, &data)?;
+    let delayed = left.transmit().expect("delayed record");
+    for _ in 0..1023 {
+        left.send(now, &data)?;
+        pump(&mut left, &mut right, now)?;
+        assert_eq!(right.packet().as_deref(), Some(data.as_slice()));
+    }
+    right.receive(now, delayed.local, delayed.bytes.clone())?;
+    assert_eq!(right.packet().as_deref(), Some(data.as_slice()));
+    right.receive(now, delayed.local, delayed.bytes)?;
+    assert!(right.packet().is_none());
+    right.receive(now, expired.local, expired.bytes)?;
+    assert!(right.packet().is_none());
+    Ok(())
+}
+
+#[test]
 fn forged_description_cannot_substitute_a_different_certificate_even_on_the_same_address(
 ) -> Result<()> {
     let now = Instant::now();
