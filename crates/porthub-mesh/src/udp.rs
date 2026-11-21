@@ -4,7 +4,7 @@ use crate::{Description, Identity, Peer, State, MAX_PACKET};
 use anyhow::{ensure, Result};
 use bytes::{Bytes, BytesMut};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -635,6 +635,35 @@ async fn read_datagrams(
         }
     }
 }
+fn apply_datagram(
+    packet: Option<Datagram>,
+    peer: &mut Peer,
+    disabled: &mut HashSet<SocketAddr>,
+    statistics: &mut Statistics,
+) -> Result<()> {
+    match packet.ok_or_else(|| anyhow::anyhow!("private UDP read failed"))? {
+        Datagram::Packet(local, remote, bytes) => {
+            peer.receive_on(Instant::now(), local, remote, bytes)?;
+        }
+        Datagram::ReadError(local, closed) => {
+            statistics.read_errors = statistics.read_errors.saturating_add(1);
+            if closed {
+                disabled.insert(local);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn deliver_incoming(peer: &mut Peer, incoming: &mpsc::Sender<Bytes>, statistics: &mut Statistics) {
+    while let Some(packet) = peer.packet() {
+        statistics.received_bytes = statistics.received_bytes.saturating_add(packet.len() as u64);
+        if incoming.try_send(packet).is_err() {
+            statistics.dropped_incoming = statistics.dropped_incoming.saturating_add(1);
+        }
+    }
+}
+
 async fn drive(
     sockets: &HashMap<SocketAddr, Socket>,
     peer: &mut Peer,
@@ -658,37 +687,62 @@ async fn drive(
     let mut disabled = HashSet::new();
     let mut pending_permit:Option<SendPermit>=None;
     let mut earliest_timer = Instant::now();
+    let mut writes = VecDeque::new();
     loop {
-        while let Some(packet) = peer.transmit() {
+        // Keep the current batch attached to its admission. Replies produced
+        // by incoming packets during a send are drained in the next batch.
+        writes.extend(std::iter::from_fn(|| peer.transmit()));
+        let mut read_during_write = false;
+        while let Some(packet) = writes.pop_front() {
             if disabled.contains(&packet.local) {
                 continue;
             }
             let socket = sockets
                 .get(&packet.local)
                 .ok_or_else(|| anyhow::anyhow!("private interface unavailable"))?;
-            tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),result=async {if let Some(permit)=&pending_permit {permit.during(socket.send_to(&packet.bytes,packet.remote)).await}else{Ok(socket.send_to(&packet.bytes,packet.remote).await)}}=>{
-                let result=result?;
-                if let Err(error)=result {
-                    statistics.write_errors=statistics.write_errors.saturating_add(1);
-                    if closed(&error) {disabled.insert(packet.local);}
-                    // A failed ICE destination or datagram must not tear down
-                    // an authenticated connection over another viable path.
+            let send = async {
+                let write = socket.send_to(&packet.bytes, packet.remote);
+                if let Some(permit) = &pending_permit {
+                    permit.during(write).await
+                } else {
+                    Ok(write.await)
                 }
-            }}
-        }
-        pending_permit=None;
-        ensure!(
-            disabled.len() < sockets.len(),
-            "all private interfaces are closed"
-        );
-        while let Some(packet) = peer.packet() {
-            statistics.received_bytes = statistics
-                .received_bytes
-                .saturating_add(packet.len() as u64);
-            if incoming.try_send(packet).is_err() {
-                statistics.dropped_incoming = statistics.dropped_incoming.saturating_add(1);
+            };
+            tokio::pin!(send);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Ok(()),
+                    result = &mut send => {
+                        if let Err(error) = result? {
+                            statistics.write_errors = statistics.write_errors.saturating_add(1);
+                            if closed(&error) {
+                                disabled.insert(packet.local);
+                            }
+                            // A failed datagram must not tear down an authenticated
+                            // connection over another viable path.
+                        }
+                        break;
+                    }
+                    received = datagram_rx.recv() => {
+                        apply_datagram(received, peer, &mut disabled, &mut statistics)?;
+                        deliver_incoming(peer, &incoming, &mut statistics);
+                        match peer.state() {
+                            State::Failed => anyhow::bail!("private peer failed"),
+                            State::Closed => return Ok(()),
+                            _ => {}
+                        }
+                        read_during_write = true;
+                        if disabled.contains(&packet.local) {
+                            break;
+                        }
+                    }
+                }
             }
         }
+        pending_permit = None;
+        ensure!(disabled.len() < sockets.len(), "all private interfaces are closed");
+        deliver_incoming(peer, &incoming, &mut statistics);
         let current = PathState { state: peer.state(), relayed: peer.is_relay(), hosts: peer.selected_host_pair() };
         if *state.borrow() != current {
             state.send_replace(current);
@@ -709,16 +763,13 @@ async fn drive(
             earliest_timer = now + Duration::from_millis(1);
             continue;
         }
+        if read_during_write {
+            continue;
+        }
         tokio::select! {
             _=cancel.cancelled()=>return Ok(()),
             received=datagram_rx.recv()=>{
-                match received.ok_or_else(||anyhow::anyhow!("private UDP read failed"))? {
-                    Datagram::Packet(local,remote,bytes)=>peer.receive_on(Instant::now(),local,remote,bytes)?,
-                    Datagram::ReadError(local,closed)=>{
-                        statistics.read_errors=statistics.read_errors.saturating_add(1);
-                        if closed {disabled.insert(local);}
-                    },
-                }
+                apply_datagram(received, peer, &mut disabled, &mut statistics)?;
             },
             command=commands.recv()=>match command {
                 Some(Command::Remote{actor,description,reply})=>{let _=reply.send(peer.remote(Instant::now(),&actor,&description));},
@@ -818,7 +869,7 @@ mod io_tests {
         Ok(())
     }
     #[derive(Clone, Copy, PartialEq)]
-    enum Fault { Unreachable, ClosedInterface, RetiredPermit, SilentLoss, FullQueue }
+    enum Fault { Unreachable, ClosedInterface, BlockedWrite, RetiredPermit, SilentLoss, FullQueue }
     async fn exercise(fault: Fault) -> Result<()> {
         let dead_interface = fault == Fault::ClosedInterface;
         let gate=Arc::new(Gate::default());
@@ -944,6 +995,20 @@ mod io_tests {
                     anyhow::Ok(())
                 }).await??;
             }
+            if fault == Fault::BlockedWrite {
+                gate.blocked.store(true, Ordering::SeqCst);
+                let initial_sends = gate.sends.load(Ordering::SeqCst);
+                let upload = Bytes::from(vec![0x44; MAX_PACKET]);
+                left.send(upload.clone())?;
+                tokio::time::timeout(Duration::from_secs(1), gate.entered.notified()).await?;
+                let download = exchange(&right, &mut left_rx).await;
+                let observed_sends = gate.sends.load(Ordering::SeqCst);
+                gate.blocked.store(false, Ordering::SeqCst);
+                gate.release.notify_one();
+                download.map_err(|error| anyhow::anyhow!("incoming application packet stalled behind blocked send: {error}"))?;
+                ensure!(observed_sends == initial_sends, "the upload was no longer blocked");
+                ensure!(tokio::time::timeout(Duration::from_secs(2), right_rx.recv()).await? == Some(upload));
+            }
             if fault == Fault::RetiredPermit {
                 let valid=Arc::new(AtomicBool::new(true));let check=valid.clone();
                 gate.blocked.store(true,Ordering::SeqCst);let sent=gate.sends.load(Ordering::SeqCst);
@@ -972,6 +1037,10 @@ mod io_tests {
     }
     #[tokio::test]
     async fn actual_native_udp_pending_send_cannot_resume_after_admission_retirement()->Result<()> {exercise(Fault::RetiredPermit).await}
+    #[tokio::test]
+    async fn blocked_carrier_write_keeps_receiving_encrypted_peer_traffic() -> Result<()> {
+        exercise(Fault::BlockedWrite).await
+    }
     #[tokio::test]
     async fn counts_only_full_queue_rejections_across_session_clones() -> Result<()> {
         exercise(Fault::FullQueue).await
