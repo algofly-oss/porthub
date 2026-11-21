@@ -120,6 +120,13 @@ def semantic_digest(records):
     normalized = dict(records)
     workspace = tomllib.loads(records['Cargo.toml'].decode())
     workspace['workspace']['package'].pop('version', None)
+    # The release recipes select only porthub-media-helper with -p. For an
+    # explicit workspace, sibling members outside its locked closure do not
+    # enter that build. Keep glob-based layouts and all other Cargo settings.
+    members = workspace['workspace'].get('members', [])
+    helper_members = {'crates/porthub-media-helper', 'crates/porthub-components'}
+    if helper_members.issubset(members) and all(re.fullmatch(r'crates/[\w-]+', path) for path in members):
+        workspace['workspace']['members'] = sorted(helper_members)
     normalized['Cargo.toml'] = canonical(workspace)
     normalized['Cargo.lock'] = canonical(helper_lock(tomllib.loads(records['Cargo.lock'].decode())))
     return source_digest(normalized)

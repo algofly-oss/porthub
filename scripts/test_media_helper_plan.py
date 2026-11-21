@@ -25,7 +25,9 @@ class PlannerTests(unittest.TestCase):
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('fixture input\n')
-        (self.root / 'Cargo.toml').write_text('[workspace.package]\nversion="1.11.51"\nedition="2021"\n')
+        (self.root / 'Cargo.toml').write_text(
+            '[workspace]\nresolver="2"\nmembers=["crates/porthub-media-helper","crates/porthub-components"]\n'
+            '[workspace.package]\nversion="1.11.51"\nedition="2021"\n')
         (self.root / 'Cargo.lock').write_text('''version = 4
 [[package]]
 name = "porthub-media-helper"
@@ -86,6 +88,29 @@ version = "1.11.34"
         self.assertEqual(reused['artifact_source_revision'], self.old)
         self.assertEqual(reused['build_inputs'], self.previous['artifacts'][0]['build_inputs'])
         self.assertEqual(reused['manifest'], self.previous)
+
+    def test_unrelated_workspace_member_reuses_original_provenance(self):
+        manifest = self.root / 'Cargo.toml'
+        manifest.write_text(manifest.read_text().replace('members=[', 'members=["crates/porthub-forward-ssh",'))
+        self.commit()
+        reused = self.plan(self.previous)
+        self.assertEqual(reused['mode'], 'reuse')
+        self.assertEqual(reused['manifest'], self.previous)
+        self.assertEqual(reused['artifact_source_revision'], self.old)
+        self.assertEqual(reused['build_inputs'], self.previous['artifacts'][0]['build_inputs'])
+
+    def test_membership_and_workspace_changes_affecting_helper_require_bump(self):
+        manifest = self.root / 'Cargo.toml'
+        original = manifest.read_text()
+        for changed in (original.replace(',"crates/porthub-components"', ''),
+                        original.replace('members=[', 'members=["crates/*",'),
+                        original.replace('resolver="2"', 'resolver="3"'),
+                        original + '\n[profile.release]\nlto=true\n'):
+            with self.subTest(manifest=changed):
+                manifest.write_text(changed)
+                self.commit()
+                with self.assertRaisesRegex(ValueError, 'Bump helper version'):
+                    self.plan(self.previous)
 
     def test_changed_helper_or_dependency_or_build_recipe_requires_version_bump(self):
         for name in ['crates/porthub-media-helper/source.rs', 'scripts/build-media-helper-windows.ps1', 'rust-toolchain.toml']:
