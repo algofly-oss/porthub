@@ -340,18 +340,20 @@ pub async fn run_with_logs(
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match result {
-            Err(error) if error.is::<super::authority_clock::RequestExpired>()
-                || error.is::<super::ExpiredDuringSuspend>() => {
-                // run_inner has already revoked the old authority and removed
-                // its routes. Restart the data plane with a fresh request.
-                tracing::info!("private authority expired; requesting a fresh lease");
-                tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    _ = crate::unified::suspend_aware_delay(Duration::from_secs(5)) => {}
-                }
+        let error = match result {
+            Err(error) => error,
+            Ok(()) => return Ok(()),
+        };
+        let Some(delay) = super::authority_clock::standalone_retry_delay(&error) else {
+            return Err(error);
+        };
+        // run_inner has revoked the expired authority and released its routes.
+        tracing::info!(?delay, "private authority expired; requesting a fresh lease");
+        if !delay.is_zero() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = crate::unified::suspend_aware_delay(delay) => {}
             }
-            other => return other,
         }
     }
 }
