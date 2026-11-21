@@ -389,6 +389,15 @@ impl Control {
         }
         bases
     }
+    #[cfg(feature="private-sparse")]
+    pub(crate) fn forward_tls(&self) -> Result<Option<tokio_tungstenite::Connector>,Failure> {
+        Ok(self.recovered_tls.lock().map_err(|_| Failure::Unavailable)?.as_ref()
+            .map(|(tls, _)| tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(tls.clone()))))
+    }
+    #[cfg(feature="private-sparse")]
+    pub(crate) async fn forward_catalog_request(&self,base:&str)->Result<reqwest::RequestBuilder,Failure>{
+        Ok(self.http_for(base).await?.0.get(format!("{base}/api/port-forwards/agent/config")).timeout(Duration::from_secs(4)))
+    }
     pub(crate) async fn release_request(&self, base: &str, target: &str) -> Result<reqwest::RequestBuilder, Failure> {
         Ok(self.http_for(base).await?.0
             .get(format!("{base}/api/{}", self.release_path(Some(target))))

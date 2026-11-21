@@ -492,6 +492,8 @@ pub(crate) async fn run_endpoint(
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let mut reply = None;
         #[cfg(feature="private-sparse")]
+        let mut forward_cursor=None;
+        #[cfg(feature="private-sparse")]
         let mut workspace_generation=None;
         if virtual_endpoint {
             for key in ["native_repair","exit_pick","tor_exit","application_proxy","lan_exit","lan_networks","virtual_host_provider","exit_pair_protocol","exit_ready","exit_ready_peers","exit_pair_failed"] {
@@ -544,6 +546,8 @@ pub(crate) async fn run_endpoint(
                     }
                     let cursor = (value.authenticated_tls || profile.allow_insecure_http_for_tests)
                         .then(|| value.headers.get("x-porthub-private-cursor")?.to_str().ok()?.parse::<uuid::Uuid>().ok()).flatten();
+                    #[cfg(feature="private-sparse")]
+                    if value.headers.get("x-porthub-forward-protocol").and_then(|h|h.to_str().ok())==Some("1") {forward_cursor=cursor;}
                     if cursor.is_some() && change_cursor.borrow().is_some() && *change_cursor.borrow()!=cursor {
                         if !announced_edit {
                             if let Some(r)=&sparse {r.handle().refresh_after_edit();}
@@ -871,7 +875,10 @@ pub(crate) async fn run_endpoint(
                 "private signaling backlog exceeds limit"
             );
             let response_expiry=reply.snapshot.expires_at;
-            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private packet owner closed")};
+            let snapshot=super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry);
+            #[cfg(feature="private-sparse")]
+            let snapshot={let mut snapshot=snapshot;snapshot.forward_sync=forward_cursor.map(|cursor|(cursor,control.clone()));snapshot};
+            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(snapshot))=>ensure!(result.is_ok(),"private packet owner closed")};
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
             if native_profile.is_some() {
                 let mut hosts = if request_window.is_some() {reply.virtual_hosts} else {Vec::new()};

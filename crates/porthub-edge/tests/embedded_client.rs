@@ -481,3 +481,35 @@ async fn server_first_protocol_receives_greeting_without_visitor_writing_first()
     .await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn ssh_import_uses_exact_authenticated_control_channel_and_retires_active_visitor() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let target = fixture_listener().await?;
+        let target_address=target.local_addr()?;
+        let echo = tokio::spawn(echo(target,Arc::new(AtomicUsize::new(0))));
+        let service="porthub_import_111111111111111111111111_0";
+        let absent="porthub_import_111111111111111111111111_1";
+        let config=format!("[server.services.{service}]\ntoken='fixture-secret'\nbind_addr='127.0.0.1:0'\n[server.services.{absent}]\ntoken='unused-token'\nbind_addr='127.0.0.1:0'");
+        let server=Arc::new(RwLock::new(EmbeddedServer::new(gateway_config(&config)?).await?));
+        let listen=fixture_listener().await?;let address=listen.local_addr()?;
+        let router=porthub_edge::router(server.clone());
+        let gateway=tokio::spawn(async move {axum::serve(listen,router).await});
+        let agent=EmbeddedClient::new(client(address,&[(service.to_owned(),target_address)])?).await?;
+        let mut first=loop{
+            let open=server.read().await.open_import(service);
+            if let Ok(stream)=open.await{break stream;}
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        };
+        ensure!(server.read().await.open_import(absent).await.is_err(),"wrong registered service was admitted");
+        ensure!(server.read().await.open_import("fixture").await.is_err(),"ordinary tunnel accepted an import");
+        first.write_all(b"import over the registered carrier").await?;
+        let mut bytes=[0;34];first.read_exact(&mut bytes).await?;
+        ensure!(&bytes==b"import over the registered carrier");
+        server.write().await.reload(gateway_config("[server.services]")?).await?;
+        ensure!(first.read(&mut bytes).await?==0,"retired import remained connected");
+        ensure!(server.read().await.open_import(service).await.is_err(),"deleted import reopened");
+        agent.shutdown().await;echo.abort();gateway.abort();
+        Ok(())
+    }).await?
+}

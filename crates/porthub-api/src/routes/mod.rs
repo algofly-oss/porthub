@@ -24,6 +24,7 @@ pub mod private_groups;
 pub mod private_sync;
 pub mod virtual_hosts;
 pub mod proxy_grants;
+pub mod port_forwards;
 pub mod telegram;
 pub mod traffic_routes;
 
@@ -57,6 +58,8 @@ pub fn router() -> Router<Arc<App>> {
         .merge(exposes::router())
         .merge(exit_nodes::router())
         .merge(proxy_grants::router())
+        .merge(port_forwards::router())
+        .merge(crate::port_forward_bridge::private::router())
         .merge(crate::application_proxy::router())
         .merge(dns_rules::router())
         .merge(connection_firewall::router())

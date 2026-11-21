@@ -259,6 +259,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
                     reply.headers_mut().insert("x-porthub-workspace-generation",generation.to_string().parse().expect("UUID header"));
                 }
             }
+            reply.headers_mut().insert("x-porthub-forward-protocol", axum::http::HeaderValue::from_static("1"));
             reply.headers_mut().insert("x-porthub-private-cursor", cursor.parse().expect("UUID header"));
         }
     }

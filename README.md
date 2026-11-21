@@ -124,6 +124,28 @@ on the server. The default deployment uses no external STUN/TURN service.
 See [PairDrop integration and source](deploy/pairdrop/README.md) for the pinned
 upstream version, license, runtime and networking details.
 
+## SSH port forwards
+
+Open **Transfers → Port forwards → New forward** in your signed-in dashboard.
+Choose a name, the ports to map, and the machines or groups that may connect.
+Add a mapping for each direction you need. A range such as `8000-8003` creates
+four mappings. Private access is the default. Selecting public access lets
+anyone who can reach the gateway address and assigned port connect.
+
+Copy the generated command for your shell and run it on the computer sharing
+or receiving a port. It uses stock OpenSSH, an entry-specific identity and the
+gateway host key from your dashboard. First use requires no password or
+host-key confirmation. The command contains its private key, so share it only
+with the person who should run that forward.
+
+While the command runs, a shared port sends connections to the local service
+on that computer. For a registered destination, connect to the local listening
+port on the computer running the command. The dashboard shows the address and
+port for each mapping. Private exports use a loopback listener on each permitted
+machine, provided by its enrolled PortHub agent. The publishing computer only
+needs SSH. Stopping SSH disconnects the forward. The saved command can reconnect
+until its owner deletes the entry, which also terminates its active channels.
+
 ## Hosted images and screenshot links
 
 Open **Hosted images** in the portal. Paste a screenshot with Ctrl+V (Cmd+V on

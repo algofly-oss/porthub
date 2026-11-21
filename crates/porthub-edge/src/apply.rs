@@ -70,5 +70,5 @@ pub fn router(server: Arc<RwLock<EmbeddedServer>>, path: PathBuf) -> Router {
     Router::new()
         .route("/apply", post(apply))
         .layer(DefaultBodyLimit::max(256))
-        .with_state(Apply { server, path })
+        .with_state(Apply { server: server.clone(), path }).merge(crate::forward_bridge::router(server))
 }

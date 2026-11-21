@@ -18,6 +18,8 @@ use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 #[derive(Default,Clone)]
 pub struct Zone {
+    #[cfg(feature="private-sparse")]
+    pub(super) forward_names:Option<super::port_forwards::Names>,
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
     rules: Vec<porthub_mesh::dns_policy::Rule>,
@@ -101,6 +103,8 @@ impl Zone {
             return None;
         }
         let name=q.name().to_ascii().to_ascii_lowercase();
+        #[cfg(feature="private-sparse")]
+        if self.forward_names.as_ref().is_some_and(|catalog|catalog.reserved(&name)) {return None;}
         if self.records.contains_key(&name)||self.suffixes.contains(&name)||!self.suffixes.iter().any(|s|name.ends_with(&format!(".{s}"))){return None;}
         self.sparse.as_ref().filter(|h|h.enabled()).map(|_|name)
     }
@@ -189,6 +193,16 @@ impl Zone {
                 reply.metadata.response_code = ResponseCode::NXDomain;
                 return reply.to_vec().ok();
             }
+        }
+        #[cfg(feature="private-sparse")]
+        if let Some(names) = self.forward_names.as_ref().filter(|names|
+            query.metadata.op_code == OpCode::Query && names.reserved(&name)) {
+            if !names.contains(&name) {
+                reply.metadata.response_code=ResponseCode::NXDomain;
+            } else if q.query_class()==DNSClass::IN && q.query_type()==RecordType::A {
+                reply.add_answer(Record::from_rdata(q.name().clone(),0,RData::A(A(Ipv4Addr::LOCALHOST))));
+            }
+            return reply.to_vec().ok();
         }
         let code = if query.metadata.op_code != OpCode::Query {
             ResponseCode::NotImp

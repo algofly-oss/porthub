@@ -70,6 +70,27 @@ impl EmbeddedServer {
         }
     }
 
+    /// Accept an internal visitor only on the named, enrolled control channel.
+    /// No host listener or lookup by a reusable TCP port is involved.
+    pub fn open_import(&self, service: &str) -> impl std::future::Future<Output=Result<tokio::io::DuplexStream>> + Send + 'static {
+        let channels = self.inner.control_channels.clone();
+        let service=service.to_owned();
+        async move {
+        ensure!(service.starts_with("porthub_import_"), "invalid import service");
+        let (local, edge) = tokio::io::duplex(32 * 1024);
+        let (ack, ready) = oneshot::channel();
+        {
+            let channels = channels.read().await;
+            let handle = channels.get1(&protocol::digest(service.as_bytes())).context("destination offline")?;
+            let (visitors, requests) = handle.import.as_ref().context("not an import service")?;
+            visitors.try_send((edge, Some(ack))).map_err(|_| anyhow!("import busy"))?;
+            requests.send(true).map_err(|_| anyhow!("destination offline"))?;
+        }
+        time::timeout(Duration::from_secs(6), ready).await??;
+        Ok(local)
+        }
+    }
+
     /// Revoke removed/changed services without disturbing unchanged sessions.
     pub async fn reload(&mut self, config: Config) -> Result<()> {
         let next = config.server.context("missing server configuration")?;
@@ -524,6 +545,7 @@ pub struct ControlChannelHandle<T: Transport> {
     _shutdown_tx: broadcast::Sender<bool>,
     data_ch_tx: mpsc::Sender<(T::Stream, bool)>,
     service: ServerServiceConfig,
+    import: Option<(mpsc::Sender<(tokio::io::DuplexStream, Option<oneshot::Sender<()>>)>, mpsc::UnboundedSender<bool>)>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     listener_closed: Option<oneshot::Receiver<()>>,
     retired: Vec<ControlChannelHandle<T>>,
@@ -612,7 +634,18 @@ where
         let bind_addr = service.bind_addr.clone();
         let visitor_socket_opts = SocketOpts::from_server_cfg(&service);
         let public_access = service.access.clone();
+        let mut import = None;
         let pool = match service.service_type {
+            ServiceType::Tcp if service.name.starts_with("porthub_import_") => {
+                let (visitors, receiver) = mpsc::channel(CHAN_SIZE);
+                import = Some((visitors, data_ch_req_tx.clone()));
+                tokio::spawn(async move {
+                    if let Err(err) = run_tcp_visitor_pool::<T, _>(bind_addr, data_ch_rx, data_ch_req_tx,
+                        shutdown_rx_clone, listener_closed, None, receiver, None).await {
+                        warn!(%err, "import channel closed");
+                    }
+                })
+            }
             ServiceType::Tcp => tokio::spawn(
                 async move {
                     if let Err(e) = run_tcp_connection_pool::<T>(
@@ -680,6 +713,7 @@ where
         ControlChannelHandle {
             _shutdown_tx: shutdown_tx,
             data_ch_tx,
+            import,
             service,
             tasks: vec![pool, control],
             listener_closed: Some(listener_closed_rx),
@@ -754,7 +788,7 @@ fn tcp_listen_and_send(
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
     socket_opts: SocketOpts,
-) -> (mpsc::Receiver<TcpStream>, tokio::task::JoinHandle<()>) {
+) -> (mpsc::Receiver<(TcpStream, Option<oneshot::Sender<()>>)>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(CHAN_SIZE);
 
     let task = tokio::spawn(async move {
@@ -814,7 +848,7 @@ fn tcp_listen_and_send(
                             debug!("New visitor from {}", addr);
 
                             // Send the visitor to the connection pool
-                            let _ = tx.send(incoming).await;
+                            let _ = tx.send((incoming, None)).await;
                         }
                     }
                 },
@@ -864,19 +898,33 @@ where S:AsyncRead+tokio::io::AsyncWrite+Unpin+Send+'static {
 #[instrument(skip_all)]
 async fn run_tcp_connection_pool<T: Transport>(
     bind_addr: String,
-    mut data_ch_rx: mpsc::Receiver<(T::Stream, bool)>,
+    data_ch_rx: mpsc::Receiver<(T::Stream, bool)>,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
-    mut shutdown_rx: broadcast::Receiver<bool>,
+    shutdown_rx: broadcast::Receiver<bool>,
     listener_closed: oneshot::Sender<()>,
     visitor_socket_opts: SocketOpts,
     public_access: Option<crate::config::PublicAccessConfig>,
 ) -> Result<()> {
-    let (mut visitor_rx, listener) = tcp_listen_and_send(
+    let (visitor_rx, listener) = tcp_listen_and_send(
         bind_addr.clone(),
         data_ch_req_tx.clone(),
         shutdown_rx.resubscribe(),
         visitor_socket_opts,
     );
+    run_tcp_visitor_pool::<T, _>(bind_addr, data_ch_rx, data_ch_req_tx, shutdown_rx,
+        listener_closed, public_access, visitor_rx, Some(listener)).await
+}
+
+async fn run_tcp_visitor_pool<T: Transport, V: AsyncRead + io::AsyncWrite + Send + Unpin + 'static>(
+    bind_addr: String,
+    mut data_ch_rx: mpsc::Receiver<(T::Stream, bool)>,
+    data_ch_req_tx: mpsc::UnboundedSender<bool>,
+    mut shutdown_rx: broadcast::Receiver<bool>,
+    listener_closed: oneshot::Sender<()>,
+    public_access: Option<crate::config::PublicAccessConfig>,
+    mut visitor_rx: mpsc::Receiver<(V, Option<oneshot::Sender<()>>)>,
+    listener: Option<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
     #[cfg(feature = "http-access")]
     let access_gate = public_access
         .map(|access| {
@@ -897,7 +945,7 @@ async fn run_tcp_connection_pool<T: Transport>(
     let mut probes=tokio::task::JoinSet::new();
     let mut probe_at=time::Instant::now()+Duration::from_secs(30);
     let mut idle: VecDeque<(T::Stream, bool)> = VecDeque::new();
-    let mut waiting: Option<TcpStream> = None;
+    let mut waiting: Option<(V, Option<oneshot::Sender<()>>)> = None;
     let mut visitor_deadline=time::Instant::now();
     let mut retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
     let forwarding = async {
@@ -905,7 +953,7 @@ async fn run_tcp_connection_pool<T: Transport>(
             // Idle carriers must be read even when no visitors arrive. Framing
             // heartbeats are consumed by the transport; EOF/error (or unexpected
             // application bytes before StartForwardTcp) retires this carrier.
-            if let Some(mut visitor) = waiting.take() {
+            if let Some((mut visitor, ready_ack)) = waiting.take() {
                 if let Some(mut carrier) = idle.pop_front() {
                     let closed = poll_fn(|cx| {
                         Poll::Ready(poll_idle(std::slice::from_mut(&mut carrier), cx).is_ready())
@@ -932,10 +980,11 @@ async fn run_tcp_connection_pool<T: Transport>(
                         // A failed local target is not a stale transport. Close
                         // this uncommitted visitor rather than reset a service.
                         if ready.is_none() && time::Instant::now()<visitor_deadline {
-                            waiting=Some(visitor);
+                            waiting=Some((visitor, ready_ack));
                         }
                         continue;
                     }
+                    if ready_ack.is_some_and(|notify| notify.send(()).is_err()) {continue;}
                     #[cfg(feature = "http-access")]
                     let gate = access_gate.clone();
                     copies.spawn(async move {
@@ -954,7 +1003,7 @@ async fn run_tcp_connection_pool<T: Transport>(
                     });
                     continue;
                 }
-                waiting = Some(visitor);
+                waiting = Some((visitor, ready_ack));
             }
             tokio::select! {
                 _=time::sleep_until(probe_at)=>{
@@ -1000,8 +1049,10 @@ async fn run_tcp_connection_pool<T: Transport>(
     let drain = tokio::select! { _=forwarding=>false, signal=shutdown_rx.recv()=>matches!(signal, Ok(false)) };
     // The listener can be blocked handing off a queued visitor; abort and join
     // it explicitly, then drain every active forwarding task before returning.
-    listener.abort();
-    let listener_result = listener.await;
+    let listener_result = match listener {
+        Some(listener) => { listener.abort(); listener.await },
+        None => Ok(()),
+    };
     // Drop queued visitors and idle old-session channels before acknowledging
     // release. Only copies that already started forwarding may survive.
     drop(visitor_rx);

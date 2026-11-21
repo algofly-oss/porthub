@@ -12,6 +12,7 @@ speech-cuda = ["transcribe-cpp/cuda"]
 speech-vulkan = ["transcribe-cpp/vulkan"]
 
 [dependencies]
+porthub-forward-ssh = { path = "../porthub-forward-ssh" }
 hashbrown = { version = "0.17", default-features = false, features = ["equivalent"] }
 transcribe-cpp = { version = "=0.4.2", default-features = false }
 

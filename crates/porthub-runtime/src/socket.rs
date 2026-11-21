@@ -75,3 +75,12 @@ pub async fn bind(path: &Path) -> Result<(UnixListener, SocketLease)> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
     Ok((listener, lease))
 }
+
+
+/// The edge and core derive the same local endpoint for the forwarding-only broker.
+pub fn forward_ssh_path(api_socket: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    std::env::var_os("PORTHUB_FORWARD_SSH_SOCKET")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| api_socket.map(|path| path.with_file_name("forward-ssh.sock")))
+}

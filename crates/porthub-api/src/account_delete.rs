@@ -136,6 +136,12 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
     let connection_filter = doc! {"$or":[{"user_id":{"$in":&owner}},{"machine_id":{"$in":&mids}}]};
     let peer_filter = doc! {"$or":[{"_id":{"$in":&pids}},{"owner_id":{"$in":&owner}},{"workspace_id":{"$in":&owner}},{"machine_id":{"$in":&mids}}]};
     app.realtime.disconnect_user(&uid);
+    let grants = rows(app, crate::routes::port_forwards::COLLECTION, doc!{"workspace_id":id}).await?;
+    for grant in grants {
+        if let Ok(entry) = grant.get_object_id("_id") {
+            crate::routes::port_forwards::retire(app, id, entry).await?;
+        }
+    }
     app.collection("user_sessions")
         .delete_many(doc! {"user_id":{"$in":&owner}})
         .await?;

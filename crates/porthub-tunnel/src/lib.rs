@@ -28,6 +28,10 @@ pub fn gateway_config(input: &str) -> Result<Config> {
     if let Some(server) = &config.server {
         for service in server.services.values() {
             let bind: std::net::SocketAddr = service.bind_addr.parse()?;
+            if service.name.starts_with("porthub_import_") {
+                anyhow::ensure!(bind == "127.0.0.1:0".parse()?, "invalid logical import binding");
+                continue;
+            }
             if !binds.insert(bind) {
                 anyhow::bail!("duplicate service bind address");
             }

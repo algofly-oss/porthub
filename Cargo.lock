@@ -5429,6 +5429,7 @@ dependencies = [
  "porthub-components",
  "porthub-edge",
  "porthub-egress",
+ "porthub-forward-ssh",
  "porthub-identity",
  "porthub-mesh",
  "porthub-network",
@@ -5571,6 +5572,23 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "porthub-forward-ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hmac 0.12.1",
+ "rand 0.8.8",
+ "russh",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "zeroize",
 ]
 
 [[package]]

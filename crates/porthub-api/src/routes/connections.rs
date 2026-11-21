@@ -69,7 +69,7 @@ pub async fn machine(app: &App, connection: &Document) -> ApiResult<Option<Docum
         None => Ok(None),
     }
 }
-async fn ensure_index(app: &App) -> ApiResult<()> {
+pub(super) async fn ensure_index(app: &App) -> ApiResult<()> {
     app.collection("connections")
         .create_index(
             IndexModel::builder()

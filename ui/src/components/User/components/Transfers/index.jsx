@@ -7,7 +7,11 @@ import { copyText } from "@/shared/utils/clipboard";
 import { shareFile } from "@/shared/transfers/browser-shares";
 import BrowserShare from "./BrowserShare";
 import PairDrop from "./PairDrop";
-import { IconBrowser, IconArrowsExchange } from "@tabler/icons-react";
+import PortForwards from "./PortForwards";
+import { IconBrowser, IconArrowsExchange, IconRoute } from "@tabler/icons-react";
+
+const tabs = [["browser", "From browser", IconBrowser], ["send", "From terminal", IconArrowUpRight], ["download", "Download", IconArrowDownLeft], ["pairdrop", "PairDrop", IconArrowsExchange], ["forwards", "Port forwards", IconRoute]];
+const choices = tabs.map(([value]) => value);
 
 const quote = value => `'${value.replace(/'/g, "'\\''")}'`;
 const inputClass = "mt-1.5 block h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary";
@@ -51,17 +55,17 @@ export default function Transfers({ active = true }) {
     <div className="workspace-page !h-auto !min-h-full !overflow-visible">
       <header className="mb-5 shrink-0">
         <h1 className="text-lg font-semibold tracking-tight">Transfers</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Share from your browser or terminal. Download anywhere.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Share files and forward ports from your devices.</p>
       </header>
       <div className="flex grow flex-col overflow-hidden rounded-xl border border-border bg-surface">
         <div role="tablist" aria-label="Transfer direction" className="flex shrink-0 flex-wrap gap-x-5 border-b border-border px-5">
-          {[["browser", "From browser", IconBrowser], ["send", "From terminal", IconArrowUpRight], ["download", "Download", IconArrowDownLeft], ["pairdrop", "PairDrop", IconArrowsExchange]].map(([value, label, Icon]) =>
+          {tabs.map(([value, label, Icon]) =>
             <button key={value} id={`transfer-${value}-tab`} role="tab" aria-selected={mode === value} aria-controls="transfer-panel" tabIndex={mode === value ? 0 : -1}
-              onClick={() => setMode(value)} onKeyDown={event => { const choices = ["browser", "send", "download", "pairdrop"]; if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? choices[0] : event.key === "End" ? choices[3] : choices[(choices.indexOf(mode) + (event.key === "ArrowLeft" ? 3 : 1)) % 4]; setMode(next); document.getElementById(`transfer-${next}-tab`)?.focus(); } }}
+              onClick={() => setMode(value)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? choices[0] : event.key === "End" ? choices[choices.length - 1] : choices[(choices.indexOf(value) + (event.key === "ArrowLeft" ? choices.length - 1 : 1)) % choices.length]; setMode(next); document.getElementById(`transfer-${next}-tab`)?.focus(); } }}
               className={`relative flex min-h-[52px] items-center gap-2 border-b-2 px-0.5 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${mode === value ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}><Icon size={17}/>{label}</button>)}
         </div>
         <section id="transfer-panel" role="tabpanel" aria-labelledby={`transfer-${mode}-tab`} className="flex grow flex-col p-4 sm:p-5">
-          {mode === "browser" ? <BrowserShare active={active}/> : mode === "pairdrop" ? <PairDrop/> : <>
+          {mode === "browser" ? <BrowserShare active={active}/> : mode === "pairdrop" ? <PairDrop/> : mode === "forwards" ? <PortForwards/> : <>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">{sending ? "Run this on the machine that has your file." : "Paste the link printed by the sender."}</p>
             <div role="group" aria-label={sending ? "Sender tool" : "Download tool"} className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background p-1">
@@ -94,7 +98,7 @@ export default function Transfers({ active = true }) {
         </section>
       </div>
       <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <p>Free · No server storage · Multiple downloaders</p>
+        {mode !== "forwards" && <p>Free · No server storage · Multiple downloaders</p>}
 
       </div>
     </div>

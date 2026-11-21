@@ -193,7 +193,9 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
     let (control_stop, mut control_stopping) = tokio::sync::watch::channel(false);
     let mut control_lease = None;
-    let tls_ingress = porthub_edge::terminal::TlsIngress::default();
+    let tls_ingress = porthub_runtime::socket::forward_ssh_path(api_socket.as_deref())
+        .map(|socket| porthub_edge::terminal::TlsIngress::with_ssh(socket, control_stop.subscribe()))
+        .unwrap_or_default();
     if let Some(path) = args.control_socket.or_else(|| {
         std::env::var_os("PORTHUB_EDGE_SOCKET")
             .filter(|path| !path.is_empty())

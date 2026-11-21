@@ -488,6 +488,8 @@ async fn run_authorized_worker(
     let mut component_maintenance = None;
     #[cfg(feature="private-sparse")]
     let (component_clock, component_clock_rx)=tokio::sync::watch::channel(None);
+    #[cfg(feature="private-sparse")]
+    let forwarder=super::port_forwards::Manager::new(profile.clone(),instance.clone());
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     // Older VPN discovery clients skip tun0-prefixed devices but advertise
     // unrecognized TUN names as physical ICE endpoints to other machines.
@@ -743,6 +745,8 @@ async fn run_authorized_worker(
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 #[cfg(feature="private-sparse")]
                 component_clock.send_replace(authority.clock_sample());
+                #[cfg(feature="private-sparse")]
+                forwarder.update(&authority, snapshot.peers.iter().find(|p|p.id==snapshot.self_).and_then(|p|p.hostname.split_once('.').map(|(_,suffix)|suffix)));
                 let mut route_snapshot=super::exit_plumbing::project(&snapshot,&sparse_handle.exit_leases());
                 #[cfg(feature="local-tor")]
                 {
@@ -888,6 +892,8 @@ async fn run_authorized_worker(
                     { recovery_sockets = server.recovery_sockets().ok(); }
                     let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
+                    #[cfg(feature="private-sparse")]
+                    {server.zone.write().await.forward_names=Some(forwarder.names());}
                     #[cfg(feature="local-tor")]
                     {
                         let names=std::iter::once(&profile.server).chain(profile.fallback_servers.iter())
