@@ -103,30 +103,32 @@ pub async fn accept_invitation(app: &App, user: &Document, token: &str) -> ApiRe
         ));
     }
     let id = invite.get("_id").cloned().unwrap_or(Bson::Null);
-    let claim = app.collection("workspace_invites").update_one(doc! {
-        "_id":&id,"consumed_at":Bson::Null,"revoked_at":Bson::Null,"expires_at":{"$gt":DateTime::now()}
-    },doc! {"$set":{"consumed_at":DateTime::now(),"accepted_by":&user_id}}).await?;
-    if claim.modified_count != 1 {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Invitation has already been used or revoked",
-        ));
-    }
-    let joined = app.collection("workspace_members").update_one(doc! {"_id":format!("{owner_id}:{uid}")},doc! {
-        "$setOnInsert":{"user_id":&user_id,"workspace_id":&owner,"role":invite.get("role").cloned().unwrap_or(Bson::Null),"joined_at":DateTime::now()}
-    }).upsert(true).await;
-    if let Err(error) = joined {
-        let _ = app
-            .collection("workspace_invites")
-            .update_one(
-                doc! {"_id":&id,"accepted_by":&user_id},
-                doc! {
-                    "$set":{"consumed_at":Bson::Null},"$unset":{"accepted_by":""}
-                },
-            )
-            .await;
-        return Err(error.into());
-    }
-    if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
-    Ok(owner_id)
+    crate::private_continuity::write(&app, owner.as_object_id(), async {
+        let claim = app.collection("workspace_invites").update_one(doc! {
+            "_id":&id,"consumed_at":Bson::Null,"revoked_at":Bson::Null,"expires_at":{"$gt":DateTime::now()}
+        },doc! {"$set":{"consumed_at":DateTime::now(),"accepted_by":&user_id}}).await?;
+        if claim.modified_count != 1 {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Invitation has already been used or revoked",
+            ));
+        }
+        let joined = app.collection("workspace_members").update_one(doc! {"_id":format!("{owner_id}:{uid}")},doc! {
+            "$setOnInsert":{"user_id":&user_id,"workspace_id":&owner,"role":invite.get("role").cloned().unwrap_or(Bson::Null),"joined_at":DateTime::now()}
+        }).upsert(true).await;
+        if let Err(error) = joined {
+            let _ = app
+                .collection("workspace_invites")
+                .update_one(
+                    doc! {"_id":&id,"accepted_by":&user_id},
+                    doc! {
+                        "$set":{"consumed_at":Bson::Null},"$unset":{"accepted_by":""}
+                    },
+                )
+                .await;
+            return Err(error.into());
+        }
+        if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
+        Ok(owner_id)
+    }).await
 }

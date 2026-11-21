@@ -137,3 +137,5 @@ mod native_owner;
 
 #[cfg(all(feature = "private-stream", feature = "private-sparse"))]
 mod virtual_hosts;
+
+mod sleep_generation;

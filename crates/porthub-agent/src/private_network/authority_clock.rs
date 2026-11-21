@@ -122,6 +122,7 @@ pub(crate) struct RequestWindow {
     awake_start: Instant,
     wall_start: SystemTime,
     relative_deadlines: bool,
+    pub(super) workspace_generation: Option<uuid::Uuid>,
     pub(super) clock_sample: Option<super::gateway_time::ClockSample>,
 }
 impl RequestWindow {
@@ -144,6 +145,7 @@ impl RequestWindow {
             awake_start: Instant::now(),
             wall_start: SystemTime::now(),
             relative_deadlines: false,
+            workspace_generation: None,
             clock_sample: None,
         })
     }

@@ -98,25 +98,27 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     let book = private_policy::parse_book(raw)?;
     let (user, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
-    validate(&app, &book, owner).await?;
-    if app
-        .collection("access_rulebooks")
-        .count_documents(doc! {"user_id":owner})
-        .await?
-        >= 100
-    {
-        return Err(ApiError::bad_request(
-            "A workspace can have up to 100 rule books",
-        ));
-    }
-    let mut document = mongodb::bson::to_document(&book).expect("typed bounded policy model");
-    let now = DateTime::now();
-    document.extend(doc!{"_id":ObjectId::new(),"revision":1_i64,"user_id":owner,"created_by":user.get("_id"),"created_at":now,"updated_at":now});
-    app.collection("access_rulebooks")
-        .insert_one(&document)
-        .await?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"data":store::document(&document)})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        validate(&app, &book, owner).await?;
+        if app
+            .collection("access_rulebooks")
+            .count_documents(doc! {"user_id":owner})
+            .await?
+            >= 100
+        {
+            return Err(ApiError::bad_request(
+                "A workspace can have up to 100 rule books",
+            ));
+        }
+        let mut document = mongodb::bson::to_document(&book).expect("typed bounded policy model");
+        let now = DateTime::now();
+        document.extend(doc!{"_id":ObjectId::new(),"revision":1_i64,"user_id":owner,"created_by":user.get("_id"),"created_at":now,"updated_at":now});
+        app.collection("access_rulebooks")
+            .insert_one(&document)
+            .await?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"data":store::document(&document)})))
+    }).await
 }
 async fn update(
     State(app): State<Arc<App>>,
@@ -127,27 +129,29 @@ async fn update(
 ) -> ApiResult<Json<Value>> {
     let book = private_policy::parse_book(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
-    validate(&app, &book, owner).await?;
-    let id = object_id(&id, "Invalid rule book")?;
-    let mut set = mongodb::bson::to_document(&book).expect("typed bounded policy model");
-    set.remove("revision");
-    set.insert("updated_at", DateTime::now());
-    let updated = app
-        .collection("access_rulebooks")
-        .find_one_and_update(
-            doc! {"_id":id,"user_id":owner,"revision":book.revision},
-            doc! {"$set":set,"$inc":{"revision":1_i64}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::CONFLICT,
-                "Rule book changed or no longer exists. Reload before saving.",
+    crate::private_continuity::write(&app, Some(owner), async {
+        validate(&app, &book, owner).await?;
+        let id = object_id(&id, "Invalid rule book")?;
+        let mut set = mongodb::bson::to_document(&book).expect("typed bounded policy model");
+        set.remove("revision");
+        set.insert("updated_at", DateTime::now());
+        let updated = app
+            .collection("access_rulebooks")
+            .find_one_and_update(
+                doc! {"_id":id,"user_id":owner,"revision":book.revision},
+                doc! {"$set":set,"$inc":{"revision":1_i64}},
             )
-        })?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"data":store::document(&updated)})))
+            .return_document(ReturnDocument::After)
+            .await?
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "Rule book changed or no longer exists. Reload before saving.",
+                )
+            })?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"data":store::document(&updated)})))
+    }).await
 }
 async fn delete(
     State(app): State<Arc<App>>,
@@ -158,19 +162,21 @@ async fn delete(
 ) -> ApiResult<Json<Value>> {
     let revision = private_policy::parse_delete(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::DELETE, &query.workspace, true).await?;
-    let id = object_id(&id, "Invalid rule book")?;
-    let result = app
-        .collection("access_rulebooks")
-        .delete_one(doc! {"_id":id,"user_id":owner,"revision":revision})
-        .await?;
-    if result.deleted_count != 1 {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Rule book changed or no longer exists. Reload before deleting.",
-        ));
-    }
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"msg":"Rule book deleted"})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let id = object_id(&id, "Invalid rule book")?;
+        let result = app
+            .collection("access_rulebooks")
+            .delete_one(doc! {"_id":id,"user_id":owner,"revision":revision})
+            .await?;
+        if result.deleted_count != 1 {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Rule book changed or no longer exists. Reload before deleting.",
+            ));
+        }
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"msg":"Rule book deleted"})))
+    }).await
 }
 async fn test_connection(
     State(app): State<Arc<App>>,

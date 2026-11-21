@@ -59,26 +59,28 @@ async fn change_peer(
     let enabled = model.required_bool("enabled");
     model.finish()?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
-    #[cfg(feature="private-sparse")]
-    let _workspace_guard=if enabled {crate::private_renumber::fence::stable(&app,owner).await?}else{crate::private_renumber::fence::revocation(&app,owner).await?};
-    let changed = app
-        .collection("private_peers")
-        .update_one(
-            doc! {"_id":&id,"workspace_id":owner},
-            doc! {"$set":{"enabled":enabled,"updated_at":DateTime::now()}},
-        )
-        .await?;
-    if changed.matched_count == 0 {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "Private peer not found",
-        ));
-    }
-    if !enabled { super::virtual_hosts::retire_with_children(&app,owner,&id).await?; }
-    app.private_changes.changed(owner);
-    Ok(Json(
-        json!({"msg":if enabled {"Private access enabled"} else {"Private access disabled"}}),
-    ))
+    crate::private_continuity::write(&app, Some(owner), async {
+        #[cfg(feature="private-sparse")]
+        let _workspace_guard=if enabled {crate::private_renumber::fence::stable(&app,owner).await?}else{crate::private_renumber::fence::revocation(&app,owner).await?};
+        let changed = app
+            .collection("private_peers")
+            .update_one(
+                doc! {"_id":&id,"workspace_id":owner},
+                doc! {"$set":{"enabled":enabled,"updated_at":DateTime::now()}},
+            )
+            .await?;
+        if changed.matched_count == 0 {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "Private peer not found",
+            ));
+        }
+        if !enabled { super::virtual_hosts::retire_with_children(&app,owner,&id).await?; }
+        app.private_changes.changed(owner);
+        Ok(Json(
+            json!({"msg":if enabled {"Private access enabled"} else {"Private access disabled"}}),
+        ))
+    }).await
 }
 
 async fn revoke_peer(
@@ -89,36 +91,38 @@ async fn revoke_peer(
 ) -> ApiResult<Json<Value>> {
     let (user, owner, role) =
         browser(&app, &headers, &Method::DELETE, &query.workspace, false).await?;
-    let mut filter = doc! {"_id":&id,"workspace_id":owner};
-    if role != "owner" && role != "admin" {
-        filter.insert("owner_id", user.get("_id").cloned().unwrap_or(Bson::Null));
-    }
-    #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::revocation(&app,owner).await?;
-    // Credential invalidation happens before cleanup, so retained queue records
-    // cannot authenticate a revoked peer if a later cleanup operation fails.
-    let changed = app.collection("private_peers").update_one(filter,
-        doc!{"$set":{"enabled":false},"$unset":{"credential_hash":"","fingerprint":"","instance":""}}).await?;
-    if changed.matched_count == 0 {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "Private peer not found",
-        ));
-    }
-    super::virtual_hosts::retire_with_children(&app,owner,&id).await?;
-    app.collection("private_install_tickets")
-        .update_many(
-            doc! {"peer_id":&id},
-            doc! {"$set":{"consumed_at":DateTime::now()}},
-        )
-        .await?;
-    app.collection("private_signals")
-        .delete_many(doc! {"$or":[{"from":&id},{"to":&id}]})
-        .await?;
-    app.private_changes.changed(owner);
-    Ok(Json(
-        json!({"msg":"Private credential revoked; public access is unchanged"}),
-    ))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let mut filter = doc! {"_id":&id,"workspace_id":owner};
+        if role != "owner" && role != "admin" {
+            filter.insert("owner_id", user.get("_id").cloned().unwrap_or(Bson::Null));
+        }
+        #[cfg(feature="private-sparse")]
+        let _workspace_guard=crate::private_renumber::fence::revocation(&app,owner).await?;
+        // Credential invalidation happens before cleanup, so retained queue records
+        // cannot authenticate a revoked peer if a later cleanup operation fails.
+        let changed = app.collection("private_peers").update_one(filter,
+            doc!{"$set":{"enabled":false},"$unset":{"credential_hash":"","fingerprint":"","instance":""}}).await?;
+        if changed.matched_count == 0 {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "Private peer not found",
+            ));
+        }
+        super::virtual_hosts::retire_with_children(&app,owner,&id).await?;
+        app.collection("private_install_tickets")
+            .update_many(
+                doc! {"peer_id":&id},
+                doc! {"$set":{"consumed_at":DateTime::now()}},
+            )
+            .await?;
+        app.collection("private_signals")
+            .delete_many(doc! {"$or":[{"from":&id},{"to":&id}]})
+            .await?;
+        app.private_changes.changed(owner);
+        Ok(Json(
+            json!({"msg":"Private credential revoked; public access is unchanged"}),
+        ))
+    }).await
 }
 
 async fn network(
@@ -129,14 +133,16 @@ async fn network(
 ) -> ApiResult<Json<Value>> {
     let (network, suffix) = enrollment::preferences_value(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
-    let _guard = app.connection_lock.lock().await;
-    crate::routes::dns_rules::ensure_zones_available(&app, &Bson::ObjectId(owner), std::slice::from_ref(&suffix)).await?;
-    ensure_suffix_unique(&app, &owner, &suffix).await?;
-    crate::domain::private_networks::save(&app, &owner.to_hex(), network, &suffix).await?;
-    app.private_changes.changed(owner);
-    Ok(Json(
-        json!({"data":{"cidr":network.cidr(),"dns_suffix":suffix},"transport_ready":false}),
-    ))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let _guard = app.connection_lock.lock().await;
+        crate::routes::dns_rules::ensure_zones_available(&app, &Bson::ObjectId(owner), std::slice::from_ref(&suffix)).await?;
+        ensure_suffix_unique(&app, &owner, &suffix).await?;
+        crate::domain::private_networks::save(&app, &owner.to_hex(), network, &suffix).await?;
+        app.private_changes.changed(owner);
+        Ok(Json(
+            json!({"data":{"cidr":network.cidr(),"dns_suffix":suffix},"transport_ready":false}),
+        ))
+    }).await
 }
 
 async fn ensure_suffix_unique(

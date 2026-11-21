@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 
 #[derive(Clone)]
 pub struct Config {
+    /// Operator attestation that every writer sharing this instance of Mongo uses the policy write fence.
+    pub private_continuity_fenced_writers: bool,
     pub terminal: crate::terminal::Settings,
     pub private_transport: crate::private_transport::Settings,
     pub listen: String,
@@ -47,6 +49,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            private_continuity_fenced_writers: false,
             terminal: Default::default(),
             private_transport: Default::default(),
             listen: "127.0.0.1:47080".into(),
@@ -333,6 +336,7 @@ impl Config {
             ui_root,
             native_build_depot_root,
             native_build_depot_owner_uid,
+            private_continuity_fenced_writers: std::env::var("PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS").as_deref()==Ok("all-v1"),
             mongo_uri: std::env::var("MONGO_DATABASE_URI")
                 .context("MONGO_DATABASE_URI required")?,
             mongo_database: std::env::var("MONGO_DATABASE_NAME")

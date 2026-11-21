@@ -211,6 +211,7 @@ async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResul
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let _lifecycle=app.account_lifecycle.read().await;
     let traffic=raw.get("traffic").cloned().map(serde_json::from_value::<porthub_mesh::traffic_report::Report>);
+    let wants_continuity=raw.get("tcp_continuity").and_then(Value::as_u64)==Some(1);
     let raw_watch=raw.get("watch_changes").and_then(Value::as_bool)==Some(true);
     let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
     let observed=app.private_relay.admission_snapshot(&input.peer_id,&hash,&input.instance);
@@ -240,12 +241,19 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         let combined = notification_cursor(*ws.borrow(), *peer_cursor.borrow());
         Some(combined.to_string())
     }) } else { None };
+    let workspace=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
+    let before=if wants_continuity {crate::private_continuity::witness(&app,workspace).await} else {None};
     let mut result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
     }
     if let (Ok(reply), Some(cursor)) = (&mut result, cursor) {
         if app.private_relay.change_workspace(&input.peer_id,&hash,&input.instance).is_some() {
+            if let Some(generation)=before {
+                if crate::private_continuity::witness(&app,workspace).await==Some(generation) {
+                    reply.headers_mut().insert("x-porthub-workspace-generation",generation.to_string().parse().expect("UUID header"));
+                }
+            }
             reply.headers_mut().insert("x-porthub-private-cursor", cursor.parse().expect("UUID header"));
         }
     }
@@ -307,9 +315,20 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"virtual_host_provider":input.virtual_host_provider,"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
-        "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
-        .ok_or_else(||forbidden("Private credential revoked"))?;
+    let fields=doc!{"virtual_host_provider":input.virtual_host_provider,"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
+        "paths":mongodb::bson::to_document(&input.paths).expect("string map")};
+    let mut pinned=filter.clone();
+    let identity_fields=["instance","fingerprint","virtual_host_provider","lan_exit","tor_exit","application_proxy"];
+    let changed=identity_fields.iter().any(|key|peer.get(*key)!=fields.get(*key));
+    for field in identity_fields {
+        pinned.insert(field,peer.get(field).cloned().unwrap_or(mongodb::bson::Bson::Null));
+    }
+    let heartbeat=async {
+        app.collection("private_peers").find_one_and_update(pinned,doc!{"$set":fields,"$inc":{"revision":1_i64}})
+            .return_document(ReturnDocument::After).await?
+            .ok_or_else(||ApiError::new(StatusCode::CONFLICT,"Private identity changed during sync; retry"))
+    };
+    let updated=if changed {crate::private_continuity::write(app,Some(owner),heartbeat).await?}else{heartbeat.await?};
     #[cfg(feature="private-sparse")]
     if let Some(repair)=&input.native_repair{crate::private_renumber::native_repair::record(app,owner,&updated,repair).await?;}
     for p in &mut peers {

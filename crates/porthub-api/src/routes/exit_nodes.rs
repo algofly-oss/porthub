@@ -341,28 +341,30 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     let (name, routing, distribution, enabled, selection, allow_direct_fallback, tor_enabled, tor_circuit_groups, traffic_mode) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
-    let _guard = app.connection_lock.lock().await;
-    let owner_id = owner;
-    validate_routing_peers(&app, owner_id, &routing).await?;
-    if app
-        .collection("private_exit_nodes")
-        .find_one(doc! {"workspace_id":owner_id,"name":&name})
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "An exit node with that name already exists",
-        ));
-    }
-    let now = DateTime::now();
-    let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":now,"updated_at":now};
-    reject_overlapping_assignments(&app, owner_id, &route, None).await?;
-    app.collection("private_exit_nodes")
-        .insert_one(&route)
-        .await?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"data":serialize(&route)})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let _guard = app.connection_lock.lock().await;
+        let owner_id = owner;
+        validate_routing_peers(&app, owner_id, &routing).await?;
+        if app
+            .collection("private_exit_nodes")
+            .find_one(doc! {"workspace_id":owner_id,"name":&name})
+            .await?
+            .is_some()
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "An exit node with that name already exists",
+            ));
+        }
+        let now = DateTime::now();
+        let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":now,"updated_at":now};
+        reject_overlapping_assignments(&app, owner_id, &route, None).await?;
+        app.collection("private_exit_nodes")
+            .insert_one(&route)
+            .await?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"data":serialize(&route)})))
+    }).await
 }
 
 async fn update(
@@ -374,33 +376,35 @@ async fn update(
 ) -> ApiResult<Json<Value>> {
     let (name, routing, distribution, enabled, selection, allow_direct_fallback, tor_enabled, tor_circuit_groups, traffic_mode) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
-    let owner_id = owner;
-    let route_id = object_id(&id, "Invalid exit-node id")?;
-    let _guard = app.connection_lock.lock().await;
-    validate_routing_peers(&app, owner_id, &routing).await?;
-    if app
-        .collection("private_exit_nodes")
-        .find_one(doc! {"workspace_id":owner_id,"name":&name,"_id":{"$ne":route_id}})
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "An exit node with that name already exists",
-        ));
-    }
-    let previous = app
-        .collection("private_exit_nodes")
-        .find_one(doc! {"_id":route_id,"workspace_id":owner_id})
-        .await?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"))?;
-    let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
-    reject_overlapping_assignments(&app, owner_id, &candidate, Some(route_id)).await?;
-    app.collection("private_exit_nodes")
-        .replace_one(doc! {"_id":route_id,"workspace_id":owner_id}, &candidate)
-        .await?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"data":serialize(&candidate)})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let owner_id = owner;
+        let route_id = object_id(&id, "Invalid exit-node id")?;
+        let _guard = app.connection_lock.lock().await;
+        validate_routing_peers(&app, owner_id, &routing).await?;
+        if app
+            .collection("private_exit_nodes")
+            .find_one(doc! {"workspace_id":owner_id,"name":&name,"_id":{"$ne":route_id}})
+            .await?
+            .is_some()
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "An exit node with that name already exists",
+            ));
+        }
+        let previous = app
+            .collection("private_exit_nodes")
+            .find_one(doc! {"_id":route_id,"workspace_id":owner_id})
+            .await?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"))?;
+        let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
+        reject_overlapping_assignments(&app, owner_id, &candidate, Some(route_id)).await?;
+        app.collection("private_exit_nodes")
+            .replace_one(doc! {"_id":route_id,"workspace_id":owner_id}, &candidate)
+            .await?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"data":serialize(&candidate)})))
+    }).await
 }
 
 async fn delete(
@@ -410,16 +414,18 @@ async fn delete(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let (_, owner, _) = browser(&app, &headers, &Method::DELETE, &query.workspace, true).await?;
-    let route_id = object_id(&id, "Invalid exit-node id")?;
-    let result = app
-        .collection("private_exit_nodes")
-        .delete_one(doc! {"_id":route_id,"workspace_id":owner})
-        .await?;
-    if result.deleted_count == 0 {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"));
-    }
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"msg":"Exit node deleted"})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let route_id = object_id(&id, "Invalid exit-node id")?;
+        let result = app
+            .collection("private_exit_nodes")
+            .delete_one(doc! {"_id":route_id,"workspace_id":owner})
+            .await?;
+        if result.deleted_count == 0 {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"));
+        }
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"msg":"Exit node deleted"})))
+    }).await
 }
 
 pub fn serialize(route: &Document) -> Value {

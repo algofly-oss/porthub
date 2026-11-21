@@ -49,83 +49,108 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
 
 /// Caller holds connection_lock, shared with mapping mutations and client ACK.
 pub(crate) async fn delete(app: &App, owner: &Bson, id: ObjectId) -> ApiResult<Value> {
-    let previous = app
-        .collection("machines")
-        .find_one(doc! {"_id":id,"user_id":owner,"kind":{"$ne":"virtual_host"}})
-        .await?
-        .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
-    let response =
-        json!({"msg":"Machine deleted successfully","data":inventory::machine(app,&previous)});
-    if previous.contains_key("native_deletion") {
-        resume(app, &previous).await?;
-        return Ok(response);
-    }
-    if previous.get_bool("deletion_pending") == Ok(true) {
-        return Ok(response);
-    }
-    let now = DateTime::now();
-    let job = doc! {"id":uuid::Uuid::new_v4().to_string(),"phase":"closing","requested_at":now,
-    "next_attempt_at":now,"attempts":0};
-    let set = doc! {"enabled":false,"native_deletion":&job,"updated_at":now};
-    app.collection("machines")
-        .update_one(doc! {"_id":id,"user_id":owner}, doc! {"$set":&set})
-        .await?;
-    let mut staged = previous.clone();
-    staged.extend(set.clone());
-    if let Err(error) = resume(app, &staged).await {
-        app.deletion_changes.notify_one();
-        let current = app
+    crate::private_continuity::write(&app, None, async {
+        let previous = app
             .collection("machines")
-            .find_one(doc! {"_id":id,"native_deletion.id":job.get("id")})
-            .await?;
-        // Never roll back an accepted committing phase: a client may already
-        // have received 410 and stopped its installed agent.
-        if current
-            .as_ref()
-            .and_then(|m| m.get_document("native_deletion").ok())
-            .and_then(|job| job.get_str("phase").ok())
-            == Some("closing")
-        {
-            app.collection("machines")
-                .update_one(
-                    doc! {"_id":id,"native_deletion.id":job.get("id")},
-                    machines::recovery(&previous, &set, &Document::new()),
-                )
-                .await?;
-            // Some policies may already be removed. Restore restrictions before
-            // publishing the previous enabled snapshot.
-            let recovery = async {
-                firewall::sync_machine(app, id).await?;
-                generated::rebuild(app).await
-            }
-            .await;
-            if let Err(recovery) = recovery {
-                tracing::error!(detail=%recovery.detail,"machine deletion rollback needs reconciliation");
-                app.firewall_changes.notify_one();
-            }
+            .find_one(doc! {"_id":id,"user_id":owner,"kind":{"$ne":"virtual_host"}})
+            .await?
+            .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
+        let response =
+            json!({"msg":"Machine deleted successfully","data":inventory::machine(app,&previous)});
+        if previous.contains_key("native_deletion") {
+            resume(app, &previous).await?;
+            return Ok(response);
         }
-        return Err(error);
-    }
-    Ok(response)
+        if previous.get_bool("deletion_pending") == Ok(true) {
+            return Ok(response);
+        }
+        let now = DateTime::now();
+        let job = doc! {"id":uuid::Uuid::new_v4().to_string(),"phase":"closing","requested_at":now,
+        "next_attempt_at":now,"attempts":0};
+        let set = doc! {"enabled":false,"native_deletion":&job,"updated_at":now};
+        app.collection("machines")
+            .update_one(doc! {"_id":id,"user_id":owner}, doc! {"$set":&set})
+            .await?;
+        let mut staged = previous.clone();
+        staged.extend(set.clone());
+        if let Err(error) = resume(app, &staged).await {
+            app.deletion_changes.notify_one();
+            let current = app
+                .collection("machines")
+                .find_one(doc! {"_id":id,"native_deletion.id":job.get("id")})
+                .await?;
+            // Never roll back an accepted committing phase: a client may already
+            // have received 410 and stopped its installed agent.
+            if current
+                .as_ref()
+                .and_then(|m| m.get_document("native_deletion").ok())
+                .and_then(|job| job.get_str("phase").ok())
+                == Some("closing")
+            {
+                app.collection("machines")
+                    .update_one(
+                        doc! {"_id":id,"native_deletion.id":job.get("id")},
+                        machines::recovery(&previous, &set, &Document::new()),
+                    )
+                    .await?;
+                // Some policies may already be removed. Restore restrictions before
+                // publishing the previous enabled snapshot.
+                let recovery = async {
+                    firewall::sync_machine(app, id).await?;
+                    generated::rebuild(app).await
+                }
+                .await;
+                if let Err(recovery) = recovery {
+                    tracing::error!(detail=%recovery.detail,"machine deletion rollback needs reconciliation");
+                    app.firewall_changes.notify_one();
+                }
+            }
+            return Err(error);
+        }
+        Ok(response)
+    }).await
 }
 
 /// Resume a journaled deletion with connection_lock held. The phase transition
 /// precedes destructive database cleanup, making retries idempotent.
 pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
-    let id = machine
-        .get_object_id("_id")
-        .map_err(|_| ApiError::bad_request("Invalid machine id"))?;
-    let job = machine
-        .get_document("native_deletion")
-        .map_err(|_| invalid_job())?;
-    let key = job.get_str("id").map_err(|_| invalid_job())?;
-    let requested = job
-        .get_datetime("requested_at")
-        .map_err(|_| invalid_job())?;
-    let filter = doc! {"_id":id,"native_deletion.id":key};
-    match job.get_str("phase").map_err(|_| invalid_job())? {
-        "closing" => {
-            // enabled=false yields a reversible 403, never a premature 410.
+    crate::private_continuity::write(&app, None, async {
+        let id = machine
+            .get_object_id("_id")
+            .map_err(|_| ApiError::bad_request("Invalid machine id"))?;
+        let job = machine
+            .get_document("native_deletion")
+            .map_err(|_| invalid_job())?;
+        let key = job.get_str("id").map_err(|_| invalid_job())?;
+        let requested = job
+            .get_datetime("requested_at")
+            .map_err(|_| invalid_job())?;
+        let filter = doc! {"_id":id,"native_deletion.id":key};
+        match job.get_str("phase").map_err(|_| invalid_job())? {
+            "closing" => {
+                // enabled=false yields a reversible 403, never a premature 410.
+                generated::rebuild(app).await?;
+                let connections: Vec<Document> = app
+                    .collection("connections")
+                    .find(doc! {"machine_id":id})
+                    .await?
+                    .try_collect()
+                    .await?;
+                firewall::remove_many(app, &connections).await?;
+                app.collection("machines").update_one(filter.clone(),doc! {
+                    "$set":{"native_deletion.phase":"committing","deletion_pending":true,"deleted_at":requested,
+                        "enabled":false,"auth_required":false,"last_seen_at":Bson::Null,"updated_at":requested},
+                    "$unset":{"log_tokens":"","client_setup_public_base_url":"","client_setup_rathole_server_address":"","client_setup_service_domain":""}
+                }).await?;
+                app.realtime.disconnect_machine(&id.to_hex());
+                app.config_signals.changed(&id.to_hex());
+            }
+            "committing" => {}
+            _ => return Err(invalid_job()),
+        }
+        // Re-apply on recovery too. The edge may have restarted since the journal
+        // was committed; restrictions are not removed based on an old receipt.
+        if job.get_str("phase") == Ok("committing") {
             generated::rebuild(app).await?;
             let connections: Vec<Document> = app
                 .collection("connections")
@@ -134,72 +159,51 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
                 .try_collect()
                 .await?;
             firewall::remove_many(app, &connections).await?;
-            app.collection("machines").update_one(filter.clone(),doc! {
-                "$set":{"native_deletion.phase":"committing","deletion_pending":true,"deleted_at":requested,
-                    "enabled":false,"auth_required":false,"last_seen_at":Bson::Null,"updated_at":requested},
-                "$unset":{"log_tokens":"","client_setup_public_base_url":"","client_setup_rathole_server_address":"","client_setup_service_domain":""}
-            }).await?;
-            app.realtime.disconnect_machine(&id.to_hex());
-            app.config_signals.changed(&id.to_hex());
         }
-        "committing" => {}
-        _ => return Err(invalid_job()),
-    }
-    // Re-apply on recovery too. The edge may have restarted since the journal
-    // was committed; restrictions are not removed based on an old receipt.
-    if job.get_str("phase") == Ok("committing") {
-        generated::rebuild(app).await?;
-        let connections: Vec<Document> = app
-            .collection("connections")
-            .find(doc! {"machine_id":id})
-            .await?
-            .try_collect()
+        app.collection("connections")
+            .delete_many(doc! {"machine_id":id})
             .await?;
-        firewall::remove_many(app, &connections).await?;
-    }
-    app.collection("connections")
-        .delete_many(doc! {"machine_id":id})
-        .await?;
-    if let Ok(owner)=machine.get_object_id("user_id"){crate::routes::virtual_hosts::delete_children(app,owner,id).await?;}
-    app.collection("usb_inventory").delete_one(doc! {"_id":id}).await?;
-    app.collection("native_media_inventory").delete_many(doc!{"_id":id}).await?;
-    app.collection("native_media_discovery").delete_many(doc!{"_id":id}).await?;
-    app.collection("native_media_forwards").delete_many(doc!{"$or":[{"source":id.to_hex()},{"destination":id.to_hex()}]}).await?;
-    for collection in ["machine_metrics_latest", "machine_metrics_history", "machine_drive_health_history"] {
-        app.collection(collection).delete_many(doc! {"machine_id":id}).await?;
-    }
-    app.collection("terminal_traffic")
-        .delete_many(doc! {"machine_id":id})
-        .await?;
-    app.collection("private_dns_rules")
-        .delete_many(doc! {"machine_id":id})
-        .await?;
-    // ACK can be recorded without connection_lock. Retire the journal only
-    // while unacknowledged; if ACK races that compare-and-set, remove the
-    // acknowledged record instead. Failed physical deletion retains the job.
-    let mut acknowledged = filter.clone();
-    acknowledged.insert("native_deletion.acknowledged", true);
-    if app
-        .collection("machines")
-        .delete_one(acknowledged.clone())
-        .await?
-        .deleted_count
-        == 0
-    {
-        let mut unacknowledged = filter;
-        unacknowledged.insert("native_deletion.acknowledged", doc! {"$ne":true});
-        let retired = app
+        if let Ok(owner)=machine.get_object_id("user_id"){crate::routes::virtual_hosts::delete_children(app,owner,id).await?;}
+        app.collection("usb_inventory").delete_one(doc! {"_id":id}).await?;
+        app.collection("native_media_inventory").delete_many(doc!{"_id":id}).await?;
+        app.collection("native_media_discovery").delete_many(doc!{"_id":id}).await?;
+        app.collection("native_media_forwards").delete_many(doc!{"$or":[{"source":id.to_hex()},{"destination":id.to_hex()}]}).await?;
+        for collection in ["machine_metrics_latest", "machine_metrics_history", "machine_drive_health_history"] {
+            app.collection(collection).delete_many(doc! {"machine_id":id}).await?;
+        }
+        app.collection("terminal_traffic")
+            .delete_many(doc! {"machine_id":id})
+            .await?;
+        app.collection("private_dns_rules")
+            .delete_many(doc! {"machine_id":id})
+            .await?;
+        // ACK can be recorded without connection_lock. Retire the journal only
+        // while unacknowledged; if ACK races that compare-and-set, remove the
+        // acknowledged record instead. Failed physical deletion retains the job.
+        let mut acknowledged = filter.clone();
+        acknowledged.insert("native_deletion.acknowledged", true);
+        if app
             .collection("machines")
-            .update_one(unacknowledged, doc! {"$unset":{"native_deletion":""}})
-            .await?;
-        if retired.matched_count == 0 {
-            app.collection("machines").delete_one(acknowledged).await?;
+            .delete_one(acknowledged.clone())
+            .await?
+            .deleted_count
+            == 0
+        {
+            let mut unacknowledged = filter;
+            unacknowledged.insert("native_deletion.acknowledged", doc! {"$ne":true});
+            let retired = app
+                .collection("machines")
+                .update_one(unacknowledged, doc! {"$unset":{"native_deletion":""}})
+                .await?;
+            if retired.matched_count == 0 {
+                app.collection("machines").delete_one(acknowledged).await?;
+            }
         }
-    }
-    if let Ok(owner)=machine.get_object_id("user_id"){app.private_changes.changed(owner);}
-    app.realtime.disconnect_machine(&id.to_hex());
-    app.config_signals.changed(&id.to_hex());
-    Ok(())
+        if let Ok(owner)=machine.get_object_id("user_id"){app.private_changes.changed(owner);}
+        app.realtime.disconnect_machine(&id.to_hex());
+        app.config_signals.changed(&id.to_hex());
+        Ok(())
+    }).await
 }
 
 fn invalid_job() -> ApiError {

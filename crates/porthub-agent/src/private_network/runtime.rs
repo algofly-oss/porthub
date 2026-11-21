@@ -100,6 +100,19 @@ async fn audit_capture(device:&mut Option<Arc<Tun>>,profile:&std::path::Path,sna
     }
 }
 
+
+async fn send_tcp_confirmation(
+    sessions:&controller::Sessions, relay:&super::relay::Sender, authority:Option<&super::authority_event::Authority<()>>,
+    pairs:&super::sparse::Handle, peer:&str, local:std::net::Ipv4Addr, remote:std::net::Ipv4Addr, frame:&[u8],
+) {
+    let Ok(bytes)=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::TCP_CONTINUITY,local,remote,frame) else{return};
+    let peers=sessions.read().await;
+    let direct=peers.get(peer).filter(|s|s.state()==porthub_mesh::State::Ready);
+    // Low-rate control can use the newly restored relay even while an old ICE
+    // transport still reports ready. Nonces make duplicate replies harmless.
+    if relay.is_ready(){ let _=relay.send(peer,&bytes); }
+    if let Some(direct)=direct{let _=send_authorized(authority,pairs,peer,direct,bytes);}
+}
 fn verified_lan(policy: &Engine, peer: &str, session: Option<&porthub_mesh::udp::Session>) -> bool {
     session.is_some_and(|s| policy.pair_peer(peer).is_some_and(|p| s.on_lan(&p.lan_networks)))
 }
@@ -358,16 +371,53 @@ pub async fn run_with_logs(
     }
 }
 
-fn check_installed_authority(
-    policy: &mut Engine,
-    installed: Option<&super::authority_event::Authority<()>>,
-) -> Result<()> {
-    if let Some(authority) = installed {
-        if let Err(error) = authority.check() {
-            policy.revoke();
-            return Err(error.context("private request-start authority expired"));
+#[derive(Default)]
+struct Continuity {
+    generation: Option<uuid::Uuid>,
+    sleep_count: Option<super::sleep_generation::Generation>,
+    clock_sample: Option<(std::time::SystemTime, Instant)>,
+    control_window:Option<Instant>,
+    control_counts:HashMap<String,u8>,
+    pending: porthub_network::policy::TcpContinuity,
+}
+
+impl Continuity {
+    fn admit_control(&mut self,peer:&str)->bool{
+        if self.control_window.is_none_or(|at|at.elapsed()>=Duration::from_secs(1)){
+            self.control_counts.clear();self.control_window=Some(Instant::now());
         }
+        if self.control_counts.len()>=64 && !self.control_counts.contains_key(peer){return false;}
+        let count=self.control_counts.entry(peer.to_owned()).or_default();
+        if *count>=32{return false;}*count+=1;true
     }
+    fn scoped(&self, generation:Option<uuid::Uuid>)->bool {
+        self.generation.is_some() && self.generation==generation && self.sleep_count.is_some() && self.sleep_count==super::sleep_generation::Generation::read() && self.clock_sample.is_some_and(|(wall, awake)| wall.elapsed().is_ok_and(|elapsed| elapsed.abs_diff(awake.elapsed()) < Duration::from_secs(1)))
+    }
+    fn capture(&mut self, policy:&Engine, witness:Option<&super::authority_event::Authority<()>>) {
+        let seen=witness.and_then(|w|w.workspace_generation());
+        if self.scoped(seen) {
+            self.pending.merge(policy.pause_established_tcp());
+            tracing::debug!(peers=self.pending.peers().count(),"saved ordinary TCP opening metadata");
+        } else {self.pending=Default::default();}
+    }
+    fn observe(&mut self, policy:&mut Engine, generation:Option<uuid::Uuid>) {
+        if generation.is_none() && self.generation.is_none() {return;}
+        if !self.scoped(generation) {
+            policy.invalidate_tcp_continuity();
+            self.pending=Default::default();
+            self.generation=generation;
+            self.clock_sample=Some((std::time::SystemTime::now(),Instant::now()));
+            self.sleep_count=generation.and_then(|_|super::sleep_generation::Generation::read());
+        }
+        policy.enable_tcp_continuity(generation.is_some() && self.sleep_count.is_some());
+        self.pending.expire();
+    }
+}
+
+fn check_installed_authority(installed: Option<&super::authority_event::Authority<()>>) -> Result<()> {
+    // The worker exits this synchronous dispatch immediately upon error; its
+    // teardown captures metadata and revokes all authority before the next poll.
+    if let Some(authority)=installed {authority.check().context("private request-start authority expired")?;}
     Ok(())
 }
 
@@ -379,24 +429,36 @@ pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Re
 async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
     let _lease = Lease::acquire(&path).context(PrivateStage::Lease)?;
     let profile = Profile::load(&path).context(PrivateStage::Profile)?;
-    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
-    let mut pending = None;
+    #[cfg(all(feature="private-sparse",any(target_os="linux",target_os="macos")))]
+    let mut pending=None;
+    let mut instance=controller::nonce()?;
+    let mut certificate=porthub_mesh::Identity::new().context(PrivateStage::Identity)?;
+    let mut continuity=Continuity::default();
     loop {
-        let result = run_authorized_worker(
-            path.clone(), profile.clone(), cancel.child_token(), logs.clone(),
-            #[cfg(all(feature = "private-sparse", any(target_os = "linux", target_os = "macos")))]
+        let result=run_authorized_worker(path.clone(),profile.clone(),cancel.child_token(),logs.clone(),
+            instance.clone(),certificate.clone(),&mut continuity,
+            #[cfg(all(feature="private-sparse",any(target_os="linux",target_os="macos")))]
             &mut pending,
         ).await;
-        #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
-        if pending.as_ref().is_some_and(super::dns_recovery::Pending::awaiting_authorization)
-            && result.as_ref().is_err_and(|e| e.is::<super::authority_clock::RequestExpired>())
-        {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = crate::unified::suspend_aware_delay(Duration::from_secs(5)) => {}
-            }
-            if !cancel.is_cancelled() && Profile::load(&path).context(PrivateStage::Profile)? == profile {
-                continue;
+        #[cfg(feature="private-sparse")]
+        if result.as_ref().is_err_and(|e|e.is::<super::authority_clock::RequestExpired>()) {
+            if cancel.is_cancelled(){return Ok(());}
+            continuity.pending.expire();
+            let tcp=continuity.pending.peers().next().is_some() && continuity.scoped(continuity.generation);
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            let dns=pending.as_ref().is_some_and(super::dns_recovery::Pending::awaiting_authorization);
+            #[cfg(not(any(target_os="linux",target_os="macos")))]
+            let dns=false;
+            if (dns||tcp) && Profile::load(&path).context(PrivateStage::Profile)?==profile {
+                tokio::select!{_=cancel.cancelled()=>return Ok(()),_=crate::unified::suspend_aware_delay(Duration::from_secs(5))=>{}}
+                if Profile::load(&path).context(PrivateStage::Profile)?==profile {
+                    if !tcp || !continuity.scoped(continuity.generation){
+                        continuity.pending=Default::default();
+                        instance=controller::nonce()?;
+                        certificate=porthub_mesh::Identity::new().context(PrivateStage::Identity)?;
+                    }
+                    continue;
+                }
             }
         }
         return result;
@@ -404,11 +466,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
 }
 
 async fn run_authorized_worker(
-    path: PathBuf, profile: Profile, cancel: CancellationToken, logs: Option<crate::logs::Buffer>,
-    #[cfg(all(feature = "private-sparse", any(target_os = "linux", target_os = "macos")))]
-    pending: &mut Option<super::dns_recovery::Pending>,
-) -> Result<()> {
-    // Declared after Lease: revocation drops before another runtime can own it.
+    path:PathBuf,profile:Profile,cancel:CancellationToken,logs:Option<crate::logs::Buffer>,
+    instance:String,identity:porthub_mesh::Identity,continuity:&mut Continuity,
+    #[cfg(all(feature="private-sparse",any(target_os="linux",target_os="macos")))]
+    pending:&mut Option<super::dns_recovery::Pending>,
+)->Result<()> {
     let authority_owner=super::authority_event::Owner::new();
     let control = Arc::new(crate::control::Control::new_private(&profile).context(PrivateStage::Control)?);
     // Embedded private networking shares the parent registration's maintenance
@@ -444,9 +506,7 @@ async fn run_authorized_worker(
         strategy_updates,
         work.clone(),
     ));
-    let instance = controller::nonce()?;
-    let identity = porthub_mesh::Identity::new().context(PrivateStage::Identity)?;
-    let mut next_probe_id = u64::from_str_radix(&instance[..16], 16)?;
+    let mut next_probe_id = u64::from_str_radix(&controller::nonce()?[..16], 16)?;
     let (interface_updates, mut interfaces) = tokio::sync::watch::channel(Vec::new());
     let (route_changes,mut route_events)=tokio::sync::watch::channel(0u64);
     let mut route_events_open=true;let mut last_route_audit:Option<Instant>=None;
@@ -617,7 +677,7 @@ async fn run_authorized_worker(
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         let run: Result<()> = async {loop {
-        check_installed_authority(&mut policy, installed_authority.as_ref())?;
+        check_installed_authority(installed_authority.as_ref())?;
         if !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
         #[cfg(target_os="linux")]
         if let Some(tun) = device.as_ref().filter(|tun| tun.source_restored.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() >= retry_dns_bind) {
@@ -658,6 +718,7 @@ async fn run_authorized_worker(
                 #[cfg(feature="local-tor")]
                 let cached_authority=authority.clone();
                 let snapshot=authority.accepted()?.clone();
+                continuity.observe(&mut policy,authority.workspace_generation());
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 #[cfg(feature="private-sparse")]
                 component_clock.send_replace(authority.clock_sample());
@@ -685,6 +746,8 @@ async fn run_authorized_worker(
                 installed_authority=Some(authority.retained());
                 sparse_authority=Some(snapshot.clone());
                 sparse_handle.update_base_authority(&snapshot,authority.retained());
+                continuity.pending.merge(policy.take_expired_tcp());
+                for peer in continuity.pending.peers(){if !sparse_handle.peer_is_live(peer){sparse_handle.request_peer_once(peer);}}
                 sparse_handle.exit_picker().observe(&snapshot);
                 relay_sender.update_authority(authority.retained(),sparse_handle.clone());
                 let mut routes=routes;
@@ -968,7 +1031,9 @@ async fn run_authorized_worker(
                 #[cfg(all(target_os="linux",feature="private-sparse",feature="netns-tests"))]
                 if provider_fixture_gate.as_mut().is_some_and(|gate|gate.intercept(&authority)){continue;}
                 let response=authority.accepted()?.clone();
+                continuity.pending.merge(policy.take_expired_tcp());
                 if response.status!="allowed"||response.lease.is_none(){
+                    if response.status!="busy"{continuity.pending.discard_query(&response.query);}
                     if let Some(peer)=super::sparse::apply_denial(&sparse_handle,&mut policy,&response){
                         by_ip.retain(|_,id|id!=&peer.id);peer_ips.remove(&peer.id);
                         if let Some(tun)=&device{if tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await.is_err(){tracing::warn!("could not remove a retired private pair route");}}
@@ -1000,7 +1065,17 @@ async fn run_authorized_worker(
                 }
                 by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
                 authority.check()?;
-                sparse_handle.installed_authority(&response.query,lease,authority.retained());
+                check_installed_authority(installed_authority.as_ref())?;
+                continuity.pending.merge(policy.take_expired_tcp());
+                if continuity.pending.contains(&id) {
+                    let generation=installed_authority.as_ref().and_then(|a|a.workspace_generation());
+                    sparse_handle.installed_authority(&response.query,lease.clone(),authority.retained());
+                    if generation==authority.workspace_generation() && continuity.scoped(generation) && sparse_handle.peer_is_live(&id) {
+                        policy.prepare_tcp(&mut continuity.pending,&lease);
+                    } else {continuity.pending.discard(&id);}
+                } else {
+                    sparse_handle.installed_authority(&response.query,lease,authority.retained());
+                }
                 #[cfg(all(target_os="linux",feature="private-sparse"))]
                 if let Some(base)=&sparse_authority{refresh_provider(base,&sparse_handle,&profile.peer_id,&exit_refresh,&mut exit_clients,&mut exit_native_plan)?;}
                 traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
@@ -1008,7 +1083,7 @@ async fn run_authorized_worker(
                 if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.private_stream_pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
             },
             Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at,origin,received_boot})=>{
-                check_installed_authority(&mut policy, installed_authority.as_ref())?;
+                check_installed_authority(installed_authority.as_ref())?;
                 if !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 #[cfg(feature="private-sparse")]
                 if !direct&&origin.as_ref().is_some_and(|origin|origin.relay_origin.as_deref().is_none_or(|stamp|stamp.len()!=32||!stamp.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))){continue;}
@@ -1024,6 +1099,18 @@ async fn run_authorized_worker(
                     continue;
                 }
                 let now=received_at;
+                if bytes.get(9)==Some(&porthub_mesh::control_packet::TCP_CONTINUITY) {
+                    let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::TCP_CONTINUITY,bytes) else{continue};
+                    let Some(current)=policy.pair_peer(&peer) else{continue};
+                    if peer_ips.get(&profile.peer_id)!=Some(&envelope.destination)||current.ip!=envelope.source
+                        || origin.as_ref().is_none_or(|o|!current.matches_packet_origin(o)||(!direct&&o.relay_origin.is_none())) {continue;}
+                    let Some(generation)=installed_authority.as_ref().and_then(|base|base.workspace_generation()) else{continue};
+                    if !continuity.admit_control(&peer) || !continuity.scoped(Some(generation)) || sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation) {continue;}
+                    if let Some(reply)=policy.tcp_confirmation(&mut continuity.pending,&peer,*generation.as_bytes(),&envelope.payload) {
+                        send_tcp_confirmation(&sessions,&relay_sender,installed_authority.as_ref(),&sparse_handle,&peer,envelope.destination,envelope.source,&reply).await;
+                    }
+                    continue;
+                }
                 if let Some(envelope) = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT, bytes.clone()) {
                     if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
                     let Some(packet) = Packet::parse(&envelope.payload) else { continue; };
@@ -1124,11 +1211,16 @@ async fn run_authorized_worker(
                 }
                 if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                 mark_activity(&mut last_activity,&peer,now);
-                if policy.check(&bytes,&peer,true) {
+                if continuity.pending.peers().next().is_some(){if let Some(parsed)=Packet::parse(&bytes){continuity.pending.observe_lifecycle(parsed);}}
+                if policy.check_received(&bytes,&peer,received_at) {
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-                    if sparse_handle.enabled() && guarded_flows.as_ref().is_some_and(|flows|!flows.raw_ingress(&bytes)){continue;}
-                    if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
-                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
+                    if sparse_handle.enabled() && guarded_flows.as_ref().is_some_and(|flows|!flows.raw_ingress(&bytes)){
+                        if let Some(packet)=Packet::parse(&bytes){policy.observe_raw_tcp(&peer,packet,true,false);}continue;
+                    }
+                    if let Some(tun)=&device {
+                        tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};
+                        if let Some(packet)=Packet::parse(&bytes) {policy.observe_raw_tcp(&peer,packet,true,true);paths.observe(packet,direct);}
+                    }
                 }
             },
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
@@ -1157,7 +1249,7 @@ async fn run_authorized_worker(
                 // The queue owns the exact native first-origin packet. Never
                 // relabel it using StreamLocal's current-only byte delivery.
                 if !sparse_handle.enabled(){continue;}
-                check_installed_authority(&mut policy, installed_authority.as_ref())?;
+                check_installed_authority(installed_authority.as_ref())?;
                 if installed_authority.is_none() {
                     policy.revoke();anyhow::bail!("guarded native request-start authority expired");
                 }
@@ -1178,7 +1270,7 @@ async fn run_authorized_worker(
             #[cfg(feature="private-stream")]
             Some(Event::StreamLocal {peer,bytes,scope})=>{
                 if !scope.valid(){continue;}
-                check_installed_authority(&mut policy, installed_authority.as_ref())?;
+                check_installed_authority(installed_authority.as_ref())?;
                 if sparse_handle.enabled()&&!sparse_handle.touch_peer(&peer){continue;}
                 let parsed=Packet::parse(&bytes);
                 let reset=parsed.is_some_and(|packet|packet.is_reset() && peer_ips.get(&profile.peer_id)==Some(&packet.destination()));
@@ -1192,7 +1284,7 @@ async fn run_authorized_worker(
             #[cfg(feature="private-stream")]
             Some(Event::StreamDatagram {destination,payload,permit})=>{
                 if permit.as_ref().is_some_and(|permit|!permit.valid()){continue;}
-                check_installed_authority(&mut policy, installed_authority.as_ref())?;
+                check_installed_authority(installed_authority.as_ref())?;
                 if sparse_handle.enabled() {
                     if permit.as_ref().is_none_or(|permit|permit.remaining().is_none()){continue;}
                     #[cfg(feature="private-sparse")]
@@ -1218,7 +1310,7 @@ async fn run_authorized_worker(
             },
             #[cfg(feature="local-tor")]
             Some(Event::TorLocal {bytes})=>{
-                check_installed_authority(&mut policy, installed_authority.as_ref())?;
+                check_installed_authority(installed_authority.as_ref())?;
                 if local_tor.is_some() && Packet::parse(&bytes).is_some_and(|packet|peer_ips.get(&profile.peer_id)==Some(&packet.destination())) {
                     if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,None,tun,&bytes)=>result?};}
                 }
@@ -1235,7 +1327,7 @@ async fn run_authorized_worker(
         },None=>std::future::pending().await}}=>{
             #[cfg(target_os="macos")]let size=match packet?{super::owned_packet_loop::Read::Local=>continue,super::owned_packet_loop::Read::Remote(size)=>size};
             #[cfg(not(target_os="macos"))]let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
-            check_installed_authority(&mut policy, installed_authority.as_ref())?;
+            check_installed_authority(installed_authority.as_ref())?;
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             #[cfg(feature="local-tor")]
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
@@ -1328,6 +1420,7 @@ async fn run_authorized_worker(
                 && peer_ips.get(&profile.peer_id)==Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {continue;}
             let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
             if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||!sparse_handle.touch_peer(peer)){sparse_handle.request_ip(parsed.destination());continue;}
+            continuity.pending.observe_lifecycle(parsed);
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
@@ -1345,19 +1438,20 @@ async fn run_authorized_worker(
                     if let Some(flows)=&guarded_flows {
                         let negotiated=sparse_handle.by_id(peer).is_some_and(|p|p.stream_transport=="quic3-credit");
                         let prefer_stream=negotiated&&(!prefer_peer || direct.is_none_or(|session|session.is_relay()));
-                        if flows.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
+                        if flows.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){policy.observe_raw_tcp(peer,parsed,false,false);continue;}
                     }
                 }
                 #[cfg(feature="private-stream")]
                 if let Some(router)=&stream_router {
                     let prefer_stream=!prefer_peer || direct.is_none_or(|session|session.is_relay());
-                    if router.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
+                    if router.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){policy.observe_raw_tcp(peer,parsed,false,false);continue;}
                 }
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
-                    Some(true)=>{if let Some(session)=direct {if send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
-                    Some(false)=>{if relay_sender.send(peer,&buffer[..size]).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,size);}}},None=>{}
+                    Some(true)=>{if let Some(session)=direct {if send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){policy.observe_raw_tcp(peer,parsed,false,true);if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
+                    Some(false)=>{if relay_sender.send(peer,&buffer[..size]).is_ok(){policy.observe_raw_tcp(peer,parsed,false,true);if let Some(c)=traffic_counters.get(peer){c.add(true,false,size);}}},None=>{}
                 }
             } else {
+                if continuity.pending.awaiting(peer,parsed){continue;}
                 #[cfg(feature = "private-stream")]
                 if let (Some(tun), Some(reply)) = (&device, policy.closed_local_tcp_reply(&buffer[..size], peer)) {
                     // Local socket feedback only. Do not transmit a reset to another machine.
@@ -1496,7 +1590,19 @@ async fn run_authorized_worker(
             let picker_tor_ready=false;
             sparse_handle.exit_picker().update_carriers(relay_sender.is_ready(),picker_tor_ready);
 
-            check_installed_authority(&mut policy, installed_authority.as_ref())?;
+            check_installed_authority(installed_authority.as_ref())?;
+            continuity.pending.merge(policy.take_expired_tcp());
+            if let Some(generation)=installed_authority.as_ref().and_then(|a|a.workspace_generation()) {
+                if continuity.pending.peers().next().is_some() && continuity.scoped(Some(generation)){
+                    for peer in continuity.pending.peers(){if !sparse_handle.peer_is_live(peer){sparse_handle.request_peer_once(peer);}}
+                    for (peer,frame) in continuity.pending.requests(*generation.as_bytes()){
+                        if sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation){continue;}
+                        if let (Some(local),Some(remote))=(peer_ips.get(&profile.peer_id),peer_ips.get(&peer)){
+                            send_tcp_confirmation(&sessions,&relay_sender,installed_authority.as_ref(),&sparse_handle,&peer,*local,*remote,&frame).await;
+                        }
+                    }
+                }
+            }
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
                 if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
                     let audit=audit_capture(&mut device,&path,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
@@ -1512,7 +1618,7 @@ async fn run_authorized_worker(
             if sparse_handle.enabled(){
                 let expired:Vec<_>=policy.pair_snapshots().into_iter().filter_map(|(snapshot,_)| snapshot.peers.into_iter().find(|p|p.id!=profile.peer_id)).filter(|p|!sparse_handle.peer_is_live(&p.id)).map(|p|p.id).collect();
                 let removed=!expired.is_empty();
-                for id in expired {policy.revoke_pair(&id);sparse_handle.retire(&id);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                for id in expired {policy.retire_expired_pair(&id);sparse_handle.retire(&id);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                 if removed {if let Some(tun)=&device {tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await?;}}
                 for peer in policy.active_pair_flows(){sparse_handle.touch_peer(&peer);}
                 #[cfg(feature="private-stream")]
@@ -1618,7 +1724,7 @@ async fn run_authorized_worker(
             }
         },
         _=status_tick.tick()=>{
-            check_installed_authority(&mut policy, installed_authority.as_ref())?;
+            check_installed_authority(installed_authority.as_ref())?;
             #[cfg(feature="private-stream")]
             if let Some(router)=&stream_router {router.log_transport_stats();}
             let peers=sessions.read().await;
@@ -1697,6 +1803,10 @@ async fn run_authorized_worker(
     pending_provider.observe(None);
     private_status.native_repair = super::native_owner::repair_status(&path).ok().flatten();
     let authority_expired = installed_authority.as_ref().is_some_and(|authority| authority.check().is_err());
+    #[cfg(feature="private-sparse")]
+    if result.as_ref().is_err_and(|error|error.is::<super::authority_clock::RequestExpired>()) {
+        continuity.capture(&policy, installed_authority.as_ref());
+    } else {continuity.pending=Default::default();}
     if authority_expired {
         policy.revoke();
         sparse_handle.revoke_all();

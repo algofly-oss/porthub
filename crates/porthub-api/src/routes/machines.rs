@@ -42,85 +42,87 @@ async fn membership(
     let group = model.required_string("group_id");
     model.finish()?;
     let user = auth::current_user(app, headers).await?;
-    let machine = object_id(&machine, "Invalid machine id")?;
-    let group = object_id(&group, "Invalid group id")?;
-    // Serialize membership changes with group deletion and mapped-port mutations.
-    let _guard = app.connection_lock.lock().await;
-    let filter = doc! {"_id":machine,"user_id":user.get("_id")};
-    let mut record = app
-        .collection("machines")
-        .find_one(filter.clone())
-        .await?
-        .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
-    if record.contains_key("native_deletion") {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Machine deletion is in progress",
-        ));
-    }
-    if app
-        .collection("machine_groups")
-        .find_one(doc! {"_id":group,"user_id":user.get("_id")})
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::bad_request("Group not found"));
-    }
-    let mut groups = inventory::group_ids(&record);
-    let member = groups.contains(&group);
-    if !remove && member {
-        return Ok(Json(
-            json!({"msg":"Machine is already in this group","data":inventory::machine(app,&record)}),
-        ));
-    }
-    if remove && !member {
-        // Legacy group_id can coexist with a nonempty modern group_ids array.
-        let legacy = record.get_object_id("group_id").ok();
-        if legacy != Some(group) {
-            return Err(ApiError::bad_request("Machine is not in this group"));
+    crate::private_continuity::write(&app, None, async {
+        let machine = object_id(&machine, "Invalid machine id")?;
+        let group = object_id(&group, "Invalid group id")?;
+        // Serialize membership changes with group deletion and mapped-port mutations.
+        let _guard = app.connection_lock.lock().await;
+        let filter = doc! {"_id":machine,"user_id":user.get("_id")};
+        let mut record = app
+            .collection("machines")
+            .find_one(filter.clone())
+            .await?
+            .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
+        if record.contains_key("native_deletion") {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Machine deletion is in progress",
+            ));
         }
-        let mut candidate = record.clone();
-        candidate.remove("group_id");
-        super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
-        let now = DateTime::now();
-        app.collection("machines")
-            .update_one(
-                filter,
-                doc! {"$unset":{"group_id":""},"$set":{"updated_at":now}},
-            )
-            .await?;
-        record.remove("group_id");
-        record.insert("updated_at", now);
-    } else {
-        if remove {
-            groups.retain(|id| *id != group);
+        if app
+            .collection("machine_groups")
+            .find_one(doc! {"_id":group,"user_id":user.get("_id")})
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::bad_request("Group not found"));
+        }
+        let mut groups = inventory::group_ids(&record);
+        let member = groups.contains(&group);
+        if !remove && member {
+            return Ok(Json(
+                json!({"msg":"Machine is already in this group","data":inventory::machine(app,&record)}),
+            ));
+        }
+        if remove && !member {
+            // Legacy group_id can coexist with a nonempty modern group_ids array.
+            let legacy = record.get_object_id("group_id").ok();
+            if legacy != Some(group) {
+                return Err(ApiError::bad_request("Machine is not in this group"));
+            }
+            let mut candidate = record.clone();
+            candidate.remove("group_id");
+            super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
+            let now = DateTime::now();
+            app.collection("machines")
+                .update_one(
+                    filter,
+                    doc! {"$unset":{"group_id":""},"$set":{"updated_at":now}},
+                )
+                .await?;
+            record.remove("group_id");
+            record.insert("updated_at", now);
         } else {
-            groups.push(group);
+            if remove {
+                groups.retain(|id| *id != group);
+            } else {
+                groups.push(group);
+            }
+            let mut candidate = record.clone();
+            candidate.insert("group_ids", &groups);
+            candidate.remove("group_id");
+            super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
+            let now = DateTime::now();
+            app.collection("machines")
+                .update_one(
+                    filter,
+                    doc! {"$set":{"group_ids":&groups,"updated_at":now},"$unset":{"group_id":""}},
+                )
+                .await?;
+            record.insert("group_ids", groups);
+            record.remove("group_id");
+            record.insert("updated_at", now);
         }
-        let mut candidate = record.clone();
-        candidate.insert("group_ids", &groups);
-        candidate.remove("group_id");
-        super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
-        let now = DateTime::now();
-        app.collection("machines")
-            .update_one(
-                filter,
-                doc! {"$set":{"group_ids":&groups,"updated_at":now},"$unset":{"group_id":""}},
-            )
-            .await?;
-        record.insert("group_ids", groups);
-        record.remove("group_id");
-        record.insert("updated_at", now);
-    }
-    app.notify_status(&record).await;
-    let message = if remove {
-        "Machine removed from group successfully"
-    } else {
-        "Machine added to group successfully"
-    };
-    Ok(Json(
-        json!({"msg":message,"data":inventory::machine(app,&record)}),
-    ))
+        app.notify_status(&record).await;
+        let message = if remove {
+            "Machine removed from group successfully"
+        } else {
+            "Machine added to group successfully"
+        };
+        Ok(Json(
+            json!({"msg":message,"data":inventory::machine(app,&record)}),
+        ))
+    }).await
 }
 
 async fn add_to_group(
@@ -161,52 +163,54 @@ async fn refresh_token(
     let id = model.required_string("data_id");
     model.finish()?;
     let user = auth::current_user(&app, &headers).await?;
-    let id = object_id(&id, "Invalid machine id")?;
-    let _guard = app.connection_lock.lock().await;
-    let filter = doc! {"_id":id,"user_id":user.get("_id"),"kind":{"$ne":"virtual_host"}};
-    let previous = app
-        .collection("machines")
-        .find_one(filter.clone())
-        .await?
-        .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
-    if previous.contains_key("native_deletion") {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Machine deletion is in progress",
-        ));
-    }
-    let token = new_token(&app).await?;
-    let now = DateTime::now();
-    let tokens = previous_log_tokens(&previous);
-    let set = doc! {"token":&token,"log_tokens":&tokens,"updated_at":now};
-    app.collection("machines")
-        .update_one(filter.clone(), doc! {"$set":&set})
-        .await?;
-    if let Err(error) = crate::generated::rebuild(&app).await {
-        // Preserve runtime sync/update writes that happened during publication.
-        app.collection("machines")
-            .update_one(
-                doc! {"_id":id,"token":&token},
-                crate::domain::machines::recovery(&previous, &set, &Document::new()),
-            )
-            .await?;
-        // An error after rename (for example directory fsync) can occur after
-        // publication, so also try to republish the restored credentials.
-        if let Err(recovery) = crate::generated::rebuild(&app).await {
-            tracing::error!(detail=%recovery.detail,"machine token configuration recovery failed");
+    crate::private_continuity::write(&app, None, async {
+        let id = object_id(&id, "Invalid machine id")?;
+        let _guard = app.connection_lock.lock().await;
+        let filter = doc! {"_id":id,"user_id":user.get("_id"),"kind":{"$ne":"virtual_host"}};
+        let previous = app
+            .collection("machines")
+            .find_one(filter.clone())
+            .await?
+            .ok_or_else(|| ApiError::bad_request("Machine not found"))?;
+        if previous.contains_key("native_deletion") {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Machine deletion is in progress",
+            ));
         }
-        return Err(error);
-    }
-    app.realtime.disconnect_machine(&id.to_hex());
-    let mut updated = previous;
-    updated.insert("token", token);
-    updated.insert("log_tokens", tokens);
-    updated.insert("updated_at", now);
-    app.notify_config(&id.to_hex()).await;
-    app.notify_status(&updated).await;
-    Ok(Json(
-        json!({"msg":"Machine token refreshed successfully","data":inventory::machine(&app,&updated)}),
-    ))
+        let token = new_token(&app).await?;
+        let now = DateTime::now();
+        let tokens = previous_log_tokens(&previous);
+        let set = doc! {"token":&token,"log_tokens":&tokens,"updated_at":now};
+        app.collection("machines")
+            .update_one(filter.clone(), doc! {"$set":&set})
+            .await?;
+        if let Err(error) = crate::generated::rebuild(&app).await {
+            // Preserve runtime sync/update writes that happened during publication.
+            app.collection("machines")
+                .update_one(
+                    doc! {"_id":id,"token":&token},
+                    crate::domain::machines::recovery(&previous, &set, &Document::new()),
+                )
+                .await?;
+            // An error after rename (for example directory fsync) can occur after
+            // publication, so also try to republish the restored credentials.
+            if let Err(recovery) = crate::generated::rebuild(&app).await {
+                tracing::error!(detail=%recovery.detail,"machine token configuration recovery failed");
+            }
+            return Err(error);
+        }
+        app.realtime.disconnect_machine(&id.to_hex());
+        let mut updated = previous;
+        updated.insert("token", token);
+        updated.insert("log_tokens", tokens);
+        updated.insert("updated_at", now);
+        app.notify_config(&id.to_hex()).await;
+        app.notify_status(&updated).await;
+        Ok(Json(
+            json!({"msg":"Machine token refreshed successfully","data":inventory::machine(&app,&updated)}),
+        ))
+    }).await
 }
 
 async fn request_update(
@@ -316,37 +320,39 @@ async fn add(
     let rathole = input.rathole.unwrap_or_default();
     let domain = input.domain.unwrap_or_default();
     let user = auth::current_user(&app, &headers).await?;
-    let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    let _guard = app.connection_lock.lock().await;
-    let (name, aliases) = split_names(&input.name)?;
-    let groups = valid_groups(&app, owner, input.groups.unwrap_or_default()).await?;
-    let token = new_token(&app).await?;
-    let now = DateTime::now();
-    let id = ObjectId::new();
-    let mut machine = doc! {"_id":id,"user_id":owner,"name":name,"aliases":aliases,
-    "hostname":&hostname,"hostname_override":hostname,"client_hostname":"",
-    "client_setup_public_base_url":public_base.trim(),"client_setup_rathole_server_address":rathole.trim(),
-    "client_setup_service_domain":domain.trim(),"enabled":enabled,"local_ip":"","public_ip":"",
-    "token":token,"log_tokens":[],"auth_required":false,"client_version":"",
-    "client_update_target_version":"","client_update_request_id":"","client_update_last_handled_request_id":"",
-    "client_update_requested_at":Bson::Null,"client_updated_at":Bson::Null,"last_seen_at":Bson::Null,
-    "created_at":now,"updated_at":now};
-    if !groups.is_empty() {
-        machine.insert("group_ids", groups);
-    }
-    super::exit_nodes::validate_machine_changes(&app, owner, &[machine.clone()]).await?;
-    app.collection("machines").insert_one(&machine).await?;
-    if let Err(error) = enrollment::ensure(&app, &machine).await {
-        app.collection("machines")
-            .delete_one(doc! {"_id":id})
-            .await?;
-        return Err(error);
-    }
-    crate::generated::rebuild(&app).await?;
-    app.notify_status(&machine).await;
-    Ok(Json(
-        json!({"msg":"Machine added successfully","data":inventory::machine(&app,&machine)}),
-    ))
+    crate::private_continuity::write(&app, None, async {
+        let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
+        let _guard = app.connection_lock.lock().await;
+        let (name, aliases) = split_names(&input.name)?;
+        let groups = valid_groups(&app, owner, input.groups.unwrap_or_default()).await?;
+        let token = new_token(&app).await?;
+        let now = DateTime::now();
+        let id = ObjectId::new();
+        let mut machine = doc! {"_id":id,"user_id":owner,"name":name,"aliases":aliases,
+        "hostname":&hostname,"hostname_override":hostname,"client_hostname":"",
+        "client_setup_public_base_url":public_base.trim(),"client_setup_rathole_server_address":rathole.trim(),
+        "client_setup_service_domain":domain.trim(),"enabled":enabled,"local_ip":"","public_ip":"",
+        "token":token,"log_tokens":[],"auth_required":false,"client_version":"",
+        "client_update_target_version":"","client_update_request_id":"","client_update_last_handled_request_id":"",
+        "client_update_requested_at":Bson::Null,"client_updated_at":Bson::Null,"last_seen_at":Bson::Null,
+        "created_at":now,"updated_at":now};
+        if !groups.is_empty() {
+            machine.insert("group_ids", groups);
+        }
+        super::exit_nodes::validate_machine_changes(&app, owner, &[machine.clone()]).await?;
+        app.collection("machines").insert_one(&machine).await?;
+        if let Err(error) = enrollment::ensure(&app, &machine).await {
+            app.collection("machines")
+                .delete_one(doc! {"_id":id})
+                .await?;
+            return Err(error);
+        }
+        crate::generated::rebuild(&app).await?;
+        app.notify_status(&machine).await;
+        Ok(Json(
+            json!({"msg":"Machine added successfully","data":inventory::machine(&app,&machine)}),
+        ))
+    }).await
 }
 
 fn private_ips<'a>(peers: impl Iterator<Item = &'a Document>) -> Vec<String> {

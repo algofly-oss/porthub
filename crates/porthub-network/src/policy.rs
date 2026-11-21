@@ -4,6 +4,8 @@ pub mod pair_acl;
 pub mod exit_pick;
 pub use exit_pick::{ExitPickRequest,ExitPickResponse,ExitPickStatus,ExitChoice};
 mod sparse;
+mod tcp_continuity;
+pub use tcp_continuity::TcpContinuity;
 pub use sparse::{ExitIntent,ExitRole,ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 /// Existing full-snapshot ceiling, including the mandatory local identity.
@@ -306,6 +308,8 @@ struct Flow {
     expires: Instant,
     opening: Packet,
     phase: u8,
+    raw_path: u8,
+    resumed_at: Option<Instant>,
     fin_directions: u8,
     close_until: Option<Instant>,
     _permit:Option<tokio::sync::OwnedSemaphorePermit>,
@@ -324,6 +328,7 @@ pub struct Engine {
     compiled_pair: Option<pair_acl::CompiledPairAcl>,
     flow_budget:FlowBudget,
     exit_flow_budget:FlowBudget,
+    expired_tcp: Option<Box<TcpContinuity>>,
     pair_private_epoch:Option<String>,
     pair_exit_epoch:Option<String>,
 }
@@ -500,6 +505,18 @@ impl Engine {
                         .iter()
                         .any(|p| p.start <= packet.key.dport && packet.key.dport <= p.end))
         })
+    }
+    /// A local event that arrived before this exact connection was revalidated
+    /// cannot become deliverable by sitting in a queue until the new grant.
+    pub fn check_received(&mut self,bytes:&[u8],peer:&str,arrival:Instant)->bool {
+        if self.expired_tcp.is_some() {
+            if let Some((p,packet))=self.pairs.get(peer).zip(Packet::parse(bytes)) {
+                let k=packet.key;
+                let reverse=Key{src:k.dst,dst:k.src,sport:k.dport,dport:k.sport,..k};
+                if [k,reverse].iter().any(|k|p.flows.get(k).and_then(|f|f.resumed_at).is_some_and(|admitted|arrival<admitted)){return false;}
+            }
+        }
+        self.check(bytes,peer,true)
     }
     pub fn check(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
         if self.snapshot.as_ref().is_some_and(|s| s.sparse.is_some()) {
@@ -712,6 +729,8 @@ fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &
                 expires: now + ttl(key.protocol),
                 opening: packet,
                 phase: 0,
+                raw_path: 0,
+                resumed_at: None,
                 fin_directions: 0,
                 close_until: None,
             },

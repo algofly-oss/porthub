@@ -74,6 +74,12 @@ impl<T> Authority<T> {
         self.retirement = Some(domain);
         self
     }
+    pub(crate) fn workspace_generation(&self) -> Option<uuid::Uuid> {
+        #[cfg(feature="private-sparse")]
+        { self.witness.as_ref()?.workspace_generation }
+        #[cfg(not(feature="private-sparse"))]
+        { None }
+    }
     pub(crate) fn check(&self) -> Result<()> {
         anyhow::ensure!(
             self.retirement.as_ref().is_none_or(|domain| domain.valid()),

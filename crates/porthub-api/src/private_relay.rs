@@ -189,7 +189,7 @@ fn relay_needs_origin(record: &[u8]) -> bool {
     let Some((&length, body)) = record.split_first() else { return false };
     let Some(ip) = body.get(usize::from(length)..) else { return false };
     match ip.get(9) {
-        Some(&porthub_mesh::control_packet::EXIT) => true,
+        Some(&porthub_mesh::control_packet::EXIT) | Some(&porthub_mesh::control_packet::TCP_CONTINUITY) => true,
         Some(&6) if ip[0] >> 4 == 4 => {
             let header = usize::from(ip[0] & 15) * 4;
             header >= 20 && ip.get(header + 13).is_some_and(|flags| flags & 2 != 0)

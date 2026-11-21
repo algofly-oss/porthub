@@ -257,6 +257,7 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
             let generation=crate::private_renumber::native_repair::published_generation(app,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?,&prefs).await?;
             assignment.insert("address_generation",generation);
         }
+        let inserted = crate::private_continuity::write(app,owner.as_object_id(),async {
         let result = peers
             .update_one(
                 doc! {"_id":&id},
@@ -265,10 +266,12 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
             .upsert(true)
             .await;
         match result {
-            Ok(_) => return Ok(()),
-            Err(error) if duplicate(&error) => continue,
-            Err(error) => return Err(error.into()),
+            Ok(_) => Ok(true),
+            Err(error) if duplicate(&error) => Ok(false),
+            Err(error) => Err(error.into()),
         }
+        }).await?;
+        if inserted {return Ok(());}
     }
     Err(ApiError::new(
         StatusCode::CONFLICT,

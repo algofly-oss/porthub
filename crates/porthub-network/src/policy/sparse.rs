@@ -352,7 +352,12 @@ impl Engine {
         self.pairs.remove(id);
     }
     pub fn prune_pairs(&mut self) {
-        self.pairs.retain(|_, p| p.valid_lease());
+        if let Some(pending)=&mut self.expired_tcp {pending.expire();}
+        self.pairs.retain(|id,pair| {
+            if pair.valid_lease(){return true;}
+            if let Some(pending)=&mut self.expired_tcp {pending.capture(id,pair);}
+            false
+        });
     }
     pub fn pair_count(&self) -> usize {
         self.pairs.len()
@@ -427,6 +432,124 @@ mod tests {
             }],
         }
     }
+    fn tcp_segment(inbound: bool, flags: u8, local_port: u16) -> [u8; 40] {
+        let mut buf = [0; 40];
+        buf[0] = 0x45;
+        buf[3] = 40;
+        buf[8] = 64;
+        buf[9] = 6;
+        let local = [10, 203, 0, 2];
+        let remote = [10, 203, 1, 2];
+        let (src, dst, sport, dport) = if inbound {
+            (remote, local, 8888u16, local_port)
+        } else { (local, remote, local_port, 8888) };
+        buf[12..16].copy_from_slice(&src);
+        buf[16..20].copy_from_slice(&dst);
+        buf[20..22].copy_from_slice(&sport.to_be_bytes());
+        buf[22..24].copy_from_slice(&dport.to_be_bytes());
+        buf[32] = 0x50;
+        buf[33] = flags;
+        let sum: u32 = buf[..20].chunks_exact(2).map(|v|u16::from_be_bytes([v[0],v[1]]) as u32).sum();
+        let sum = (sum & 65535) + (sum >> 16);
+        buf[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        buf
+    }
+
+    fn establish(e: &mut Engine, port: u16, raw: bool) {
+        e.enable_tcp_continuity(true);
+        for (inbound,flags) in [(false,2),(true,18),(false,16),(true,16)] {
+            let bytes = tcp_segment(inbound,flags,port);
+            assert!(e.check(&bytes,"b",inbound));
+            e.observe_raw_tcp("b",Packet::parse(&bytes).unwrap(),inbound,raw);
+        }
+    }
+
+    #[test]
+    fn ordinary_continuation_requires_both_new_authorities_and_original_open_permission() {
+        let epoch = "a".repeat(64);
+        let mut engine = Engine::default();
+        engine.apply(base(&epoch)).unwrap();
+        let lease = pair(&epoch);
+        engine.install_pair(lease.clone()).unwrap();
+        establish(&mut engine,41000,true);
+        establish(&mut engine,41001,false);
+        establish(&mut engine,41002,true);
+        assert!(engine.check(&tcp_segment(true,17,41002),"b",true));
+        let budget=engine.flow_budget.0.clone();
+        let mut waiting=engine.pause_established_tcp();
+        let mut no_pair=engine.pause_established_tcp();
+        let mut changed=engine.pause_established_tcp();
+        let mut tightened=engine.pause_established_tcp();
+        engine.revoke();
+        let permits=budget.available_permits();
+        let ack=tcp_segment(false,16,41000);
+        assert!(!engine.check(&ack,"b",false));
+        engine.apply(base(&epoch)).unwrap();
+        assert_eq!(engine.restore_established_tcp(&mut no_pair,&lease),0);
+        engine.install_pair(lease.clone()).unwrap();
+        assert!(engine.restore_established_tcp(&mut waiting,&lease)==1);
+        assert_eq!(budget.available_permits()+1,permits);
+        assert!(engine.check(&ack,"b",false));
+        assert!(!engine.check(&tcp_segment(false,16,41001),"b",false));
+        assert!(!engine.check(&tcp_segment(false,16,41002),"b",false));
+        assert_eq!(engine.restore_established_tcp(&mut waiting,&lease),0);
+        engine.revoke_pair("b");
+        let mut id=lease.clone();
+        id.peer.instance="new-process".into();
+        engine.install_pair(id.clone()).unwrap();
+        assert_eq!(engine.restore_established_tcp(&mut changed,&id),0);
+        engine.revoke_pair("b");
+        let mut acl=lease.clone();
+        acl.grants[0].protocol="tcp".into();
+        acl.grants[0].ports=vec![Port{start:22,end:22}];
+        engine.install_pair(acl.clone()).unwrap();
+        assert_eq!(engine.restore_established_tcp(&mut tightened,&acl),0);
+    }
+
+    #[test]
+    fn bilateral_confirmation_only_restores_the_same_opening_after_a_valid_peer_response() {
+        let epoch="a".repeat(64);let lease=pair(&epoch);
+        let mut source=Engine::default();source.apply(base(&epoch)).unwrap();
+        source.install_pair(lease.clone()).unwrap();establish(&mut source,41000,true);
+        let mut target=Engine::default();target.apply(base(&epoch)).unwrap();
+        target.install_pair(lease.clone()).unwrap();establish(&mut target,41000,true);
+        let mut frozen=source.pause_established_tcp();let mut target_frozen=TcpContinuity::default();
+        source.revoke();source.apply(base(&epoch)).unwrap();source.install_pair(lease.clone()).unwrap();
+        source.enable_tcp_continuity(true);
+        assert!(source.prepare_tcp(&mut frozen,&lease));
+        let gen=[7;16];let original=frozen.requests(gen)[0].1.clone();let ack=tcp_segment(false,16,41000);
+        assert!(!source.check(&ack,"b",false));
+        assert!(target.tcp_confirmation(&mut target_frozen,"b",[0;16],&original).is_none());
+        let mut reply=target.tcp_confirmation(&mut target_frozen,"b",gen,&original).unwrap();
+        reply[28]^=1;source.tcp_confirmation(&mut frozen,"b",gen,&reply);
+        assert!(!source.check(&ack,"b",false));
+        reply[28]^=1;let before=Instant::now();source.tcp_confirmation(&mut frozen,"b",gen,&reply);
+        assert!(source.check(&ack,"b",false));
+        assert!(!source.check_received(&tcp_segment(true,16,41000),"b",before));
+        assert!(source.check_received(&tcp_segment(true,16,41000),"b",Instant::now()));
+        assert!(!frozen.contains("b"));
+    }
+
+    #[test]
+    fn ordinary_continuation_is_bounded_and_requires_complete_unchanged_raw_flows() {
+        let epoch="a".repeat(64);
+        let mut e=Engine::default();
+        e.apply(base(&epoch)).unwrap();
+        let lease=pair(&epoch);
+        e.install_pair(lease.clone()).unwrap();
+        assert!(e.check(&tcp_segment(false,2,40990),"b",false));
+        assert!(!e.pause_established_tcp().contains("b"));
+        establish(&mut e,40991,true);
+        e.invalidate_tcp_continuity();
+        assert!(!e.pause_established_tcp().contains("b"));
+        for port in 41000..41300 {establish(&mut e,port,true);}
+        let mut pending=e.pause_established_tcp();
+        e.revoke();
+        e.apply(base(&epoch)).unwrap();
+        e.install_pair(lease.clone()).unwrap();
+        assert_eq!(e.restore_established_tcp(&mut pending,&lease),256);
+    }
+
     #[test]
     fn private_packet_origin_tracks_the_authorized_process_and_relay_registration() {
         let epoch = "a".repeat(64);

@@ -455,7 +455,7 @@ pub(crate) async fn run_endpoint(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"watch_changes":true,"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"watch_changes":true,"tcp_continuity":1,"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if virtual_endpoint {
             body["stream_transport"] = serde_json::json!("");
@@ -490,6 +490,8 @@ pub(crate) async fn run_endpoint(
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let mut reply = None;
+        #[cfg(feature="private-sparse")]
+        let mut workspace_generation=None;
         if virtual_endpoint {
             for key in ["native_repair","exit_pick","tor_exit","application_proxy","lan_exit","lan_networks","virtual_host_provider","exit_pair_protocol","exit_ready","exit_ready_peers","exit_pair_failed"] {
                 body.as_object_mut().expect("private sync object").remove(key);
@@ -520,6 +522,10 @@ pub(crate) async fn run_endpoint(
                     refresh_clock_origin = Instant::now() + Duration::from_secs(6 * 3600);
                 }
                 if reply.is_some() {
+                    #[cfg(feature="private-sparse")]
+                    if value.authenticated_tls || profile.allow_insecure_http_for_tests {
+                        workspace_generation=value.headers.get("x-porthub-workspace-generation").and_then(|v|v.to_str().ok()) .and_then(|v|v.parse().ok());
+                    }
                     let cursor = (value.authenticated_tls || profile.allow_insecure_http_for_tests)
                         .then(|| value.headers.get("x-porthub-private-cursor")?.to_str().ok()?.parse::<uuid::Uuid>().ok()).flatten();
                     if cursor.is_some() && change_cursor.borrow().is_some() && *change_cursor.borrow()!=cursor {
@@ -556,9 +562,12 @@ pub(crate) async fn run_endpoint(
             #[cfg(feature="private-sparse")]
             let mut request_window = request_window;
             #[cfg(feature="private-sparse")]
+            if let Some(window)=&mut request_window {window.workspace_generation=workspace_generation;}
+            #[cfg(feature="private-sparse")]
             if let (Some(window), Some(clock)) = (&mut request_window, &reply.authority_clock) {
                 ensure!(clock.nonce == clock_nonce, "private authority response does not match request");
                 window.use_relative_deadlines();
+
                 window.clock_sample=super::gateway_time::ClockSample::from_sync(clock.server_time);
                 reply.snapshot.expires_at = window.local_expiry(clock.server_time, reply.snapshot.expires_at)?;
                 let leases = reply.pair_responses.iter_mut().filter_map(|p| p.lease.as_mut())
