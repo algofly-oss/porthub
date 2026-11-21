@@ -428,6 +428,43 @@ mod tests {
         }
     }
     #[test]
+    fn private_packet_origin_tracks_the_authorized_process_and_relay_registration() {
+        let epoch = "a".repeat(64);
+        let mut engine = Engine::default();
+        engine.apply(base(&epoch)).unwrap();
+        let mut first = pair(&epoch);
+        first.peer.relay_origin = Some("1".repeat(32));
+        let old = first.peer.clone();
+        engine.install_pair(first.clone()).unwrap();
+
+        let mut next = first;
+        next.revision += 1;
+        next.peer.instance = "replacement".into();
+        next.peer.fingerprint = "replacement-cert".into();
+        next.peer.relay_origin = Some("2".repeat(32));
+        let incoming = next.peer.clone();
+        let current = engine.pair_peer("b").unwrap();
+        assert!(current.matches_packet_origin(&old));
+        assert!(!current.matches_packet_origin(&incoming));
+        engine.install_pair(next).unwrap();
+        let current = engine.pair_peer("b").unwrap();
+        assert!(current.matches_packet_origin(&incoming));
+        assert!(!current.matches_packet_origin(&old));
+
+        let mut direct = incoming.clone();
+        direct.relay_origin = None;
+        assert!(current.matches_packet_origin(&direct));
+        for altered in [
+            PeerInfo { id: "other".into(), ..direct.clone() },
+            PeerInfo { ip: "10.203.1.3".parse().unwrap(), ..direct.clone() },
+            PeerInfo { fingerprint: old.fingerprint, ..direct.clone() },
+            PeerInfo { instance: old.instance, ..direct.clone() },
+            PeerInfo { relay_origin: old.relay_origin, ..direct },
+        ] {
+            assert!(!current.matches_packet_origin(&altered));
+        }
+    }
+    #[test]
     fn exit_intent_capture_is_exact_bounded_and_preserves_native_defaults(){
         let epoch="a".repeat(64);let mut snapshot=base(&epoch);
         let value=serde_json::json!({"id":"route","name":"LAN","role":"client","selection":"sticky","traffic_mode":"lan_only","allow_direct_fallback":false,"tor_enabled":false,"tor_circuit_groups":4,"lan_networks":["10.1.0.0/24","10.2.0.0/24"]});

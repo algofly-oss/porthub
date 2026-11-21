@@ -729,3 +729,30 @@ async fn disconnected_existing_unified_module_keeps_its_configuration_during_upd
     ensure!(std::fs::read(&module_path)? == module);
     Ok(())
 }
+
+#[cfg(target_os="linux")]
+#[tokio::test]
+async fn previous_linux_units_upgrade_and_roll_back_byte_for_byte() -> Result<()> {
+    let f = Fixture::new().await?;
+    let template = "FileDescriptorStoreMax=4\nNotifyAccess=main\n";
+    let mut old = Vec::new();
+    for spec in &f.specs[..2] {
+        let exact = std::fs::read_to_string(&spec.unit)?;
+        ensure!(exact.contains(template));
+        old.push(exact.replacen(template, "", 1));
+        std::fs::write(&spec.unit,old.last().unwrap())?;
+    }
+    let first = &f.specs[0];
+    std::fs::write(&first.unit,old[0].replace("Restart=on-failure","Restart=always"))?;
+    ensure!(upgrade::plan(&f.layout,&f.public,Some(&f.cli),f.manager.as_ref()).await.is_err());
+    std::fs::write(&first.unit,&old[0])?;
+    let plan = upgrade::plan(&f.layout,&f.public,Some(&f.cli),f.manager.as_ref()).await?;
+    let receipt=upgrade::apply(&f.layout,plan,&f.new,f.manager.as_ref(),&Ready {calls:AtomicUsize::new(0),fail_at:0}).await?;
+    ensure!(std::fs::read_to_string(&first.unit)?.contains(template));
+    upgrade::rollback(&f.layout,&receipt,f.manager.as_ref()).await?;
+    for (spec,original) in f.specs.iter().zip(old) {
+        ensure!(std::fs::read_to_string(&spec.unit)? == original);
+    }
+    f.foreign_untouched()?;
+    Ok(())
+}

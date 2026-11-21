@@ -34,6 +34,19 @@ pub struct PeerInfo {
     #[serde(default)]
     pub aliases: Vec<String>,
 }
+impl PeerInfo {
+    /// Compare an authenticated packet source with the currently authorized peer.
+    /// A direct reader authenticates the process certificate. A stamped gateway
+    /// record additionally identifies the relay registration that supplied it.
+    pub fn matches_packet_origin(&self, origin: &Self) -> bool {
+        self.id == origin.id
+            && self.ip == origin.ip
+            && self.instance == origin.instance
+            && self.fingerprint == origin.fingerprint
+            && origin.relay_origin.as_ref().is_none_or(|stamp| self.relay_origin.as_ref() == Some(stamp))
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Port {
     pub start: u16,

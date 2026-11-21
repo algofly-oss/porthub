@@ -1,19 +1,24 @@
 //! Nonpersistent, exclusively owned Linux TUN. Only private /32 routes are
 //! added, with exclusive netlink operations; no existing route is replaced.
 use anyhow::{ensure, Result};
+#[path = "linux_tun_queue.rs"]
+mod queue;
 use porthub_network::capture_routes::SparseAudit;
 use nlink::netlink::{route::Ipv4Route, types::route::RouteScope, Connection, Route};
 use std::{
     collections::HashSet,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::fd::AsRawFd,
 };
 use tokio::{io::unix::AsyncFd, sync::Mutex};
 pub struct Tun {
     fd: AsyncFd<File>,
     netlink: Connection<Route>,
+    anchor: Option<File>,
+    journal: Option<LinkJournal>,
+    published: std::sync::atomic::AtomicBool,
     pub index: u32,
     pub name: String,
     own:Ipv4Addr,
@@ -98,6 +103,59 @@ async fn conflict_inventory(
     Ok(routes)
 }
 
+pub(super) struct RetainedLink {
+    anchor: File,
+    state: LinkState,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkState {
+    binding: String,
+    name: String,
+    index: u32,
+    own: Ipv4Addr,
+    peers: HashSet<Ipv4Addr>,
+    pools: std::collections::BTreeSet<porthub_mesh::lan_routes::Network>,
+}
+
+struct LinkJournal {
+    file: File,
+    state: std::sync::Mutex<LinkState>,
+}
+
+impl Drop for Tun {
+    fn drop(&mut self) {
+        if self.published.load(std::sync::atomic::Ordering::Acquire) && !super::linux_handoff::exiting() {
+            if let Err(error) = super::linux_handoff::clear() {
+                tracing::warn!(%error, "could not release the service's private link reference");
+            }
+        }
+    }
+}
+
+impl RetainedLink {
+    pub(super) fn matches(&self, binding: &str, pin: Option<&super::native_owner::source::Pin>, own: Ipv4Addr) -> bool {
+        self.state.binding == binding && self.state.own == own
+            && matches!(pin, Some(super::native_owner::source::Pin::Interface { name, index }) if *name == self.state.name && *index == self.state.index)
+    }
+
+    #[cfg(all(test, feature="netns-tests"))]
+    fn export(self) -> Result<(File, Vec<u8>)> {
+        Ok((self.anchor, serde_json::to_vec(&self.state)?))
+    }
+
+    pub(super) fn import(anchor: File, state: &[u8]) -> Result<Self> {
+        ensure!(state.len() <= 1024 * 1024, "retained route inventory exceeds bound");
+        let state: LinkState = serde_json::from_slice(state)?;
+        ensure!(state.binding.len() == 64 && state.binding.bytes().all(|v| v.is_ascii_hexdigit())
+            && state.own.is_private() && state.peers.iter().all(Ipv4Addr::is_private)
+            && state.pools.len() <= porthub_network::capture_routes::MAX_CAPTURE_PREFIXES,
+            "invalid private link checkpoint");
+        Ok(Self { anchor, state })
+    }
+}
+
 impl Tun {
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
     pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
@@ -112,6 +170,10 @@ impl Tun {
         super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,u32::MAX)?)?;Ok(())
     }
     pub async fn open(name: &str, own: Ipv4Addr, peers: &[Ipv4Addr]) -> Result<Self> {
+        Self::create(name, own, peers, false).await
+    }
+
+    pub(super) async fn create(name: &str, own: Ipv4Addr, peers: &[Ipv4Addr], restartable: bool) -> Result<Self> {
         ensure!(
             porthub_mesh::underlay::porthub_tun_name(name)
                 && own.is_private(),
@@ -130,35 +192,14 @@ impl Tun {
             "private interface already exists"
         );
         check_routes(&netlink, &[peers, &[own]].concat(), None).await?;
-        let file = safe(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW)
-                .open("/dev/net/tun"),
-            "cannot open private TUN device",
-        )?;
-        // Keep the ioctl union local to the synchronous attachment. Its raw
-        // pointer variants must not remain live across an asynchronous wait.
-        {
-            // ifreq is entirely zero-initialized before setting its defined fields.
-            let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
-            for (slot, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
-                *slot = byte as libc::c_char;
-            }
-            request.ifr_ifru.ifru_flags =
-                (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_TUN_EXCL) as libc::c_short;
-            ensure!(
-                unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &mut request) } == 0,
-                "private TUN attachment failed"
-            );
-        }
+        let file = queue::create(name, restartable)?;
         let link = safe(
             netlink.get_link_by_name(name).await,
             "private TUN lookup failed",
         )?
         .ok_or_else(|| anyhow::anyhow!("private TUN unavailable"))?;
         let index = link.ifindex();
+        let anchor = restartable.then(|| queue::detach_anchor(&file, name, index)).transpose()?;
         // Allow bursts of locally segmented TCP packets to reach the TUN reader.
         // A full Linux TUN transmit ring discards packets before userspace sees them.
         if let Err(error) = netlink.set_link_txqlen_by_index(index, 4096).await {
@@ -184,6 +225,9 @@ impl Tun {
             // File owns a stable, nonblocking descriptor until AsyncFd is dropped.
             fd: unsafe { AsyncFd::register(file)? },
             netlink,
+            anchor,
+            journal: None,
+            published: Default::default(),
             index,
             own,
             name: name.into(),
@@ -196,6 +240,127 @@ impl Tun {
         super::linux_tcp::configure_send_autotuning();
         Ok(tun)
     }
+    pub(super) async fn journal_routes(&mut self, binding: &str, previous: Option<File>) -> Result<()> {
+        use std::os::fd::FromRawFd;
+        let state = self.route_state(binding).await;
+        let file = if let Some(file) = previous { file } else {
+            let fd = unsafe { libc::memfd_create(c"porthub-private-routes".as_ptr(), libc::MFD_CLOEXEC) };
+            ensure!(fd >= 0, "unable to allocate private route checkpoint");
+            unsafe { File::from_raw_fd(fd) }
+        };
+        Self::checkpoint(&file, &state)?;
+        self.journal = Some(LinkJournal { file, state: std::sync::Mutex::new(state) });
+        Ok(())
+    }
+    fn checkpoint(file: &File, state: &LinkState) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let bytes = serde_json::to_vec(state)?;
+        ensure!(bytes.len() <= 1024 * 1024, "route checkpoint exceeds size bound");
+        // If a process exits during a write the replacement must cold-start.
+        // Clearing the length prefix before writing keeps partial JSON invalid.
+        file.write_all_at(&0u64.to_le_bytes(), 0)?;
+        file.write_all_at(&bytes, 8)?;
+        file.set_len(8 + bytes.len() as u64)?;
+        file.write_all_at(&(bytes.len() as u64).to_le_bytes(), 0)?;
+        Ok(())
+    }
+    async fn checkpoint_routes(&self) -> Result<()> {
+        let Some(journal) = &self.journal else { return Ok(()); };
+        let peers = self.routes.lock().await.clone();
+        let pools = self.capture_routes.lock().await.clone();
+        let mut state = journal.state.lock().map_err(|_| anyhow::anyhow!("private route checkpoint poisoned"))?;
+        if state.peers != peers || state.pools != pools {
+            state.peers = peers;
+            state.pools = pools;
+            Self::checkpoint(&journal.file, &state)?;
+        }
+        Ok(())
+    }
+    pub(super) fn publish(&self, dns: &super::dns::Server) -> Result<()> {
+        use std::os::fd::AsFd;
+        if self.published.load(std::sync::atomic::Ordering::Acquire) { return Ok(()); }
+        if let (Some(anchor), Some(journal)) = (&self.anchor, &self.journal) {
+            let (udp, tcp) = dns.socket_fds();
+            super::linux_handoff::publish([anchor.as_fd(),journal.file.as_fd(),udp,tcp])?;
+            self.published.store(true,std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+    pub(super) fn mark_restored(&self) {
+        self.published.store(true,std::sync::atomic::Ordering::Release);
+    }
+
+    async fn route_state(&self, binding: &str) -> LinkState {
+        LinkState {
+            binding: binding.into(),
+            index: self.index,
+            own: self.own,
+            name: self.name.clone(),
+            peers: self.routes.lock().await.clone(),
+            pools: self.capture_routes.lock().await.clone(),
+        }
+    }
+
+    #[cfg(all(test, feature="netns-tests"))]
+    async fn handoff(&self, binding: &str) -> Result<RetainedLink> {
+        let anchor = self.anchor.as_ref().ok_or_else(|| anyhow::anyhow!("private link is not retained"))?.try_clone()?;
+        Ok(RetainedLink {anchor, state:self.route_state(binding).await})
+    }
+
+    pub(super) async fn restore(
+        retained: RetainedLink,
+        name: &str,
+        own: Ipv4Addr,
+        pools: &[porthub_mesh::lan_routes::Network],
+        peers: &[Ipv4Addr],
+    ) -> Result<Self> {
+        ensure!(own.is_private() && own == retained.state.own && name == retained.state.name,
+            "retained private link assignment changed");
+        let fd = queue::resume(&retained.anchor, name, retained.state.index)?;
+        let netlink = Connection::<Route>::new()?;
+        // A crash can interrupt a route update before its checkpoint. Never
+        // adopt a route we cannot attribute to the previous worker.
+        for route in netlink.get_routes().await?.iter().filter(|r|
+            r.is_ipv4() && r.oif() == Some(retained.state.index) && r.table_id() == 254)
+        {
+            use nlink::netlink::types::route::{RouteProtocol, RouteType};
+            let Some(IpAddr::V4(destination)) = route.destination() else {
+                anyhow::bail!("unexpected route on retained private link");
+            };
+            let length = route.dst_len();
+            let recorded = (length == 32 && retained.state.peers.contains(destination))
+                || retained.state.pools.iter().any(|p| p.prefix() == length && p.address() == *destination);
+            ensure!(recorded && route.scope() == RouteScope::Link && route.protocol() == RouteProtocol::Boot
+                && route.route_type() == RouteType::Unicast && route.gateway().is_none() && route.priority().is_none()
+                && route.source().is_none() && route.iif().is_none() && route.prefsrc().is_none()
+                && route.multipath().is_none() && route.nh_id().is_none() && route.encap_type().is_none()
+                && route.flow().is_none() && route.metrics().is_none() && route.via().is_none(),
+                "unrecognized route on retained private link");
+        }
+        let addresses = netlink.get_addresses().await?;
+        ensure!(!addresses.iter().any(|address| address.ifindex() == retained.state.index
+            && matches!(address.primary_address(), Some(IpAddr::V4(ip)) if *ip != own)),
+            "retained private link has an unexpected IPv4 address");
+        let tun = Self {
+            fd: unsafe { AsyncFd::register(fd)? },
+            netlink,
+            anchor: Some(retained.anchor),
+            journal: None,
+            published: Default::default(),
+            name: retained.state.name,
+            index: retained.state.index,
+            own,
+            routes: Mutex::new(retained.state.peers),
+            capture_routes: Mutex::new(retained.state.pools),
+            source_restored: Default::default(),
+            _source_lease: Default::default(),
+        };
+        // Reconcile both removals and additions against current authority and
+        // current OS routes before the caller starts either packet direction.
+        tun.reconcile_sparse(pools, peers).await?;
+        Ok(tun)
+    }
+
     /// Reconcile only prefixes validated against the current native route inventory.
     /// A conflicting pool is reported separately; other safe pools remain usable.
     pub async fn update_capture_routes(&self, pools: &[porthub_mesh::lan_routes::Network]) -> Result<porthub_network::capture_routes::CapturePlan> {
@@ -296,7 +461,7 @@ impl Tun {
         let present=|address:Ipv4Addr,prefix:u8|existing.iter().any(|r|r.destination==address&&r.prefix==prefix&&r.interface==Some(self.index));
         let current_peers={let mut held=self.routes.lock().await;held.retain(|ip|present(*ip,32));held.iter().copied().filter(|ip|*ip!=self.own).collect::<std::collections::BTreeSet<_>>()};
         let current_capture={let mut held=self.capture_routes.lock().await;held.retain(|p|present(p.address(),p.prefix()));held.clone()};
-        if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){return Ok(audit);}
+        if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){self.checkpoint_routes().await?;return Ok(audit);}
         // Remove obsolete/now-conflicting capture and host entries before adding
         // new ones. A safe known /32 may still work outside a conflicting subnet.
         let retained_capture:Vec<_>=self.capture_routes.lock().await.iter().copied().filter(|p|audit.capture.accepted.contains(p)).collect();
@@ -305,6 +470,7 @@ impl Tun {
         self.update_routes(&retained_peers).await?;
         audit.capture=self.update_capture_routes(pools).await?;
         self.update_routes(&audit.accepted_peers).await?;
+        self.checkpoint_routes().await?;
         Ok(audit)
     }
 
@@ -569,4 +735,56 @@ mod source_recovery_tests {
         );
         Ok(())
     }
+}
+
+#[cfg(all(test, feature = "netns-tests"))]
+#[tokio::test]
+#[ignore = "requires a disconnected namespace and /dev/net/tun"]
+async fn retained_link_reconciles_routes_and_discards_previous_worker_packets() -> Result<()> {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1"));
+    ensure!(std::path::Path::new("/.dockerenv").is_file());
+    ensure!(std::fs::read_dir("/sys/class/net")?.count() == 1);
+    let name = "tun0ph1234abcd";
+    let own = Ipv4Addr::new(10, 219, 94, 2);
+    let old = Ipv4Addr::new(10, 219, 94, 7);
+    let next = Ipv4Addr::new(10, 219, 94, 9);
+    let pools = ["10.219.94.0/24".parse()?];
+    let first = Tun::create(name, own, &[old], true).await?;
+    first.reconcile_sparse(&pools, &[old]).await?;
+    let idx = first.index;
+    let sender = UdpSocket::bind((own, 0))?;
+    sender.send_to(b"old-worker", (old, 47111))?;
+    let binding = "a".repeat(64);
+    let retained = first.handoff(&binding).await?;
+    assert!(queue::resume(first.fd.get_ref(), name, idx).is_err());
+    assert!(queue::resume(&retained.anchor, name, idx + 1).is_err());
+    assert!(queue::resume(&File::open("/dev/null")?, name, idx).is_err());
+    drop(first);
+    sender.send_to(b"no-worker", (old, 47111))?;
+    let (anchor, state) = retained.export()?;
+    let retained = RetainedLink::import(anchor, &state)?;
+    assert!(!retained.matches(&"b".repeat(64), None, own));
+    let pin = super::native_owner::source::Pin::Interface { name: name.into(), index: idx };
+    assert!(retained.matches(&binding, Some(&pin), own));
+    let second = Tun::restore(retained, name, own, &pools, &[next]).await?;
+    assert_eq!(idx, second.index);
+    let native = second.netlink.get_routes().await?;
+    let has = |ip| native.iter().any(|r| r.dst_len() == 32 && r.oif() == Some(idx)
+        && r.destination() == Some(&IpAddr::V4(ip)));
+    assert!(!has(old));
+    assert!(has(next));
+    let mut bytes = [0u8; 2048];
+    assert!(tokio::time::timeout(Duration::from_millis(100), second.read(&mut bytes)).await.is_err());
+    sender.send_to(b"fresh-worker", (next, 47111))?;
+    let size = tokio::time::timeout(Duration::from_secs(2), second.read(&mut bytes)).await??;
+    assert!(bytes[..size].ends_with(b"fresh-worker"));
+    let retained = second.handoff(&binding).await?;
+    drop(second);
+    assert!(Tun::restore(retained, name, old, &pools, &[next]).await.is_err());
+    let nl = Connection::<Route>::new()?;
+    assert!(nl.get_link_by_name(name).await?.is_none());
+    Ok(())
 }

@@ -137,7 +137,7 @@ pub async fn plan(
             public_found = true;
         }
         ensure!(
-            read(&spec.unit)? == service::unit(&spec)?.as_bytes(),
+            service::generated_unit(&spec, &read(&spec.unit)?)?,
             "native service unit was customized; explicit migration required"
         );
         release(layout, &spec.executable)?;
@@ -692,7 +692,7 @@ fn validate(layout: &Layout, receipt: &Path, journal: &Journal) -> Result<()> {
             "native update backup changed"
         );
         ensure!(
-            read(&receipt.join(format!("{i}.unit")))? == service::unit(&previous)?.as_bytes(),
+            service::generated_unit(&previous, &read(&receipt.join(format!("{i}.unit")))?)?,
             "invalid native update unit backup"
         );
         release(layout, &previous.executable)?;
@@ -747,7 +747,7 @@ async fn recover_locked(
             ensure!(hash(&read(&entry.spec.profile)?) == entry.profile_hash,
                 "private credentials changed after migration");
             if entry.spec.unit.try_exists()? {
-                ensure!(read(&entry.spec.unit)? == service::unit(&entry.spec)?.as_bytes(), "private unit changed after migration");
+                ensure!(service::generated_unit(&entry.spec, &read(&entry.spec.unit)?)?, "private unit changed after migration");
             }
             changed.push(true);
             continue;
@@ -765,8 +765,8 @@ async fn recover_locked(
         replacement.executable = journal.executable.clone();
         let unit = read(&current.unit)?;
         ensure!(
-            unit == service::unit(&entry.spec)?.as_bytes()
-                || unit == service::unit(&replacement)?.as_bytes(),
+            service::generated_unit(&entry.spec, &unit)?
+                || service::generated_unit(&replacement, &unit)?,
             "native service unit changed after update"
         );
         changed.push(current != entry.spec || hash(&unit) != entry.unit_hash
