@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub server: String,

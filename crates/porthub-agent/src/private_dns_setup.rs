@@ -443,7 +443,7 @@ pub(crate) struct LinkDns {
 }
 
 impl LinkDns {
-    async fn matches(&self, own: std::net::Ipv4Addr) -> Result<bool> {
+    pub(crate) async fn matches(&self, own: std::net::Ipv4Addr) -> Result<bool> {
         let bus = zbus::Connection::system().await?;
         let manager = zbus::Proxy::new(
             &bus,

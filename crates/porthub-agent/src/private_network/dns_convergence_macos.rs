@@ -70,7 +70,7 @@ where
 }
 
 #[cfg(target_os="macos")]
-async fn observe()->Result<String>{
+pub(super) async fn observe()->Result<String>{
     use tokio::io::AsyncReadExt;
     let mut child=tokio::process::Command::new("/usr/sbin/scutil").arg("--dns").env_clear().env("PATH","/usr/bin:/bin:/usr/sbin:/sbin")
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn()?;

@@ -276,9 +276,15 @@ impl Tun {
         }
         Ok(())
     }
+    #[cfg(feature="private-sparse")]
+    pub(super) fn recovery_handles(&self, udp: File, tcp: File) -> Result<Option<super::linux_handoff::Stored>> {
+        let (Some(anchor),Some(journal)) = (&self.anchor,&self.journal) else {return Ok(None)};
+        Ok(Some(super::linux_handoff::Stored { anchor:anchor.try_clone()?, state:journal.file.try_clone()?, udp, tcp }))
+    }
+
     pub(super) fn publish(&self, dns: &super::dns::Server) -> Result<()> {
         use std::os::fd::AsFd;
-        if self.published.load(std::sync::atomic::Ordering::Acquire) { return Ok(()); }
+        if !super::linux_handoff::available() || self.published.load(std::sync::atomic::Ordering::Acquire) { return Ok(()); }
         if let (Some(anchor), Some(journal)) = (&self.anchor, &self.journal) {
             let (udp, tcp) = dns.socket_fds();
             super::linux_handoff::publish([anchor.as_fd(),journal.file.as_fd(),udp,tcp])?;

@@ -339,6 +339,20 @@ impl Server {
         let (socket,tcp)=super::dns_windows::bind(std::net::SocketAddrV4::new(address.0,address.1))?;
         Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default(), #[cfg(test)] fixture_observer:None })
     }
+    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+    pub(super) fn recovery_sockets(&self) -> Result<(std::fs::File, std::fs::File)> {
+        use std::os::fd::AsFd;
+        Ok((self.socket.as_fd().try_clone_to_owned()?.into(), self.tcp.as_fd().try_clone_to_owned()?.into()))
+    }
+    #[cfg(all(feature="private-sparse",any(target_os="macos",all(test,target_os="linux"))))]
+    pub(super) fn from_local_queue((udp,tcp):(std::fs::File,std::fs::File)) -> Result<Self> {
+        use std::os::fd::OwnedFd;
+        let socket = UdpSocket::from_std(std::net::UdpSocket::from(OwnedFd::from(udp)))?;
+        let tcp = TcpListener::from_std(std::net::TcpListener::from(OwnedFd::from(tcp)))?;
+        ensure!(socket.local_addr()?.ip().is_loopback() && socket.local_addr()? == tcp.local_addr()?,
+                "private DNS queue changed");
+        Ok(Self {socket, tcp, zone:Default::default(), upstream:Default::default(), #[cfg(test)] fixture_observer:None})
+    }
     #[cfg(target_os = "linux")]
     pub(super) fn socket_fds(&self) -> (std::os::fd::BorrowedFd<'_>, std::os::fd::BorrowedFd<'_>) {
         use std::os::fd::AsFd;
@@ -489,6 +503,15 @@ pub struct Registration {
     interface: Option<windows_sys::core::GUID>,
     #[cfg(windows)]
     nrpt:Option<super::windows_nrpt::Registration>,
+}
+
+#[cfg(target_os = "macos")]
+impl Registration {
+    pub(super) async fn private_scope_is_published(&self, suffixes: &[String], port: u16) -> bool {
+        let Some(session) = &self.private_session else { return false; };
+        // Failure or an ambiguous publication runs the normal collision-aware registration path.
+        matches!(tokio::time::timeout(std::time::Duration::from_secs(2), session.is_published(suffixes, port)).await, Ok(Ok(true)))
+    }
 }
 
 #[cfg(target_os="macos")]
@@ -927,6 +950,61 @@ mod tcp_tests {
     use super::*;
     use hickory_proto::{op::Query, rr::Name};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // These manual loopback bindings never register a real OS resolver.
+    #[cfg(all(feature="private-sparse",any(target_os="linux",target_os="macos")))]
+    #[tokio::test]
+    async fn queued_native_questions_use_only_reauthorized_zone() -> Result<()> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = socket.local_addr()?;
+        let tcp = TcpListener::bind(address).await?;
+        let old = Server { socket, tcp, zone: Default::default(), upstream: Default::default(), fixture_observer: None };
+        old.zone.write().await.records.insert("removed.phub.".into(), "10.1.2.3".parse()?);
+        let handles = old.recovery_sockets()?;
+        drop(old);
+
+        let query = |name: &str| -> Result<Vec<u8>> {
+            let mut msg = Message::query();
+            msg.add_query(Query::query(Name::from_ascii(name)?, RecordType::A));
+            Ok(msg.to_vec()?)
+        };
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        udp.send_to(&query("removed.phub.")?, address).await?;
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        let permitted = query("new.phub.")?;
+        stream.write_u16(permitted.len() as u16).await?;
+        stream.write_all(&permitted).await?;
+
+        let replacement = Server::from_local_queue(handles)?;
+        {
+            let mut zone = replacement.zone.write().await;
+            assert!(zone.records.is_empty());
+            zone.suffixes.insert("phub.".into());
+            zone.records.insert("new.phub.".into(), "10.1.2.4".parse()?);
+        }
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(replacement.serve(cancel.clone()));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut buf = [0; 1500];
+            let (len, _) = udp.recv_from(&mut buf).await?;
+            let denied = Message::from_vec(&buf[..len])?;
+            assert_eq!(denied.metadata.response_code, ResponseCode::NXDomain);
+            assert!(denied.answers.is_empty());
+
+            let len = stream.read_u16().await?;
+            let mut reply = vec![0; usize::from(len)];
+            stream.read_exact(&mut reply).await?;
+            let allowed = Message::from_vec(&reply)?;
+            assert_eq!(allowed.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(allowed.answers.len(), 1);
+            assert_eq!(allowed.answers[0].data, RData::A(A("10.1.2.4".parse()?)));
+            Ok::<_,anyhow::Error>(())
+        }).await;
+        cancel.cancel();
+        worker.await??;
+        result??;
+        Ok(())
+    }
 
     // Windows runner images can exclude dynamic port ranges independently for
     // TCP and UDP. Probe bounded random non-dynamic ports accepted by both
