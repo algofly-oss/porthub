@@ -320,6 +320,34 @@ class ColdBackup(unittest.TestCase):
         self.assertNotEqual(copied.stat().st_ino,component.stat().st_ino,'live state is never hardlinked into a backup')
         original_copy=(backup/'data/mongo/WiredTiger.fixture').read_bytes();self.file.write_bytes(b'new live database writes')
         self.assertEqual((backup/'data/mongo/WiredTiger.fixture').read_bytes(),original_copy)
+    def test_large_mutable_file_is_rehashed_against_stopped_source_before_reuse(self):
+        import native_backup
+        backup = self.root / 'backup'
+        archived = backup / 'data/mongo/WiredTiger.fixture'
+        with (patch.object(native_backup, '_MIN_MUTABLE_STAGE', 1),
+              patch.object(upgrade, 'run') as stop,
+              patch.object(native_backup, 'hash_stopped_source',
+                           wraps=native_backup.hash_stopped_source) as rehash):
+            upgrade.backup_core(self.container, backup)
+        stop.assert_called_once()
+        rehash.assert_called_once()
+        self.assertEqual(archived.read_bytes(), self.file.read_bytes())
+        manifest = json.loads((backup / 'verified.json').read_text())
+        self.assertEqual(manifest['online_staged_bytes'], self.file.stat().st_size)
+        self.assertEqual(manifest['cold_copied_bytes'], 0)
+
+    def test_large_mutable_file_with_different_final_digest_is_copied_from_cold_state(self):
+        import native_backup
+        backup = self.root / 'backup'
+        archived = backup / 'data/mongo/WiredTiger.fixture'
+        with (patch.object(native_backup, '_MIN_MUTABLE_STAGE', 1),
+              patch.object(upgrade, 'run'),
+              patch.object(native_backup, 'hash_stopped_source', return_value='different')):
+            upgrade.backup_core(self.container, backup)
+        self.assertEqual(archived.read_bytes(), self.file.read_bytes())
+        manifest = json.loads((backup / 'verified.json').read_text())
+        self.assertEqual(manifest['cold_copied_bytes'], self.file.stat().st_size)
+
     def test_blob_changed_with_same_size_and_mtime_is_recopied_from_cold_state(self):
         component=self.component();before=component.stat();backup=self.root/'backup'
         def stop(_arguments):
