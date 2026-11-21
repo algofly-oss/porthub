@@ -26,7 +26,18 @@ pub(crate) struct Bridge {
     changes: Mutex<()>,
     indexes: OnceCell<()>,
     edge: OnceCell<reqwest::Client>,
-    workers: Mutex<HashMap<(ObjectId, u16), CancellationToken>>,
+    workers: std::sync::Mutex<HashMap<(ObjectId, u16), Worker>>,
+}
+struct Worker {
+    stop: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Bridge {
+    fn workers(&self) -> std::sync::MutexGuard<'_, HashMap<(ObjectId, u16), Worker>> {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
 }
 const PROTOCOL: &str = "porthub-forward-v1";
 const BASE: &str = "http://localhost/forwards";
@@ -253,6 +264,7 @@ async fn public_worker(
     id: ObjectId,
     port: u16,
     stop: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut sessions = tokio::task::JoinSet::new();
     loop {
@@ -262,6 +274,7 @@ async fn public_worker(
             upgrade(http, format!("{BASE}/public/{id}/{port}/accept")).await
         };
         let result = tokio::select! {biased;_=stop.cancelled()=>break, result=accept=>result};
+        ready.store(result.is_ok(), std::sync::atomic::Ordering::Release);
         match result {
             Ok(Some(stream)) if sessions.len() < 32 => {
                 if let Some(grant) = app
@@ -314,18 +327,29 @@ pub async fn activate(app: &Arc<App>, owner: ObjectId, id: ObjectId) -> Result<(
         {
             let port = number(mapping, "gatewayPort")?;
             ensure!(app.collection("connections").count_documents(doc!{"forward_reservation":id,"forward_owner":owner,"external_port":i32::from(port)}).await?==1,"port reservation missing");
-            let mut workers = app.forward_bridge.workers.lock().await;
             policy(app, port, true).await?;
             http.post(format!("{BASE}/public/{id}/{port}"))
                 .timeout(Duration::from_secs(3))
                 .send()
                 .await?
                 .error_for_status()?;
-            workers.entry((id, port)).or_insert_with(|| {
+            let mut workers = app.forward_bridge.workers();
+            let worker = workers.entry((id, port)).or_insert_with(|| {
                 let stop = CancellationToken::new();
-                tokio::spawn(public_worker(app.clone(), owner, id, port, stop.clone()));
-                stop
+                let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                tokio::spawn(public_worker(
+                    app.clone(),
+                    owner,
+                    id,
+                    port,
+                    stop.clone(),
+                    ready.clone(),
+                ));
+                Worker { stop, ready }
             });
+            worker
+                .ready
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
     private::signal(app, owner);
@@ -338,10 +362,9 @@ pub async fn deactivate(app: &App, owner: ObjectId, id: ObjectId) -> Result<()> 
         .find_one(doc! {"_id":id,"workspace_id":owner})
         .await?;
     private::signal(app, owner);
-    let mut workers = app.forward_bridge.workers.lock().await;
-    workers.retain(|(entry, _), stop| {
+    app.forward_bridge.workers().retain(|(entry, _), worker| {
         if *entry == id {
-            stop.cancel();
+            worker.stop.cancel();
             false
         } else {
             true
@@ -393,10 +416,21 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
         .map(|m| number(m, "gatewayPort"))
         .collect::<Result<_>>()?;
     let grant = app.forward_registry.get(&id.to_hex());
-    let ready = grant
+    let attached = grant
         .as_ref()
         .is_some_and(|g| ports.iter().all(|p| g.is_listening(*p)));
-    let reason = if !ready {
+    let edge_ready = !public || {
+        let workers = app.forward_bridge.workers();
+        ports.iter().all(|p| {
+            workers
+                .get(&(id, *p))
+                .is_some_and(|worker| worker.ready.load(std::sync::atomic::Ordering::Acquire))
+        })
+    };
+    let ready = attached && edge_ready;
+    let reason = if !edge_ready {
+        Some("Waiting for the public gateway listener")
+    } else if !attached {
         Some("Waiting for the saved SSH command to connect")
     } else {
         None
@@ -530,14 +564,7 @@ async fn recover_public(app: &Arc<App>) -> Result<()> {
         .into_iter()
         .filter_map(|(id, p)| ObjectId::parse_str(id).ok().map(|id| (id, p)))
         .collect();
-    let workers: HashSet<_> = app
-        .forward_bridge
-        .workers
-        .lock()
-        .await
-        .keys()
-        .copied()
-        .collect();
+    let workers: HashSet<_> = app.forward_bridge.workers().keys().copied().collect();
     let stale: HashSet<_> = existing
         .union(&workers)
         .filter(|key| !wanted.contains_key(key))
@@ -553,18 +580,14 @@ async fn recover_public(app: &Arc<App>) -> Result<()> {
         {
             continue;
         }
-        app.forward_bridge
-            .workers
-            .lock()
-            .await
-            .retain(|(entry, _), stop| {
-                if *entry == id {
-                    stop.cancel();
-                    false
-                } else {
-                    true
-                }
-            });
+        app.forward_bridge.workers().retain(|(entry, _), worker| {
+            if *entry == id {
+                worker.stop.cancel();
+                false
+            } else {
+                true
+            }
+        });
         http.delete(format!("{BASE}/public/{id}"))
             .timeout(Duration::from_secs(3))
             .send()
@@ -591,8 +614,8 @@ pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
             if app.config.edge_socket.is_some(){if let Err(err)=recover_public(&app).await{tracing::warn!(%err,"SSH forward edge recovery will retry");}}
         }}
     }
-    for (_, stop) in app.forward_bridge.workers.lock().await.drain() {
-        stop.cancel();
+    for (_, worker) in app.forward_bridge.workers().drain() {
+        worker.stop.cancel();
     }
 }
 
@@ -654,7 +677,7 @@ mod recovery_tests {
             app.collection(COLLECTION).update_one(doc!{"_id":id},doc!{"$set":{"state":"deleting"}}).await?;
             reap(&app).await?;assert!(list().await?.is_empty());
             assert!(TcpListener::bind(("0.0.0.0",port)).await.is_ok());
-            assert!(app.forward_bridge.workers.lock().await.is_empty());
+            assert!(app.forward_bridge.workers().is_empty());
             assert_eq!(app.collection("connections").count_documents(doc!{"forward_owner":owner}).await?,0);
             Ok::<_,anyhow::Error>(())
         }.await;
