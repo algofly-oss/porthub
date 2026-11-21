@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { IconCopy, IconPlus, IconTrash } from "@tabler/icons-react";
+import {
+  IconCopy,
+  IconLock,
+  IconPlus,
+  IconTrash,
+  IconWorld,
+} from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
 import {
@@ -47,11 +53,17 @@ async function request(suffix = "", method = "GET", body, signal) {
   return data;
 }
 
-function Commands({ credentials }) {
+function Commands({ credentials, panelId }) {
   const [client, setClient] = useState(() =>
     navigator.userAgent.includes("Windows") ? "powershell" : "openssh",
   );
   const [draft, setDraft] = useState(null);
+  const editor = useRef(null);
+  const resetDraft = () => {
+    setDraft(null);
+    editor.current?.setSelectionRange(0, 0);
+    if (editor.current) editor.current.scrollLeft = 0;
+  };
   let generated, problem;
   try {
     generated = forwardCommand(credentials, client);
@@ -70,8 +82,12 @@ function Commands({ credentials }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return (
-    <div className="mt-3 space-y-3 rounded-lg border border-border bg-background p-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <section
+      id={panelId}
+      aria-labelledby={`${panelId}-label`}
+      className="mt-3 space-y-3 rounded-lg border border-border bg-background p-3 sm:p-4"
+    >
+      <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <label className={label}>
           Command for
           <select
@@ -79,55 +95,84 @@ function Commands({ credentials }) {
             value={client}
             onChange={(e) => {
               setClient(e.target.value);
-              setDraft(null);
+              resetDraft();
             }}
           >
             <option value="openssh">Linux / macOS · OpenSSH</option>
             <option value="powershell">Windows · PowerShell / OpenSSH</option>
           </select>
         </label>
+        <Button
+          className="min-h-11 self-end sm:w-auto"
+          disabled={Boolean(problem) || !command.trim()}
+          onClick={async () => {
+            try {
+              await copyText(command);
+              toast.success("SSH command copied");
+            } catch {
+              toast.error("Select and copy the SSH command.");
+            }
+          }}
+        >
+          <IconCopy size={16} aria-hidden="true" />
+          Copy command
+        </Button>
       </div>
       {problem ? (
-        <p role="alert">{problem}</p>
+        <p
+          id={`${panelId}-label`}
+          role="alert"
+          className="text-sm text-destructive"
+        >
+          {problem}
+        </p>
       ) : (
         <>
-          <label className={label}>
-            SSH command
+          <div>
+            <div className="flex min-h-8 flex-wrap items-center justify-between gap-2">
+              <label
+                className={label}
+                id={`${panelId}-label`}
+                htmlFor={`${panelId}-editor`}
+              >
+                SSH command
+              </label>
+              {draft !== null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    resetDraft();
+                    editor.current?.focus();
+                  }}
+                >
+                  Reset edits
+                </Button>
+              )}
+            </div>
             <textarea
-              className="mt-1 block min-h-[7rem] w-full resize-y rounded-lg border border-input bg-surface p-3 font-mono text-xs leading-5 focus-visible:outline-primary"
-              aria-label="SSH command"
+              ref={editor}
+              id={`${panelId}-editor`}
+              aria-describedby={`${panelId}-help`}
+              className="block w-full min-w-0 resize-y rounded-lg border border-input bg-surface p-3 font-mono text-xs leading-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              rows={3}
+              wrap="off"
+              dir="ltr"
+              autoCapitalize="off"
+              autoComplete="off"
               spellCheck={false}
               value={command}
               onChange={(e) => setDraft(e.target.value)}
             />
-          </label>
-          <p className="text-xs text-muted-foreground">
-            Paste into a terminal on the computer sharing or receiving the port.
-            Keep it running. This command contains the private key for this
-            forward.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              disabled={!command.trim()}
-              onClick={async () => {
-                try {
-                  await copyText(command);
-                  toast.success("SSH command copied");
-                } catch {
-                  toast.error("Select and copy the command above.");
-                }
-              }}
-            >
-              <IconCopy size={16} />
-              Copy command
-            </Button>
-            {draft !== null && (
-              <Button variant="ghost" size="sm" onClick={() => setDraft(null)}>
-                Reset edits
-              </Button>
-            )}
           </div>
+          <p
+            id={`${panelId}-help`}
+            className="max-w-prose text-xs text-muted-foreground"
+          >
+            Paste the command on the computer sharing or receiving the port,
+            then keep it running. Share it only with the person running the
+            forward. It contains a private key.
+          </p>
         </>
       )}
       <details className="text-sm">
@@ -151,7 +196,7 @@ function Commands({ credentials }) {
           Download OpenSSH key
         </Button>
       </details>
-    </div>
+    </section>
   );
 }
 
@@ -210,7 +255,16 @@ function Builder({ machines, groups, onCreated, onCancel }) {
   const [selected, setSelected] = useState([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [accessRequired, setAccessRequired] = useState(false);
+  const accessChoices = useRef(null);
   const remote = mappings.some((m) => m.direction === "remote");
+  const recipients = [
+    ...machines.map((machine) => ({ ...machine, key: "m:" + machine.id })),
+    ...groups.map((group) => ({ ...group, key: "g:" + group.id })),
+  ];
+  const access = recipients.filter((recipient) =>
+    selected.includes(recipient.key),
+  );
   const update = (index, key, value) =>
     setMappings((ms) =>
       ms.map((m, i) => (i === index ? { ...m, [key]: value } : m)),
@@ -218,8 +272,17 @@ function Builder({ machines, groups, onCreated, onCancel }) {
   async function submit(e) {
     e.preventDefault();
     if (saving) return;
-    setSaving(true);
     setError("");
+    if (remote && !isPublic && !access.length) {
+      setAccessRequired(true);
+      const choices = accessChoices.current;
+      (
+        choices?.querySelector('input[type="checkbox"]') ??
+        choices?.querySelector("input")
+      )?.focus();
+      return;
+    }
+    setSaving(true);
     try {
       const rows = mappings.flatMap((m) => {
         const local = expandPortRange(m.ports);
@@ -243,19 +306,16 @@ function Builder({ machines, groups, onCreated, onCancel }) {
       });
       if (rows.length > 32)
         throw new Error("Choose up to 32 port mappings per command.");
-      if (remote && !isPublic && !selected.length)
-        throw new Error(
-          "Select at least one machine or group for private access.",
-        );
-      const access = remote && !isPublic ? selected : [];
+      const scope =
+        remote && !isPublic ? access.map((recipient) => recipient.key) : [];
       const result = await request("", "POST", {
         name: name.trim(),
         public: remote && isPublic,
         mappings: rows,
-        machineIds: access
+        machineIds: scope
           .filter((v) => v.startsWith("m:"))
           .map((v) => v.slice(2)),
-        groupIds: access
+        groupIds: scope
           .filter((v) => v.startsWith("g:"))
           .map((v) => v.slice(2)),
       });
@@ -267,189 +327,252 @@ function Builder({ machines, groups, onCreated, onCancel }) {
     }
   }
   return (
-    <form onSubmit={submit} className="max-w-4xl space-y-5">
-      <label className={label}>
-        Forward name
-        <input
-          autoFocus
-          required
-          maxLength={80}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className={field}
-          placeholder="e.g. Support laptop"
-        />
-      </label>
-      {mappings.map((m, index) => (
-        <fieldset key={index} className="border-t border-border pt-3">
-          <legend className="pr-2 text-sm font-semibold">
-            {mappings.length === 1
-              ? "Port mapping"
-              : `Port mapping ${index + 1}`}
-          </legend>
-          <div className="grid items-end gap-3 sm:grid-cols-2">
-            <label className={label}>
-              Direction
-              <select
-                aria-label="Direction"
-                className={field}
-                value={m.direction}
-                onChange={(e) => {
-                  const direction = e.target.value;
-                  setMappings((ms) =>
-                    ms.map((row, i) =>
-                      i === index
-                        ? {
-                            ...row,
-                            direction,
-                            ports:
-                              direction === "local" && row.ports === "22"
-                                ? "2222"
-                                : row.ports,
-                          }
-                        : row,
-                    ),
-                  );
-                }}
-              >
-                {Object.entries(directionNames).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className={label}>
-              {m.direction === "remote"
-                ? "Port on this computer"
-                : "Local listening port"}
-              <input
-                className={field}
-                value={m.ports}
-                required
-                placeholder="22 or 8000-8003"
-                onChange={(e) => update(index, "ports", e.target.value)}
-              />
-            </label>
-            {m.direction === "local" && (
-              <>
+    <form onSubmit={submit} className="max-w-6xl">
+      <div className="grid items-start gap-x-8 gap-y-7 xl:grid-cols-[minmax(0,1.65fr)_minmax(17rem,1fr)]">
+        <div className="min-w-0 space-y-5">
+          <label className={label}>
+            Forward name
+            <input
+              autoFocus
+              required
+              maxLength={80}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className={field}
+              placeholder="e.g. Support laptop"
+            />
+          </label>
+          {mappings.map((m, index) => (
+            <fieldset key={index} className="border-t border-border pt-3">
+              <legend className="pr-2 text-sm font-semibold">
+                {mappings.length === 1
+                  ? "Port mapping"
+                  : `Port mapping ${index + 1}`}
+              </legend>
+              <div className="grid items-start gap-3 sm:grid-cols-2">
                 <label className={label}>
-                  Destination machine
+                  Direction
                   <select
-                    aria-label="Destination machine"
+                    aria-label="Direction"
                     className={field}
-                    value={m.machine}
-                    required
-                    onChange={(e) => update(index, "machine", e.target.value)}
+                    value={m.direction}
+                    onChange={(e) => {
+                      const direction = e.target.value;
+                      setMappings((ms) =>
+                        ms.map((row, i) =>
+                          i === index
+                            ? {
+                                ...row,
+                                direction,
+                                ports:
+                                  direction === "local" && row.ports === "22"
+                                    ? "2222"
+                                    : row.ports,
+                              }
+                            : row,
+                        ),
+                      );
+                    }}
                   >
-                    <option value="">Choose a machine</option>
-                    {machines.map((x) => (
-                      <option key={x.id} value={x.id}>
-                        {x.name}
+                    {Object.entries(directionNames).map(([k, v]) => (
+                      <option key={k} value={k}>
+                        {v}
                       </option>
                     ))}
                   </select>
                 </label>
                 <label className={label}>
-                  Destination port
+                  {m.direction === "remote"
+                    ? "Port on this computer"
+                    : "Local listening port"}
                   <input
-                    required
                     className={field}
-                    value={m.service}
-                    onChange={(e) => update(index, "service", e.target.value)}
+                    value={m.ports}
+                    required
+                    aria-describedby={`forward-port-help-${index}`}
+                    placeholder="22 or 8000-8003"
+                    onChange={(e) => update(index, "ports", e.target.value)}
                   />
+                  <span
+                    id={`forward-port-help-${index}`}
+                    className="mt-1 block text-xs text-muted-foreground"
+                  >
+                    A port or range, such as 22 or 8000–8003.
+                  </span>
                 </label>
-              </>
-            )}
-          </div>
-          {mappings.length > 1 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-1"
-              onClick={() =>
-                setMappings((ms) => ms.filter((_, i) => i !== index))
-              }
-            >
-              Remove mapping
-            </Button>
-          )}
-        </fieldset>
-      ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={mappings.length >= 32}
-        onClick={() => setMappings((ms) => [...ms, emptyMapping()])}
-      >
-        <IconPlus size={16} />
-        Add mapping
-      </Button>
-      {remote && (
-        <fieldset className="border-t border-border pt-3">
-          <legend className="pr-2 text-sm font-semibold">
-            Who can reach the shared ports?
-          </legend>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="radio"
-              checked={!isPublic}
-              onChange={() => setPublic(false)}
-            />
-            Selected PortHub machines and groups
-          </label>
-          {!isPublic && (
-            <div className="my-2 max-h-44 overflow-y-auto rounded-lg border border-input px-3 py-1">
-              {[
-                ...machines.map((x) => ({ ...x, key: "m:" + x.id })),
-                ...groups.map((x) => ({ ...x, key: "g:" + x.id })),
-              ].map((x) => (
-                <label
-                  key={x.key}
-                  className="flex min-h-9 items-center gap-2 text-sm"
+                {m.direction === "local" && (
+                  <>
+                    <label className={label}>
+                      Destination machine
+                      <select
+                        aria-label="Destination machine"
+                        className={field}
+                        value={m.machine}
+                        required
+                        onChange={(e) =>
+                          update(index, "machine", e.target.value)
+                        }
+                      >
+                        <option value="">Choose a machine</option>
+                        {machines.map((x) => (
+                          <option key={x.id} value={x.id}>
+                            {x.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className={label}>
+                      Destination port
+                      <input
+                        required
+                        className={field}
+                        value={m.service}
+                        onChange={(e) =>
+                          update(index, "service", e.target.value)
+                        }
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              {mappings.length > 1 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mt-1"
+                  onClick={() =>
+                    setMappings((ms) => ms.filter((_, i) => i !== index))
+                  }
                 >
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(x.key)}
-                    onChange={(e) =>
-                      setSelected((s) =>
-                        e.target.checked
-                          ? [...s, x.key]
-                          : s.filter((k) => k !== x.key),
-                      )
-                    }
-                  />
-                  {x.name}
-                  {x.key.startsWith("g:") && (
-                    <span className="text-xs text-muted-foreground">Group</span>
-                  )}
-                </label>
-              ))}
-              {!machines.length && !groups.length && (
-                <p className="py-2 text-sm text-muted-foreground">
-                  Register a machine or create a group to allow private access.
-                </p>
+                  Remove mapping
+                </Button>
               )}
-            </div>
-          )}
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input
-              type="radio"
-              checked={isPublic}
-              onChange={() => setPublic(true)}
-            />
-            Anyone with the public address and port
-          </label>
-        </fieldset>
-      )}
+            </fieldset>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={mappings.length >= 32}
+            onClick={() => setMappings((ms) => [...ms, emptyMapping()])}
+          >
+            <IconPlus size={16} />
+            Add mapping
+          </Button>
+        </div>
+        {remote && (
+          <fieldset
+            ref={accessChoices}
+            className="min-w-0 rounded-xl border border-border bg-background/50 px-4 pb-4 pt-2"
+          >
+            <legend className="px-1.5 text-sm font-semibold">
+              Who can reach the shared ports?
+            </legend>
+            <label className="flex min-h-11 cursor-pointer items-start gap-2 py-2 text-sm">
+              <input
+                type="radio"
+                name="forward-access"
+                checked={!isPublic}
+                aria-describedby="forward-private-help"
+                className="mt-1 accent-primary"
+                onChange={() => setPublic(false)}
+              />
+              <span>
+                <span className="font-medium">Private network</span>
+                <span
+                  id="forward-private-help"
+                  className="mt-0.5 block text-xs text-muted-foreground"
+                >
+                  Allow the PortHub machines and groups you select below.
+                </span>
+              </span>
+            </label>
+            {!isPublic && (
+              <div className="mx-0.5 mb-3 mt-1 rounded-lg border border-input">
+                <p
+                  className="border-b border-border px-3 py-2 text-xs font-medium"
+                  role="status"
+                >
+                  {access.length} selected
+                </p>
+                <div className="max-h-44 divide-y divide-border overflow-y-auto px-3">
+                  {recipients.map((recipient) => (
+                    <label
+                      key={recipient.key}
+                      className="flex min-h-11 cursor-pointer items-center gap-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="shrink-0 accent-primary"
+                        checked={selected.includes(recipient.key)}
+                        onChange={(e) => {
+                          setAccessRequired(false);
+                          setSelected((current) =>
+                            e.target.checked
+                              ? [...current, recipient.key]
+                              : current.filter((key) => key !== recipient.key),
+                          );
+                        }}
+                      />
+                      <span className="min-w-0 break-words">
+                        {recipient.name}
+                      </span>
+                      {recipient.key.startsWith("g:") && (
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          Group
+                        </span>
+                      )}
+                    </label>
+                  ))}
+                  {!recipients.length && (
+                    <p className="py-3 text-sm text-muted-foreground">
+                      Register a machine or create a group to allow private
+                      access.
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+            {!isPublic && accessRequired && (
+              <p
+                className="mb-3 text-sm text-red-600 dark:text-red-400"
+                role="alert"
+              >
+                Select at least one machine or group for private access.
+              </p>
+            )}
+            <label className="flex min-h-11 cursor-pointer items-start gap-2 border-t border-border pt-3 text-sm">
+              <input
+                type="radio"
+                name="forward-access"
+                checked={isPublic}
+                aria-describedby="forward-public-help"
+                className="mt-1 accent-primary"
+                onChange={() => {
+                  setAccessRequired(false);
+                  setPublic(true);
+                }}
+              />
+              <span>
+                <span className="font-medium">Public internet</span>
+                <span
+                  id="forward-public-help"
+                  className="mt-0.5 block text-xs text-muted-foreground"
+                >
+                  Anyone with the public address and port can connect.
+                </span>
+              </span>
+            </label>
+          </fieldset>
+        )}
+      </div>
       {error && (
-        <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+        <p className="mt-4 text-sm text-red-600 dark:text-red-400" role="alert">
           {error}
         </p>
       )}
-      <div className="flex gap-2">
+      <div className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4">
         <Button disabled={saving} type="submit">
           {saving ? "Creating…" : "Generate command"}
         </Button>
@@ -615,7 +738,12 @@ function SavedForwards() {
           />
         ) : !data.entries.length ? (
           <div className="border-t border-border py-6 text-sm text-muted-foreground">
-            No saved forwards yet.
+            <p className="font-medium text-foreground">
+              No saved forwards yet.
+            </p>
+            <p className="mt-1">
+              Create a forward to get a reusable SSH command.
+            </p>
           </div>
         ) : (
           <ul className="divide-y divide-border border-t border-border">
@@ -626,17 +754,44 @@ function SavedForwards() {
                     <h3 className="break-words text-sm font-semibold">
                       {entry.name}
                     </h3>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {entry.status?.ready
-                        ? "Connected"
-                        : entry.status?.reason || "Waiting for SSH connection"}
-                    </p>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                      <p role="status" className="flex items-center gap-1.5">
+                        <span
+                          aria-hidden="true"
+                          className={`h-2 w-2 shrink-0 rounded-full ${entry.status?.ready ? "bg-emerald-500" : "border border-current text-muted-foreground"}`}
+                        />
+                        {entry.status?.ready
+                          ? "Connected"
+                          : entry.status?.reason ||
+                            "Waiting for SSH connection"}
+                      </p>
+                      <p className="flex items-center gap-1.5 text-muted-foreground">
+                        {entry.public ? (
+                          <IconWorld size={14} aria-hidden="true" />
+                        ) : (
+                          <IconLock size={14} aria-hidden="true" />
+                        )}
+                        {entry.public
+                          ? "Public internet"
+                          : entry.mappings.some(
+                                (mapping) => mapping.direction === "remote",
+                              )
+                            ? "Private network"
+                            : "Local access"}
+                      </p>
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-1">
                     <Button
                       variant="outline"
                       size="sm"
                       disabled={busy}
+                      aria-expanded={shown?.id === entry.id}
+                      aria-controls={
+                        shown?.id === entry.id
+                          ? `port-forward-command-${entry.id}`
+                          : undefined
+                      }
                       onClick={() =>
                         shown?.id === entry.id
                           ? setShown(null)
@@ -693,7 +848,11 @@ function SavedForwards() {
                   </div>
                 )}
                 {shown?.id === entry.id && (
-                  <Commands key={entry.id} credentials={shown.credentials} />
+                  <Commands
+                    key={entry.id}
+                    panelId={`port-forward-command-${entry.id}`}
+                    credentials={shown.credentials}
+                  />
                 )}
               </li>
             ))}
