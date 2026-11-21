@@ -61,6 +61,7 @@ porthub-egress = { path = "../porthub-egress", default-features = false }
 
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 flate2 = "1"
 tar = "0.4"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
