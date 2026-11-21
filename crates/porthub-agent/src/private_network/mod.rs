@@ -106,6 +106,10 @@ mod dns_windows;
 #[cfg(feature = "private-sparse")]
 mod authority_clock;
 #[cfg(feature = "private-sparse")]
+pub(crate) fn logical_request_expired(error: &anyhow::Error) -> bool {
+    error.is::<authority_clock::RequestExpired>()
+}
+#[cfg(feature = "private-sparse")]
 pub(crate) mod gateway_time;
 #[cfg(feature = "private-sparse")]
 pub(crate) mod clock_identity;
@@ -134,6 +138,9 @@ mod native_desktop_lifecycle_fixture;
 mod native_resolver_lifecycle_fixture;
 
 mod native_owner;
+pub(crate) fn native_route_conflict(error: &anyhow::Error) -> bool {
+    error.is::<native_owner::Conflict>()
+}
 
 #[cfg(all(feature = "private-stream", feature = "private-sparse"))]
 mod virtual_hosts;

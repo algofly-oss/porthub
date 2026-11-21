@@ -16,6 +16,8 @@ pub struct Report {
     pub control: String,
     pub public_tunnel: String,
     pub private_network: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_private_failures: Vec<crate::private_worker_diagnostics::FailureRecord>,
     pub relay: String,
     pub advice: Vec<&'static str>,
 }
@@ -51,6 +53,13 @@ pub async fn diagnose(path: &Path) -> Result<Report> {
         control: "not tested".into(),
         public_tunnel: "not observed".into(),
         private_network: "not observed".into(),
+        recent_private_failures: if private {
+            crate::private_worker_diagnostics::recent(path).unwrap_or_default()
+        } else {
+            crate::unified::load(path, control.profile()).ok().flatten()
+                .and_then(|module| crate::private_worker_diagnostics::recent(&module.private_profile).ok())
+                .unwrap_or_default()
+        },
         relay: "not observed; requires an authorized live peer".into(),
         advice: vec![],
     };

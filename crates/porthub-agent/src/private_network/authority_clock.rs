@@ -358,3 +358,13 @@ mod tests {
         assert!(NativeClock.elapsed_since_boot().unwrap() > before);
     }
 }
+
+#[cfg(test)]
+#[test]
+fn private_worker_diagnostics_distinguish_logical_and_suspend_deadlines() {
+    let make = |e: anyhow::Error| crate::private_worker_diagnostics::FailureRecord::from_error(&e.context("sensitive endpoint"));
+    assert_eq!(make(RequestExpired.into()).reason, "private authority request exceeded its validity window");
+    assert_eq!(make(ExpiredDuringSuspend.into()).reason, "private authority request expired during system sleep");
+    assert_eq!(make(anyhow::anyhow!("server authority expired")).reason, "private policy expired; check clock synchronization and gateway connectivity");
+    assert!(!make(anyhow::anyhow!("logical authority request expired")).reason.contains("validity window"));
+}

@@ -646,7 +646,13 @@ async fn run_authorized_worker(
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
         finished=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{if stream_owner_completed(guarded_generation,work.is_cancelled(),finished)?{break;}},
         finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
-        finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(if error.downcast_ref::<PrivateStage>().is_some(){error}else{error.context(PrivateStage::Background)}),_=>anyhow::bail!("private background task stopped")}},
+        finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {
+            Some(Ok(Ok(()))) if work.is_cancelled() => break,
+            Some(Ok(Err(error))) => return Err(if error.downcast_ref::<PrivateStage>().is_some() { error } else { error.context(PrivateStage::Background) }),
+            Some(Err(join)) if join.is_panic() => anyhow::bail!("private background task panicked"),
+            Some(Err(join)) if join.is_cancelled() => anyhow::bail!("private background task was cancelled"),
+            _ => anyhow::bail!("private background task stopped"),
+        }},
         event=input.recv()=>match event {
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
             Some(Event::VirtualHosts(list))=>{
@@ -1701,11 +1707,9 @@ async fn run_authorized_worker(
         policy.revoke();
         sparse_handle.revoke_all();
     }
-    if let Err(error) = &result {
-        private_status.last_failure = Some(crate::runtime::PrivateWorkerFailure {
-            stage: crate::unified::private_failure_stage(error).to_owned(),
-            reason: crate::unified::private_failure_reason(error).to_owned(),
-        });
+    let failure = result.as_ref().err().map(crate::private_worker_diagnostics::FailureRecord::from_error);
+    if let Some(event) = &failure {
+        private_status.last_failure = Some(event.status());
     }
     if authority_expired || private_status.native_repair.is_some() || result.is_err() {
         private_status.relay_ready = Some(false);
@@ -1732,7 +1736,16 @@ async fn run_authorized_worker(
     while stream_owners.join_next().await.is_some() {}
     while guarded_owners.join_next().await.is_some() {}
     // Drain the final counter tail only after every carrier producer stopped.
-    let final_traffic=traffic.clone();let _=tokio::task::spawn_blocking(move||final_traffic.sample()).await;
+    let final_traffic = traffic.clone();
+    let failure = failure.map(|event| (path.clone(), event));
+    let _ = tokio::task::spawn_blocking(move || {
+        final_traffic.sample();
+        if let Some((path, event)) = failure {
+            if crate::private_worker_diagnostics::record(&path, event).is_err() {
+                tracing::debug!("could not save local private worker failure history");
+            }
+        }
+    }).await;
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
