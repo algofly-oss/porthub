@@ -1154,8 +1154,14 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    porthub_agent::private_network::linux_handoff::initialize()?;
+    run_agent()
+}
+
 #[tokio::main(worker_threads = 2)]
-async fn main() -> Result<()> {
+async fn run_agent() -> Result<()> {
     let raw_args: Vec<_> = std::env::args_os().collect();
     // Previously installed systemd and launchd jobs restart their process on
     // failure. Acknowledge their exact startup prefix and exit before setup.
@@ -1181,6 +1187,8 @@ async fn main() -> Result<()> {
         Some(Command::WindowsServiceHost { profile, .. }) => Some(profile),
         _ => None,
     };
+    #[cfg(target_os = "linux")]
+    porthub_agent::private_network::linux_handoff::bound_recovery_window(profile_to_configure.map(|path|path.as_path()))?;
     if let Some(profile) = profile_to_configure {
         if porthub_agent::private_network::is_profile(profile)? {
             logs.configure_private(&porthub_agent::private_profile::Profile::load(profile)?);
@@ -1199,6 +1207,8 @@ async fn main() -> Result<()> {
     let signal_cancel = cancel.clone();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
+        #[cfg(target_os = "linux")]
+        porthub_agent::private_network::linux_handoff::shutting_down();
         signal_cancel.cancel();
     });
     let result = match args.command {

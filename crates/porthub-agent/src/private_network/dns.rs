@@ -339,6 +339,42 @@ impl Server {
         let (socket,tcp)=super::dns_windows::bind(std::net::SocketAddrV4::new(address.0,address.1))?;
         Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default(), #[cfg(test)] fixture_observer:None })
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn socket_fds(&self) -> (std::os::fd::BorrowedFd<'_>, std::os::fd::BorrowedFd<'_>) {
+        use std::os::fd::AsFd;
+        (self.socket.as_fd(), self.tcp.as_fd())
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_retained(own: Ipv4Addr, udp: std::fs::File, tcp: std::fs::File) -> Result<Self> {
+        use std::os::fd::OwnedFd;
+        use socket2::{Domain, Socket, Type};
+        use std::os::fd::AsRawFd;
+        fn namespace(socket: &Socket) -> Result<u64> {
+            let mut cookie = 0u64;
+            let mut len = std::mem::size_of_val(&cookie) as libc::socklen_t;
+            ensure!(unsafe {libc::getsockopt(socket.as_raw_fd(),libc::SOL_SOCKET,libc::SO_NETNS_COOKIE,
+                std::ptr::addr_of_mut!(cookie).cast(),&mut len)}==0 && len as usize == std::mem::size_of_val(&cookie),
+                "private DNS socket namespace unavailable");
+            Ok(cookie)
+        }
+        let udp = Socket::from(OwnedFd::from(udp));
+        let tcp = Socket::from(OwnedFd::from(tcp));
+        let current = namespace(&Socket::new(Domain::IPV4,Type::DGRAM,None)?)?;
+        ensure!(namespace(&udp)? == current && namespace(&tcp)? == current,"private DNS socket namespace changed");
+        let address = udp.local_addr()?.as_socket().ok_or_else(|| anyhow::anyhow!("invalid private DNS socket"))?;
+        ensure!(address.is_ipv4() && address.ip() == std::net::IpAddr::V4(own) && address.port() != 0
+            && tcp.local_addr()?.as_socket() == Some(address) && udp.r#type()? == Type::DGRAM
+            && tcp.r#type()? == Type::STREAM && tcp.is_listener()? && udp.peer_addr().is_err(),
+            "retained DNS endpoint changed");
+        udp.set_nonblocking(true)?;
+        tcp.set_nonblocking(true)?;
+        Ok(Self {
+            socket: UdpSocket::from_std(udp.into())?,
+            tcp: TcpListener::from_std(tcp.into())?,
+            zone: Default::default(), upstream: Default::default(),
+            #[cfg(test)] fixture_observer: None,
+        })
+    }
     pub fn port(&self) -> Result<u16> {
         Ok(self.socket.local_addr()?.port())
     }

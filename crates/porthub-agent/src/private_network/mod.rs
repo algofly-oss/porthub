@@ -5,6 +5,8 @@ pub mod controller;
 pub mod device;
 #[cfg(target_os = "linux")]
 mod linux_tcp;
+#[cfg(target_os = "linux")]
+pub mod linux_handoff;
 #[cfg(target_os = "macos")]
 #[path = "device_macos.rs"]
 pub mod device;

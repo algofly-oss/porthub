@@ -210,18 +210,101 @@ fn stage_offline_retirement(profile:&Path,next:Ipv4Addr)->Result<bool>{
     if let Some(previous)=previous.filter(|previous|*previous!=next){quarantine(profile,previous)?;return Ok(true);}
     Ok(false)
 }
+#[cfg(test)]
 pub(super) async fn open(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<Arc<Tun>>{
+    Ok(open_with_dns(profile,name,own,pools,peers).await?.0)
+}
+
+#[cfg(target_os = "linux")]
+fn retained(profile: &Path, own: Ipv4Addr) -> Result<Option<(super::device::RetainedLink, std::fs::File, super::dns::Server)>> {
+    use std::os::unix::fs::FileExt;
+    let Some(stored) = super::linux_handoff::take() else { return Ok(None); };
+    let checked = (move || {
+        let (_,record) = read(profile)?;
+        ensure!(record.repair.is_none() && !record.retired.contains(&own), "previous private owner requires retirement");
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let metadata = stored.state.metadata()?;
+        let fd = stored.state.as_raw_fd();
+        ensure!(metadata.is_file() && metadata.nlink()==0 && metadata.uid()==rustix::process::geteuid().as_raw()
+            && unsafe {libc::fcntl(fd,libc::F_GET_SEALS)} >= 0
+            && std::fs::read_link(format!("/proc/self/fd/{fd}"))?.as_os_str()=="/memfd:porthub-private-routes (deleted)",
+            "invalid private route checkpoint object");
+        let length = metadata.len();
+        ensure!(length > 8 && length <= 1024 * 1024 + 8, "invalid previous route checkpoint size");
+        let mut size=[0u8;8];
+        stored.state.read_exact_at(&mut size,0)?;
+        ensure!(u64::from_le_bytes(size)==length-8,"incomplete previous route checkpoint");
+        let mut data=vec![0u8;length as usize-8];
+        stored.state.read_exact_at(&mut data,8)?;
+        let link = super::device::RetainedLink::import(stored.anchor,&data)?;
+        ensure!(link.matches(&record.binding,record.active.as_ref().filter(|a|a.own==own).and_then(|a|a.pin.as_ref()),own), "previous private assignment no longer matches");
+        let dns = super::dns::Server::from_retained(own,stored.udp,stored.tcp)?;
+        Ok::<_,anyhow::Error>((link,stored.state,dns))
+    })();
+    match checked {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => {
+            super::linux_handoff::clear()?;
+            tracing::debug!(%error,"discarded old private service handles");
+            Ok(None)
+        }
+    }
+}
+
+pub(super) async fn open_with_dns(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<(Arc<Tun>, Option<super::dns::Server>)>{
     let _owner=crate::profile::Lease::acquire(&owner_path(profile)?)?;
+    #[cfg(target_os = "linux")]
+    let mut inherited = retained(profile, own)?;
     if read(profile)?.1.repair.is_some(){repair_under_owner(profile,|pin,own|probe_absent(profile,pin,own))?;}
     if stage_offline_retirement(profile,own)?{repair_under_owner(profile,|pin,own|probe_absent(profile,pin,own))?;}
-    prepare(profile,own,pools)?;
+    if let Err(error) = prepare(profile,own,pools) {
+        #[cfg(target_os = "linux")]
+        if inherited.take().is_some() { super::linux_handoff::clear()?; }
+        return Err(error);
+    }
     if read(profile)?.1.active.as_ref().and_then(|active|active.pin.as_ref()).is_none(){
         let state=path(profile)?;let _journal=crate::profile::Lease::acquire(&state)?;let(path,mut record)=read(profile)?;
         record.active.as_mut().context("source intent missing")?.pin=Some(source::Pin::Intent{name:name.into()});save(&path,&record)?;
     }
     #[cfg(windows)]let result=Tun::open_owned_sparse(profile,name,own,peers,pools).await;
-    #[cfg(not(windows))]let result=async{Tun::preflight_sparse(own,pools,peers).await?;Tun::open(name,own,peers).await}.await;
-    match result{Ok(tun)=>{bind_pin(profile,own,tun.source_pin())?;tun.bind_source_lease(_owner)?;Ok(Arc::new(tun))},Err(error)=>{
+    #[cfg(target_os="macos")]let result=async{Tun::preflight_sparse(own,pools,peers).await?;Tun::open(name,own,peers).await}.await;
+    #[cfg(not(target_os="linux"))]let dns=None;
+    #[cfg(target_os="linux")]
+    let mut dns = None;
+    #[cfg(target_os="linux")]
+    let result = async {
+        let binding = binding(profile)?;
+        if let Some((link,journal,server)) = inherited {
+            match Tun::restore(link,name,own,pools,peers).await {
+                Ok(mut tun) => {
+                    tun.mark_restored();
+                    tun.journal_routes(&binding, Some(journal)).await?;
+                    dns = Some(server);
+                    return Ok(tun);
+                }
+                Err(error) => {
+                    super::linux_handoff::clear()?;
+                    tracing::debug!(%error,"rebuilding changed private link");
+                }
+            }
+        }
+        Tun::preflight_sparse(own,pools,peers).await?;
+        if !super::linux_handoff::available() { return Tun::open(name,own,peers).await; }
+        let restartable = async {
+            let mut tun = Tun::create(name,own,peers,true).await?;
+            tun.journal_routes(&binding,None).await?;
+            Ok::<_,anyhow::Error>(tun)
+        }.await;
+        match restartable {
+            Ok(tun) => Ok(tun),
+            Err(error) => {
+                tracing::debug!(%error,"using exclusive private TUN after restart support was unavailable");
+                Tun::preflight_sparse(own,pools,peers).await?;
+                Tun::open(name,own,peers).await
+            }
+        }
+    }.await;
+    match result{Ok(tun)=>{bind_pin(profile,own,tun.source_pin())?;tun.bind_source_lease(_owner)?;Ok((Arc::new(tun),dns))},Err(error)=>{
         if let Some(conflict)=error.downcast_ref::<Conflict>(){quarantine_scope(profile,own,Some(conflict_scope(&conflict.0,pools,own))).context("unsafe native source must remain quarantined")?;}
         Err(error)
     }}

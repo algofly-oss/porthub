@@ -467,6 +467,11 @@ fn argument(path: &Path) -> Result<String> {
 }
 #[cfg(target_os = "linux")]
 pub fn unit(spec: &Spec) -> Result<String> {
+    linux_unit(spec, true)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_unit(spec: &Spec, preserve_handles: bool) -> Result<String> {
     // systemd rejects these characters in the executable itself even when
     // correctly escaped. Profile arguments can still contain quoted characters.
     anyhow::ensure!(
@@ -487,8 +492,23 @@ pub fn unit(spec: &Spec) -> Result<String> {
     } else {
         "After=network-online.target\nWants=network-online.target\n"
     };
-    Ok(format!("{MARKER}: {}\n[Unit]\nDescription=PortHub machine agent\n{network}StartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\nExecStart=:{} run --profile {}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy={target}\n",spec.identity,argument(&spec.executable)?,argument(&spec.profile)?))
+    let handles = if preserve_handles && !spec.user {
+        "FileDescriptorStoreMax=4\nNotifyAccess=main\n"
+    } else {
+        ""
+    };
+    Ok(format!("{MARKER}: {}\n[Unit]\nDescription=PortHub machine agent\n{network}StartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\n{handles}ExecStart=:{} run --profile {}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy={target}\n",spec.identity,argument(&spec.executable)?,argument(&spec.profile)?))
 }
+/// Exact generated formats previously installed by this agent. This check
+/// covers historical backups as well as the registration being upgraded.
+pub(crate) fn generated_unit(spec: &Spec, bytes: &[u8]) -> Result<bool> {
+    if bytes == unit(spec)?.as_bytes() { return Ok(true); }
+    #[cfg(target_os = "linux")]
+    return Ok(bytes == linux_unit(spec, false)?.as_bytes());
+    #[cfg(not(target_os = "linux"))]
+    Ok(false)
+}
+
 #[cfg(target_os = "macos")]
 pub fn unit(spec: &Spec) -> Result<String> {
     launchd::unit(spec)

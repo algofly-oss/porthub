@@ -703,15 +703,22 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(tun)=&device {
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
-                    let tun=if let Some(sparse)=&snapshot.sparse{
-                        super::native_owner::open(&path,&name,own.ip,&sparse.capture_pools,&routes).await.context(PrivateStage::NativeOwner)?
+                    let (tun, retained_dns)=if let Some(sparse)=&snapshot.sparse{
+                        super::native_owner::open_with_dns(&path,&name,own.ip,&sparse.capture_pools,&routes).await.context(PrivateStage::NativeOwner)?
                     }else{
                         super::native_owner::admit_legacy(&path,own.ip).context(PrivateStage::LegacyAdmission)?;
-                        #[cfg(windows)]{Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,super::native_ownership::HostAdmission::Legacy).await?)}
-                        #[cfg(not(windows))]{Arc::new(Tun::open(&name,own.ip,&routes).await?)}
+                        #[cfg(target_os="linux")]
+                        if super::linux_handoff::take().is_some() { super::linux_handoff::clear()?; }
+                        #[cfg(windows)]let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,super::native_ownership::HostAdmission::Legacy).await?);
+                        #[cfg(not(windows))]let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
+                        (tun,None)
                     };
                     local_address.configured(own.ip)?;
-                    let server=dns::Server::bind(own.ip).await.context(PrivateStage::DnsListener)?;let port=server.port()?;
+                    let server = match retained_dns {
+                        Some(server) => server,
+                        None => dns::Server::bind(own.ip).await.context(PrivateStage::DnsListener)?,
+                    };
+                    let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
                     #[cfg(feature="local-tor")]
                     {
@@ -811,6 +818,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // The bound sockets can queue requests while routes and policy are
                 // installed. Read them only after the authorized zone is ready.
                 if let Some(server) = starting_resolver {
+                    #[cfg(target_os="linux")]
+                    if let Err(error) = device.as_ref().expect("private tunnel initialized").publish(&server) {
+                        tracing::warn!(%error,"private service descriptors unavailable for next restart");
+                    }
                     tasks.spawn(server.serve(work.clone()));
                 }
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();

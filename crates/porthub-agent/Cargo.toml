@@ -89,6 +89,7 @@ porthub-edge = { path = "../porthub-edge" }
 porthub-runtime = { path = "../porthub-runtime" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["net"] }
 nlink = "0.33"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 x11rb = { version = "0.13", default-features = false }
