@@ -15,6 +15,7 @@ tests = {
     "porthub_agent": [
         "private_network::interfaces::tests::kernel_events_refresh_underlay_addresses_and_ignore_owned_overlay_links",
         "private_network::interfaces::tests::a_vpn_route_to_the_gateway_can_carry_relay_traffic_without_becoming_a_direct_candidate",
+        "private_network::device::source_recovery_tests::recovers_the_owned_source_and_link_after_external_changes",
         "private_network::device::vpn_default_tests::split_default_equivalence_preserves_host_collisions_and_native_routes",
         "outbound::namespace_tests::source_policy_interface_changes_and_gateway_metrics_are_respected",
     ],

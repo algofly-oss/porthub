@@ -577,7 +577,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result:Result<()>=async {loop {
+    let result = loop {
+        let run: Result<()> = async {loop {
         check_installed_authority(&mut policy, installed_authority.as_ref())?;
         if !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
         tokio::select! {
@@ -1545,6 +1546,19 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
+        #[cfg(target_os = "linux")]
+        if run.as_ref().is_err_and(|e| e.is::<super::device::LinkDown>() && !e.is::<PrivateStage>())
+            && sparse_handle.enabled() && route_events_open && device.is_some()
+            && sparse_authority.is_some() && !work.is_cancelled()
+        {
+            // An inbound datagram raced the kernel link-change notification.
+            // Drop that datagram and wake the normal ownership/route audit.
+            // The next iteration rechecks authority before processing any traffic.
+            route_events.mark_changed();
+            continue;
+        }
+        break run;
+    };
     cold_datagrams.observe(None); // revoke retained payloads AND final carrier permits before teardown
     #[cfg(all(target_os="linux",feature="private-sparse"))]
     pending_provider.observe(None);
