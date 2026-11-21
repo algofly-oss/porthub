@@ -491,6 +491,8 @@ async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstrea
 }
 #[derive(Default)]
 pub struct Registration {
+    #[cfg(all(target_os="macos",feature="private-sparse"))]
+    guard: Option<super::macos_dns_guard::Handle>,
     #[cfg(target_os = "macos")]
     paths: Vec<(std::path::PathBuf, Vec<u8>)>,
     #[cfg(target_os="macos")]
@@ -507,7 +509,16 @@ pub struct Registration {
 
 #[cfg(target_os = "macos")]
 impl Registration {
+    #[cfg(feature="private-sparse")]
+    pub(super) fn managed(guard:super::macos_dns_guard::Handle)->Self { let mut registration=Self::default(); registration.guard=Some(guard); registration }
+    #[cfg(feature="private-sparse")]
+    pub(super) fn is_managed(&self)->bool { self.guard.is_some() }
+
     pub(super) async fn private_scope_is_published(&self, suffixes: &[String], port: u16) -> bool {
+        #[cfg(feature="private-sparse")]
+        if let Some(guard)=&self.guard {
+            return matches!(tokio::time::timeout(std::time::Duration::from_secs(2),guard.published(suffixes,port)).await,Ok(Ok(true)));
+        }
         let Some(session) = &self.private_session else { return false; };
         // Failure or an ambiguous publication runs the normal collision-aware registration path.
         matches!(tokio::time::timeout(std::time::Duration::from_secs(2), session.is_published(suffixes, port)).await, Ok(Ok(true)))
@@ -522,6 +533,8 @@ fn resolver_endpoints(registration:&Registration)->Result<Vec<super::dns_converg
         let port=text.lines().find_map(|line|line.strip_prefix("port ")).ok_or_else(||anyhow::anyhow!("missing owned DNS port"))?.parse()?;
         Ok(super::dns_convergence_macos::Endpoint{suffix,port})
     }).collect::<Result<Vec<_>>>()?;
+    #[cfg(feature="private-sparse")]
+    if let Some(guard)=&registration.guard{endpoints.extend(guard.endpoints.clone());}
     if let Some(session)=&registration.private_session{endpoints.extend(session.endpoints.clone());}
     Ok(endpoints)
 }
@@ -555,6 +568,9 @@ pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()
         let mut old=resolver_endpoints(registration)?;old.extend(registration.withdraw_pending.clone());
         registration.withdraw_pending=old.clone();
         close_resolver_files(registration)?;
+        #[cfg(feature="private-sparse")]
+        if let Some(mut guard)=registration.guard.take(){let _=guard.close().await;}
+
         if let Some(session)=registration.private_session.as_mut(){session.close().await?;}
         super::dns_convergence_macos::wait(&[],&old).await?;
     }
@@ -563,13 +579,28 @@ pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()
 
 #[cfg(target_os = "macos")]
 pub(super) async fn maintain_macos_registration(zone: &RwLock<Zone>, registration: &mut Registration) {
-    let Some(session) = &mut registration.private_session else { return };
     let zone = zone.read().await;
     let recovered = zone.sparse.as_ref().is_some_and(|sparse| {
         let mut failures = zone.failed_lookups.lock().unwrap_or_else(|p| p.into_inner());
         failures.recovered(std::time::Instant::now(), |name| sparse.dns_name_record(name).is_some())
     });
-    session.maintain(recovered);
+    drop(zone);
+    #[cfg(feature="private-sparse")]
+    if let Some(guard)=&registration.guard {
+        if let Err(error)=guard.maintain(recovered) {
+            if error.kind()==std::io::ErrorKind::WouldBlock {return;}
+            // The agent still holds the descriptors and its ordinary process-
+            // owned resolver can replace an unexpectedly terminated companion.
+            let old=guard.endpoints.clone();
+            let suffixes=old.iter().map(|e|e.suffix.clone()).collect::<Vec<_>>();
+            if let Ok(session)=super::dns_private_macos::register(old[0].port,&suffixes,&old).await {
+                registration.private_session=Some(session);
+                registration.guard.take();
+            }
+        }
+        return;
+    }
+    if let Some(session)=&mut registration.private_session{session.maintain(recovered);}
 }
 
 /// Replace namespaces without first removing the still-valid owned set.
@@ -599,6 +630,9 @@ pub async fn replace_registration(current:&mut Option<Registration>,profile:&std
         next.private_session=if private.is_empty(){None}else{Some(super::dns_private_macos::register(port,&private,&allowed).await?)};
         if let Some(old)=current.as_mut(){
             close_resolver_files(old)?;
+            #[cfg(feature="private-sparse")]
+            if let Some(mut guard)=old.guard.take(){let _=guard.close().await;}
+
             if let Some(session)=old.private_session.as_mut(){session.close().await?;}
         }
         if needs_default {next.tor_default=current.as_mut().and_then(|old|old.tor_default.take()).or(new_default);}

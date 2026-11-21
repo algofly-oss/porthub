@@ -1,6 +1,8 @@
 //! macOS service control through the OS-provided launchd interface. Commands
 //! use an absolute executable and typed arguments; no shell or installed helper
 //! is involved. Each operation addresses one owned profile label.
+#[cfg(feature = "private-sparse")]
+pub(crate) mod dns_guard;
 use super::{Manager, Spec, State, OPERATION_TIMEOUT};
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
@@ -314,6 +316,8 @@ impl Manager for Launchd {
     }
     async fn stop(&self, spec: &Spec) -> Result<()> {
         if self.loaded(spec).await?.is_none() {
+            #[cfg(feature="private-sparse")]
+            dns_guard::remove(spec).await?;
             return Ok(());
         }
         Self::checked(&["bootout", &self.target(spec)?]).await?;
@@ -326,7 +330,10 @@ impl Manager for Launchd {
             anyhow::Ok(())
         })
         .await
-        .context("launchd service did not stop")?
+        .context("launchd service did not stop")??;
+        #[cfg(feature="private-sparse")]
+        dns_guard::remove(spec).await?;
+        Ok(())
     }
 }
 

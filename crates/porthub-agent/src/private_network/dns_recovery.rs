@@ -28,6 +28,14 @@ impl Scope {
         &self.suffixes
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn binding(&self, p: &crate::private_profile::Profile) -> anyhow::Result<String> {
+        use sha2::{Digest, Sha256};
+        anyhow::ensure!(p.workspace == self.workspace && p.peer_id == self.peer, "DNS admission identity changed");
+        let encoded = serde_json::to_vec(&(&p.server, &p.token, &self.workspace, &self.peer, self.own, &self.suffixes))?;
+        Ok(format!("{:x}", Sha256::digest(encoded)))
+    }
+
     pub fn new(snapshot: &Snapshot) -> Option<Self> {
         // Never hold a default route, an upstream DNS policy, or a legacy zone.
         if snapshot.sparse.is_none()

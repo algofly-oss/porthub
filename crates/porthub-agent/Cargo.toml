@@ -98,6 +98,7 @@ x11rb = { version = "0.13", default-features = false }
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+rustix = { version = "1", features = ["net"] }
 rusb = { version = "0.9.4", features = ["vendored"] }
 system-configuration = "0.7"
 core-foundation = "0.9"

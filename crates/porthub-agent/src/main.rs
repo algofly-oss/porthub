@@ -195,6 +195,9 @@ enum Command {
     Forward(porthub_agent::forward::Args),
     #[command(hide = true)]
     MappingSupervisor,
+    #[cfg(all(target_os="macos",feature="private-sparse"))]
+    #[command(hide = true)]
+    PrivateDnsGuard { registration: String },
     #[command(hide = true)]
     MappingWorker { id: String },
     /// Test DNS, TCP, verified TLS, and authenticated control without changing host networking.
@@ -1339,6 +1342,8 @@ async fn run_agent() -> Result<()> {
         #[cfg(feature="local-tor")]
         Some(Command::Proxy {command})=>porthub_agent::proxy_cli::run(command,cancel).await,
         Some(Command::Forward(args)) => porthub_agent::forward::run(args,cancel).await,
+        #[cfg(all(target_os="macos",feature="private-sparse"))]
+        Some(Command::PrivateDnsGuard { registration }) => porthub_agent::private_network::macos_dns_guard::run(&registration, cancel).await,
         Some(Command::MappingSupervisor) => porthub_agent::mapping_jobs::supervise(cancel).await,
         Some(Command::MappingWorker { id }) => {
             // Only this hidden background command detaches. Foreground
