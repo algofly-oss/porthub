@@ -122,3 +122,13 @@ settings. Set PORTHUB_PRIVATE_TCP_AUTOTUNE=0 in the service environment to
 disable this adjustment. Administrators can apply their own tcp_wmem setting
 at any time. The agent writes the live kernel setting only when opening the
 tunnel and leaves persistent system configuration to the administrator.
+
+## macOS private DNS during an agent restart
+
+A system-managed macOS enrollment with a private suffix can retain DNS questions for 12 seconds after its agent process dies. The launchd helper holds the supplemental resolver registration and its loopback UDP and TCP sockets. Only the running agent answers queries. A replacement must obtain a fresh private snapshot and match the enrollment, private address and suffixes before receiving the sockets. It starts with an empty DNS zone and installs its current policy before reading queued questions. A changed enrollment or sleep generation discards the old queue.
+
+The helper starts on first eligible private admission and uses a root-only Unix socket. Profiles with exit routes, upstream DNS rules or an unmanaged process use the ordinary process-owned resolver. An intentional service stop or removal withdraws the registration and removes its control socket. Expiry releases the two DNS listeners and supplemental registration. The boot-local launchd job and Unix control socket remain available for a later launch.
+
+To inspect a managed enrollment, get its registration label with `porthub list`. For a label of `porthub-<id>`, run `sudo launchctl print system/porthub-dns-v1-<id>`. The job can remain idle while the enrollment lacks eligible private access. To roll back to a previous signed agent, stop the service with the currently installed binary first. Then reinstall the previous binary against the same profile using the existing native service installation procedure. A fresh admission recreates the appropriate resolver for that version.
+
+The unprivileged Darwin tests cover socket publication, descriptor order, close-on-exec and malformed messages. The opt-in test `private_network::macos_dns_guard::tests::crash_queue_requires_matching_identity_expires_and_withdraws_on_stop` requires root on a Mac and registers a fresh temporary `.test` suffix. It checks the retained query, enrollment replacement, deliberate stop and grace-period expiry.

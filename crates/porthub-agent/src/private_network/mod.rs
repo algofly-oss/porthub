@@ -15,6 +15,8 @@ pub mod device;
 #[path = "device_windows.rs"]
 pub mod device;
 pub mod dns;
+#[cfg(all(target_os="macos",feature="private-sparse"))]
+pub mod macos_dns_guard;
 #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
 mod dns_recovery;
 #[cfg(target_os="macos")]

@@ -870,6 +870,16 @@ async fn run_authorized_worker(
                             None
                         }
                     } else { retained_dns };
+                    #[cfg(all(target_os="macos",feature="private-sparse"))]
+                    let retained_dns = if retained_dns.is_none() {
+                        if let Some(scope)=recovery_scope.as_ref() {
+                            match super::macos_dns_guard::claim(&path,&profile,scope).await {
+                                Ok(Some((server,guard)))=>{dns_registration=Some(dns::Registration::managed(guard));Some(server)}
+                                Ok(None)=>None,
+                                Err(_)=>{tracing::warn!("managed DNS restart queue unavailable, using process-owned resolver");None}
+                            }
+                        }else{None}
+                    }else{retained_dns};
                     let server = match retained_dns {
                         Some(server) => server,
                         None => dns::Server::bind(own.ip).await.context(PrivateStage::DnsListener)?,
@@ -987,7 +997,11 @@ async fn run_authorized_worker(
                 suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
                 if route_snapshot.exit_routes.iter().any(|route|route.tor_enabled && route.traffic_mode.internet() && route.clients.contains(&profile.peer_id)) {suffixes.push(".".into());}
                 suffixes.sort();suffixes.dedup();
-                if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
+                #[cfg(all(target_os="macos",feature="private-sparse"))]
+                let retire_guard=recovery_scope.is_none() && dns_registration.as_ref().is_some_and(dns::Registration::is_managed);
+                #[cfg(not(all(target_os="macos",feature="private-sparse")))]
+                let retire_guard=false;
+                if retire_guard || registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
                     let port=dns_port.ok_or_else(||anyhow::anyhow!("private DNS listener missing"))?;
                     #[cfg(all(target_os = "linux", feature = "netns-tests"))]
