@@ -32,6 +32,48 @@ async fn connect_turn_stream(
     Ok(stream)
 }
 
+const MAX_GROUPED_RECORDS: usize = 8;
+const MAX_GROUPED_BYTES: usize = 16 * 1024;
+
+// ChannelData is padded to four bytes on this TURN stream. Data indications
+// use STUN framing. Other messages, including authentication, are sent alone.
+fn complete_data_record(packet: &[u8]) -> bool {
+    if packet.len() < 4 {
+        return false;
+    }
+    let kind = u16::from_be_bytes([packet[0], packet[1]]);
+    let payload = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    match kind {
+        0x4000..=0x7fff => packet.len() == 4 + payload.next_multiple_of(4),
+        0x0016 | 0x0017 => payload % 4 == 0 && packet.len() == 20 + payload
+            && packet[4..8] == [0x21, 0x12, 0xa4, 0x42],
+        _ => false,
+    }
+}
+
+async fn next_wire_message(
+    output: &mut mpsc::Receiver<Vec<u8>>,
+    pending: &mut Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let mut message = match pending.take() {
+        Some(packet) => packet,
+        None => output.recv().await?,
+    };
+    if message.len() >= MAX_GROUPED_BYTES || !complete_data_record(&message) {
+        return Some(message);
+    }
+    // Draining only already-queued data keeps an idle connection responsive.
+    for _ in 1..MAX_GROUPED_RECORDS {
+        let Ok(packet) = output.try_recv() else { break };
+        if message.len() + packet.len() > MAX_GROUPED_BYTES || !complete_data_record(&packet) {
+            *pending = Some(packet);
+            break;
+        }
+        message.extend_from_slice(&packet);
+    }
+    Some(message)
+}
+
 struct Transport {
     input: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
     output: mpsc::Sender<Vec<u8>>,
@@ -208,9 +250,10 @@ impl Allocation {
         let wire = tokio::spawn(async move {
             let result: Result<()> = async {
                 let mut bytes = Vec::new();
+                let mut pending_output = None;
                 loop { tokio::select! {
                     _ = wire_cancel.cancelled() => break,
-                    packet = output_rx.recv() => {
+                    packet = next_wire_message(&mut output_rx, &mut pending_output) => {
                         let Some(packet) = packet else { break; };
                         tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Binary(packet.into()))).await??;
                     },
@@ -324,6 +367,28 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_turn_data_preserves_control_order_and_frame_limits() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let mut pending = None;
+        let small = vec![0x40, 1, 0, 1, 65, 0, 0, 0];
+        let control = vec![0; 20];
+        let mut large = vec![0; MAX_GROUPED_BYTES];
+        large[..4].copy_from_slice(&[0x40, 1, 0x3f, 0xfc]);
+        let mut indication = vec![0; 20];
+        indication[..8].copy_from_slice(&[0, 0x16, 0, 0, 0x21, 0x12, 0xa4, 0x42]);
+        for packet in [&small, &indication, &control, &small, &large] {
+            tx.send(packet.clone()).await.unwrap();
+        }
+        for _ in 0..9 { tx.send(small.clone()).await.unwrap(); }
+        drop(tx);
+        for expected in [[small.as_slice(), &indication].concat(), control, small.clone(),
+                         large, small.repeat(8), small] {
+            assert_eq!(next_wire_message(&mut rx, &mut pending).await, Some(expected));
+        }
+        assert_eq!(next_wire_message(&mut rx, &mut pending).await, None);
+    }
 
     #[tokio::test]
     async fn turn_datagrams_disable_nagle_on_bound_and_default_routes() -> Result<()> {
