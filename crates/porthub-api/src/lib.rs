@@ -74,6 +74,7 @@ use std::sync::Arc;
 
 pub struct App {
     policy_writer:Option<private_continuity_recovery::Writer>,
+    policy_witness_cache:std::sync::Mutex<std::collections::HashMap<mongodb::bson::oid::ObjectId,(uuid::Uuid,std::time::Instant)>>,
     pub private_changes: private_changes::Changes,
     pub keyboard: keyboard::Hub,
     pub usb: usb::Hub,
@@ -151,6 +152,7 @@ impl App {
         };
         Self {
             policy_writer:None,
+            policy_witness_cache:Default::default(),
             private_changes: Default::default(),
             keyboard: Default::default(),
             usb: Default::default(),

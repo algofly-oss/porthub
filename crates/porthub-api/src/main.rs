@@ -57,9 +57,8 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
-    let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
-    let app = Arc::new(App::new(config, db));
+    let app = Arc::new(App::connect(config).await?);
     porthub_api::private_migration_mode::startup_check(&app).await.map_err(|e|anyhow::anyhow!("private migration preflight failed: {}",e.detail))?;
     porthub_api::inventory_query::ensure_indexes(&app)
         .await

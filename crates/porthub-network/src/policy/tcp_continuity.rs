@@ -39,6 +39,19 @@ fn reverse(k: Key) -> Key {
         ..k
     }
 }
+fn matches_query(peer: &PeerInfo, query: &Lookup) -> bool {
+    match query.kind.as_str() {
+        "peer" => peer.id == query.value,
+        "ip" => query.value.parse::<Ipv4Addr>().ok() == Some(peer.ip),
+        "name" => std::iter::once(&peer.hostname)
+            .chain(peer.aliases.iter())
+            .any(|name| {
+                name.trim_end_matches('.')
+                    .eq_ignore_ascii_case(query.value.trim_end_matches('.'))
+            }),
+        _ => true,
+    }
+}
 fn established(flow: &Flow, now: Instant) -> bool {
     flow.opening.key.protocol == 6
         && flow.phase == 2
@@ -77,17 +90,15 @@ impl TcpContinuity {
         self.pending.remove(peer);
     }
     pub fn discard_query(&mut self, query: &Lookup) {
-        self.pending.retain(|id, p| match query.kind.as_str() {
-            "peer" => id != &query.value,
-            "ip" => query.value.parse::<Ipv4Addr>().ok() != Some(p.peer.ip),
-            "name" => !std::iter::once(&p.peer.hostname)
-                .chain(p.peer.aliases.iter())
-                .any(|s| {
-                    s.trim_end_matches('.')
-                        .eq_ignore_ascii_case(query.value.trim_end_matches('.'))
-                }),
-            _ => false,
-        });
+        self.pending.retain(|_, p| !matches_query(&p.peer, query));
+    }
+    #[cfg(test)]
+    pub(super) fn timeout_confirmation(&mut self, peer: &str) {
+        if let Some(p) = self.pending.get_mut(peer) {
+            if let Some((_, end)) = &mut p.challenge {
+                *end = Instant::now();
+            }
+        }
     }
     pub fn expire(&mut self) {
         let now = Instant::now();
@@ -238,6 +249,23 @@ impl Engine {
             } else {
                 2
             };
+        }
+    }
+    pub fn discard_tcp_query(&mut self, query: &Lookup) {
+        if let Some(waiting) = &mut self.expired_tcp {
+            waiting.discard_query(query);
+        }
+        for (id, pair) in &mut self.pairs {
+            if pair.snapshot.as_ref().is_some_and(|s| {
+                s.peers
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .is_some_and(|p| matches_query(p, query))
+            }) {
+                for flow in pair.flows.values_mut() {
+                    flow.raw_path |= 4;
+                }
+            }
         }
     }
     pub fn enable_tcp_continuity(&mut self, enabled: bool) {
@@ -398,6 +426,7 @@ impl Engine {
                     let Ok(permit) = p.flow_budget.0.clone().try_acquire_owned() else {
                         break;
                     };
+                    p.has_resumed_tcp = true;
                     p.flows.insert(
                         k,
                         Flow {

@@ -55,3 +55,11 @@ transfer, and the native authenticated gateway WebSocket fallback. See
 remaining STUN/TURN, route measurement, fleet scheduling, platform and physical
 benchmark gates. A physical sustained-bandwidth acceptance result is still
 required before this migration can be called complete.
+
+### Reauthorizing an established TCP connection
+
+An updated Linux or macOS agent can preserve an ordinary private TCP connection across a brief gateway outage. It discards packet queues and grants at expiry. Both endpoints must obtain fresh base and peer authorization and confirm the same original TCP handshake. The agent retains at most 256 openings across 32 peers for 35 seconds. After a new pair is installed, the confirmation window is six seconds. A policy edit, host sleep, agent restart, loss of identity, or failed confirmation returns the connection to normal application reconnection. UDP, exit routing, and offloaded streams use their existing recovery behavior.
+
+The gateway issues continuity witnesses when PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS=all-v1 is set. This setting attests that **every** process writing private policy or enrolled identities in the shared database runs the matching write-fence protocol. Finish upgrading and draining all older writers before enabling it. Disable the setting on every gateway before running an older writer, restoring the database, or editing policy outside the application. An older gateway or agent automatically uses the ordinary reconnect path.
+
+The durable fence covers the beginning and end of authorization. Concurrent or ambiguous policy writes withhold the witness from the affected scope. Normal fresh DNS and private connections continue. For automatic recovery after a gateway process terminates, persist its exclusive writer slots under /data/private-policy-writers (override with PORTHUB_PRIVATE_CONTINUITY_WRITER_DIR). On standalone MongoDB the gateway verifies that the former process released its slot and that Mongo has drained all connections and operations bearing its writer tag. This verification requires permission for the $currentOp aggregation with allUsers enabled. If either proof is unavailable, the gateway continues using fresh connections.

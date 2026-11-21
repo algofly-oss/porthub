@@ -1033,7 +1033,7 @@ async fn run_authorized_worker(
                 let response=authority.accepted()?.clone();
                 continuity.pending.merge(policy.take_expired_tcp());
                 if response.status!="allowed"||response.lease.is_none(){
-                    if response.status!="busy"{continuity.pending.discard_query(&response.query);}
+                    if response.status!="busy"{continuity.pending.discard_query(&response.query);policy.discard_tcp_query(&response.query);}
                     if let Some(peer)=super::sparse::apply_denial(&sparse_handle,&mut policy,&response){
                         by_ip.retain(|_,id|id!=&peer.id);peer_ips.remove(&peer.id);
                         if let Some(tun)=&device{if tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await.is_err(){tracing::warn!("could not remove a retired private pair route");}}

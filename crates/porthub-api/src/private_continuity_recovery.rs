@@ -18,13 +18,21 @@ pub(crate) struct Writer {
     directory_id: String,
     slot: u8,
     _lock: File,
-    last: Mutex<Option<Instant>>,
+    last: Mutex<(Option<Instant>, usize)>,
 }
 impl Writer {
     pub fn start(directory: PathBuf, process: &str) -> Option<Self> {
         fs::create_dir_all(&directory).ok()?;
         if !fs::symlink_metadata(&directory).ok()?.is_dir() {
             return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(&directory).ok()?;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+                return None;
+            }
         }
         let anchor = directory.join("directory-id");
         match OpenOptions::new()
@@ -68,7 +76,7 @@ impl Writer {
                 directory_id,
                 slot,
                 _lock: file,
-                last: Mutex::new(None),
+                last: Mutex::new((None, 0)),
             });
         }
         None
@@ -105,6 +113,10 @@ impl Writer {
         };
         result
     }
+    #[cfg(test)]
+    pub(super) fn reset_throttle(&self) {
+        self.last.lock().unwrap().0 = None;
+    }
     pub async fn recover(&self, app: &App, row: &Document) {
         let Ok(writers) = row.get_document("writers") else {
             return;
@@ -113,15 +125,21 @@ impl Writer {
             return;
         }
         // No filesystem/database reconciliation on the common stable path.
-        {
-            let Ok(mut last) = self.last.lock() else {
+        let offset = {
+            let Ok(mut state) = self.last.lock() else {
                 return;
             };
-            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(15)) {
+            if state
+                .0
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(15))
+            {
                 return;
             }
-            *last = Some(Instant::now());
-        }
+            state.0 = Some(Instant::now());
+            let offset = state.1 % writers.len();
+            state.1 = (offset + 8) % writers.len();
+            offset
+        };
         let recover = async {
             let id = row.get_str("_id").ok()?;
             let admin = app.db.client().database("admin");
@@ -129,7 +147,12 @@ impl Writer {
             if hello.contains_key("setName") || hello.get_str("msg").ok() == Some("isdbgrid") {
                 return None;
             }
-            for (ticket, value) in writers.iter().take(8) {
+            for (ticket, value) in writers
+                .iter()
+                .skip(offset)
+                .chain(writers.iter().take(offset))
+                .take(writers.len().min(8))
+            {
                 if Uuid::parse_str(ticket).is_err() {
                     continue;
                 }

@@ -531,6 +531,23 @@ mod tests {
     }
 
     #[test]
+    fn expired_pair_confirms_for_a_bounded_window_and_a_denial_survives_regrant(){
+        let epoch="a".repeat(64);let lease=pair(&epoch);let mut e=Engine::default();
+        e.apply(base(&epoch)).unwrap();e.install_pair(lease.clone()).unwrap();establish(&mut e,41010,true);
+        e.pairs.get_mut("b").unwrap().deadline=Some(Instant::now());
+        e.prune_pairs();let mut pending=e.take_expired_tcp();assert!(pending.contains("b"));
+        let query=Lookup{kind:"peer".into(),value:"b".into()};
+        e.install_pair(lease.clone()).unwrap();assert!(e.prepare_tcp(&mut pending,&lease));
+        let packet=Packet::parse(&tcp_segment(false,16,41010)).unwrap();
+        assert!(pending.awaiting("b",packet));
+        pending.timeout_confirmation("b");assert!(!pending.awaiting("b",packet));
+        assert!(!e.check(&tcp_segment(false,16,41010),"b",false));
+        establish(&mut e,41011,true);e.discard_tcp_query(&query);
+        e.retire_expired_pair("b");let mut retired=e.take_expired_tcp();
+        e.install_pair(lease.clone()).unwrap();assert!(!e.prepare_tcp(&mut retired,&lease));
+    }
+
+    #[test]
     fn ordinary_continuation_is_bounded_and_requires_complete_unchanged_raw_flows() {
         let epoch="a".repeat(64);
         let mut e=Engine::default();

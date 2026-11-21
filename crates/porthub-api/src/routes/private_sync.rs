@@ -242,7 +242,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         Some(combined.to_string())
     }) } else { None };
     let workspace=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
-    let before=if wants_continuity {crate::private_continuity::witness(&app,workspace).await} else {None};
+    let before=if wants_continuity {crate::private_continuity::before(&app,workspace).await} else {None};
     let mut result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);

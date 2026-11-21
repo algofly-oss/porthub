@@ -329,6 +329,7 @@ pub struct Engine {
     flow_budget:FlowBudget,
     exit_flow_budget:FlowBudget,
     expired_tcp: Option<Box<TcpContinuity>>,
+    has_resumed_tcp: bool,
     pair_private_epoch:Option<String>,
     pair_exit_epoch:Option<String>,
 }
@@ -510,7 +511,7 @@ impl Engine {
     /// cannot become deliverable by sitting in a queue until the new grant.
     pub fn check_received(&mut self,bytes:&[u8],peer:&str,arrival:Instant)->bool {
         if self.expired_tcp.is_some() {
-            if let Some((p,packet))=self.pairs.get(peer).zip(Packet::parse(bytes)) {
+            if let Some((p,packet))=self.pairs.get(peer).filter(|p|p.has_resumed_tcp).and_then(|p|Some((p,Packet::parse(bytes)?))) {
                 let k=packet.key;
                 let reverse=Key{src:k.dst,dst:k.src,sport:k.dport,dport:k.sport,..k};
                 if [k,reverse].iter().any(|k|p.flows.get(k).and_then(|f|f.resumed_at).is_some_and(|admitted|arrival<admitted)){return false;}
