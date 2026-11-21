@@ -101,6 +101,27 @@ impl AsyncWrite for WriteQueue {
         Poll::Ready(Ok(written))
     }
 
+    fn is_write_vectored(&self) -> bool {
+        self.budget.is_none() && self.stream.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        if self.budget.is_none() {
+            return Pin::new(&mut self.stream).poll_write_vectored(cx, buffers);
+        }
+        self.poll_write(
+            cx,
+            buffers
+                .iter()
+                .find(|buf| !buf.is_empty())
+                .map_or(&[], |buf| &**buf),
+        )
+    }
+
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)
     }
