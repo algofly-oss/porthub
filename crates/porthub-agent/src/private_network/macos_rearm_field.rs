@@ -66,7 +66,7 @@ async fn same_utun_rearms_with_a_fresh_owner_and_two_empty_queue_boundaries() ->
     let (own, peer, pools) = assignment.context("no conflict-free isolated fixture prefix")?;
     let scratch = tempfile::tempdir()?;
     let profile = scratch.path().join("private.json");
-    let enrollment = serde_json::json!({"server":"https://utun.test.invalid","workspace": id, "peer_id":format!("native-{id}")});
+    let enrollment = serde_json::json!({"server":"https://utun.test.invalid","workspace": id.to_string(), "peer_id":format!("native-{id}")});
     crate::profile::write_private(&profile, &serde_json::to_vec(&enrollment)?, false)?;
     let tun = native_owner::open(&profile, "utun-rearm-test", own, &pools, &[peer]).await?;
     let original = (
