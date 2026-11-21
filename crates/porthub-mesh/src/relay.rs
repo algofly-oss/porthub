@@ -17,6 +17,9 @@ use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_util::sync::CancellationToken;
 use turn_util::{Conn, Error as IoError, Result as IoResult};
 
+#[cfg(target_os = "macos")]
+mod mac_write_queue;
+
 const SERVER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
 pub type Socket = Arc<dyn Conn + Send + Sync>;
 
@@ -256,12 +259,15 @@ impl Allocation {
             Duration::from_secs(5),
             async {
                 let stream = connect_turn_stream(&url, local).await?;
+                #[cfg(target_os = "macos")]
+                let stream = mac_write_queue::WriteQueue::new(stream);
                 Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), connector).await?)
             },
         )
         .await
         .map_err(|_| anyhow::anyhow!("private relay connection timed out"))?
         .map_err(|_| anyhow::anyhow!("private relay connection failed"))?;
+        #[cfg(not(target_os = "macos"))]
         match websocket.get_ref() {
             tokio_tungstenite::MaybeTlsStream::Plain(stream) => crate::configure_tcp(stream),
             tokio_tungstenite::MaybeTlsStream::Rustls(stream) => {
