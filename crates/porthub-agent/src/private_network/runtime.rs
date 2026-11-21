@@ -340,18 +340,20 @@ pub async fn run_with_logs(
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match result {
-            Err(error) if error.is::<super::authority_clock::RequestExpired>()
-                || error.is::<super::ExpiredDuringSuspend>() => {
-                // run_inner has already revoked the old authority and removed
-                // its routes. Restart the data plane with a fresh request.
-                tracing::info!("private authority expired; requesting a fresh lease");
-                tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    _ = crate::unified::suspend_aware_delay(Duration::from_secs(5)) => {}
-                }
+        let error = match result {
+            Err(error) => error,
+            Ok(()) => return Ok(()),
+        };
+        let Some(delay) = super::authority_clock::standalone_retry_delay(&error) else {
+            return Err(error);
+        };
+        // run_inner has revoked the expired authority and released its routes.
+        tracing::info!(?delay, "private authority expired; requesting a fresh lease");
+        if !delay.is_zero() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = crate::unified::suspend_aware_delay(delay) => {}
             }
-            other => return other,
         }
     }
 }
@@ -490,7 +492,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut registered_suffixes: Vec<String> = Vec::new();
     let mut registered_rules = Vec::new();
     let mut dns_port: Option<u16> = None;
-    #[cfg(feature="local-tor")]
+    #[cfg(any(target_os="linux",feature="local-tor"))]
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
     let mut sparse_authority:Option<Snapshot>=None;
@@ -500,13 +502,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut native_stream_safe=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
-    let (dns_target,dns_health,dns_write) = {
+    let (dns_target,dns_health,dns_write,source_updates) = {
+        let (sources,restorations)=watch::channel(None);
         let (target,input)=watch::channel(None);
         let (result,health)=watch::channel(None);
         let write = Arc::new(tokio::sync::Mutex::new(()));
-        tasks.spawn(crate::private_dns_setup::monitor(input,result,write.clone(),work.clone()));
-        (target,health,write)
+        tasks.spawn(crate::private_dns_setup::monitor(input,result,restorations,write.clone(),work.clone()));
+        (target,health,write,sources)
     };
+    #[cfg(target_os="linux")]
+    let (mut alternate_dns_port, mut retry_dns_bind) = (None, Instant::now());
     let mut exit_route = None;
     let mut sparse_exit_intent:Option<porthub_network::policy::ExitIntent>=None;
     let mut cold_datagrams=cold_datagrams::Queue::default();
@@ -577,9 +582,32 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result:Result<()>=async {loop {
+    let result = loop {
+        let run: Result<()> = async {loop {
         check_installed_authority(&mut policy, installed_authority.as_ref())?;
         if !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
+        #[cfg(target_os="linux")]
+        if let Some(tun) = device.as_ref().filter(|tun| tun.source_restored.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() >= retry_dns_bind) {
+            if let (Some(port), Some(zone), Some(upstream)) = (dns_port, &zone, &dns_upstream) {
+                if alternate_dns_port.is_none() {
+                    match dns::Server::bind(tun.own_ip()).await {
+                        Ok(mut server) => {
+                            server.zone = Arc::clone(zone);
+                            server.upstream = Arc::clone(upstream);
+                            alternate_dns_port = Some(server.port()?);
+                            tasks.spawn(server.serve(work.clone()));
+                        }
+                        Err(_) => { retry_dns_bind = Instant::now() + Duration::from_secs(1); }
+                    }
+                }
+                if let Some(alternate) = alternate_dns_port {
+                    source_updates.send_replace(Some(crate::private_dns_setup::RestoredSource {
+                        index: tun.index, address: tun.own_ip(), port, alternate,
+                    }));
+                    tun.source_restored.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         tokio::select! {
         _=cancel.cancelled()=>break,
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
@@ -692,7 +720,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         server.protect_management(names,interfaces.clone()).await;
                     }
                     zone=Some(server.zone.clone());
-                    #[cfg(feature="local-tor")]
+                    #[cfg(any(target_os="linux",feature="local-tor"))]
                     {dns_upstream=Some(server.upstream.clone());}
                     tasks.spawn(server.serve(work.clone()));
                     dns_port=Some(port);
@@ -799,7 +827,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let next=Some(crate::private_dns_setup::LookupTarget {
                             hostname: own.hostname.clone(),
                             address: own.ip,
-                            link: (!isolated).then(||crate::private_dns_setup::LinkDns { index:tun.index,port,suffixes:suffixes.clone() }),
+                            link: (!isolated).then(||crate::private_dns_setup::LinkDns { interface:tun.name.clone(),index:tun.index,port,suffixes:suffixes.clone() }),
                         });
                         if *previous==next {false} else {*previous=next;true}
                     });}
@@ -1545,6 +1573,19 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
+        #[cfg(target_os = "linux")]
+        if run.as_ref().is_err_and(|e| e.is::<super::device::LinkDown>() && !e.is::<PrivateStage>())
+            && sparse_handle.enabled() && route_events_open && device.is_some()
+            && sparse_authority.is_some() && !work.is_cancelled()
+        {
+            // An inbound datagram raced the kernel link-change notification.
+            // Drop that datagram and wake the normal ownership/route audit.
+            // The next iteration rechecks authority before processing any traffic.
+            route_events.mark_changed();
+            continue;
+        }
+        break run;
+    };
     cold_datagrams.observe(None); // revoke retained payloads AND final carrier permits before teardown
     #[cfg(all(target_os="linux",feature="private-sparse"))]
     pending_provider.observe(None);

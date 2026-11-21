@@ -203,8 +203,11 @@ impl Handle {
     pub(crate) fn authority_ttl(&self)->Option<u32> {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
         if self.revoked(){return None;}
-        let left=match &s.authority {Some(authority)=>authority.remaining().ok()?.map(|left|left.as_secs()).unwrap_or(5),None=>5};
-        (left>0).then_some(left.min(5) as u32)
+        let remaining = match &s.authority {
+            Some(authority) => authority.remaining().ok()?.unwrap_or(Duration::from_secs(5)),
+            None => Duration::from_secs(5),
+        };
+        dns_cache_ttl(remaining)
     }
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
     pub(super) fn current_base(&self) -> Option<super::authority_event::Authority<()>> {
@@ -295,8 +298,7 @@ impl Handle {
         for authority in [s.authority.as_ref(),peer.metadata_authority(now)].into_iter().flatten(){
             if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
         }
-        let remaining=remaining.as_secs();
-        (remaining > 0).then_some((peer.lease.peer.ip, remaining.min(5) as u32))
+        Some((peer.lease.peer.ip, dns_cache_ttl(remaining)?))
     }
     pub fn by_ip(&self, ip: Ipv4Addr) -> Option<PeerInfo> {
         self.peer(|p| p.ip == ip)
@@ -572,6 +574,12 @@ impl Handle {
             .flatten()
     }
 }
+fn dns_cache_ttl(remaining: Duration) -> Option<u32> {
+    // A live lease in its last fractional second can answer the current
+    // query with TTL zero. Never round its cache lifetime up.
+    (!remaining.is_zero()).then(|| remaining.as_secs().min(5) as u32)
+}
+
 /// This helper is shared by the native packet owner and no-device lifecycle regressions.
 /// Only an authenticated authoritative denial retires a pair; overload/temporary failures do not.
 pub fn apply_denial(
@@ -694,7 +702,8 @@ mod tests {
         clock.0.store(10000,Ordering::SeqCst);
         h.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
         clock.0.store(14999,Ordering::SeqCst);
-        assert!(h.by_id("b").is_some());assert!(h.dns_ttl(pair.peer.ip).is_none(),"DNS must not cache beyond request lifetime");
+        assert!(h.by_id("b").is_some());
+        assert_eq!(h.dns_name_record("b.phub."), Some((pair.peer.ip, 0)));
         clock.0.store(15000,Ordering::SeqCst);
         assert!(h.authority_valid());assert!(h.by_id("b").is_none());assert!(h.by_ip(pair.peer.ip).is_none());
         assert!(h.cached_query(&query).is_none());assert!(h.dns_ttl(pair.peer.ip).is_none());
@@ -704,6 +713,11 @@ mod tests {
         let mut question=Message::new(1,MessageType::Query,OpCode::Query);
         question.add_query(Query::query(Name::from_ascii("a.phub").unwrap(),RecordType::A));let bytes=question.to_vec().unwrap();
         assert_eq!(Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap().answers.len(),1);
+        clock.0.store(24999, Ordering::SeqCst);
+        let reply = Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap();
+        assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(reply.answers.len(), 1);
+        assert_eq!(reply.answers[0].ttl, 0);
         clock.0.store(25000,Ordering::SeqCst);
         let response=Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap();
         assert_eq!(response.metadata.response_code,ResponseCode::ServFail);assert!(response.answers.is_empty());
