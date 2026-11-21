@@ -458,13 +458,14 @@ pub fn render(
 }
 
 pub async fn bundle(app: &App, machine: &Document, view: &View<'_>) -> ApiResult<Value> {
-    let connections: Vec<Document> = app
+    let mut connections: Vec<Document> = app
         .collection("connections")
         .find(doc! {"machine_id":machine.get("_id")})
         .sort(doc! {"external_port":1,"_id":1})
         .await?
         .try_collect()
         .await?;
+    connections.extend(crate::port_forward_bridge::imports(app, std::slice::from_ref(machine)).await?);
     let rendered = render(app, machine, &connections, view)?;
     let version = format!(
         "{:x}",

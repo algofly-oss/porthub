@@ -47,6 +47,8 @@ impl Domain {
 #[derive(Clone)]
 pub struct Authority<T> {
     pub(crate) value: T,
+    #[cfg(feature="private-sparse")]
+    pub(crate) forward_sync: Option<(uuid::Uuid, std::sync::Arc<crate::control::Control>)>,
     retirement: Option<Domain>,
     #[cfg(feature = "private-sparse")]
     witness: Option<Witness>,
@@ -63,6 +65,8 @@ impl<T> Authority<T> {
         let _ = (witness, expiry);
         Self {
             value,
+            #[cfg(feature="private-sparse")]
+            forward_sync: None,
             retirement: None,
             #[cfg(feature = "private-sparse")]
             witness,
@@ -134,6 +138,8 @@ impl<T> Authority<T> {
     pub(crate) fn retained(&self) -> Authority<()> {
         Authority {
             value: (),
+            #[cfg(feature="private-sparse")]
+            forward_sync: None,
             retirement: self.retirement.clone(),
             #[cfg(feature = "private-sparse")]
             witness: self.witness.clone(),

@@ -1,4 +1,5 @@
 //! Shared HTTP ingress for the embedded Rathole server.
+pub mod forward_bridge;
 pub mod apply;
 mod health;
 mod gateway_clock;

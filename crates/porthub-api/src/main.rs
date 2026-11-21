@@ -170,23 +170,48 @@ async fn main() -> Result<()> {
     let router = porthub_api::router(app);
     let shutdown = realtime.clone();
     let shutdown = async move { porthub_runtime::shutdown_signal().await; shutdown.file_relay.close(); };
-    let result = if let Some(path) = std::env::var_os("PORTHUB_API_SOCKET") {
+    let api_socket = std::env::var_os("PORTHUB_API_SOCKET").map(std::path::PathBuf::from);
+    let ssh_socket = porthub_runtime::socket::forward_ssh_path(api_socket.as_deref());
+    let _forward_recovery=tokio::spawn(porthub_api::port_forward_bridge::run(realtime.clone(),activity_stop.subscribe()));
+    let ssh_app = realtime.clone();
+    let ssh_stop = activity_stop.subscribe();
+    let broker = async move {
+        if let Some(socket) = ssh_socket {
+            porthub_api::port_forward_auth::listen(ssh_app, &socket, ssh_stop).await
+        } else {
+            std::future::pending::<anyhow::Result<()>>().await
+        }
+    };
+    let http = async { if let Some(path) = std::env::var_os("PORTHUB_API_SOCKET") {
         let (listener, _lease) = porthub_runtime::socket::bind(std::path::Path::new(&path)).await?;
         tracing::info!("native API listening on internal Unix socket");
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
-            .await
+            .await?
     } else {
         let listener = tokio::net::TcpListener::bind(&tcp_address).await?;
         tracing::info!(listen = %tcp_address, "native API listening");
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
-            .await
+            .await?
+    }
+    Ok::<(), anyhow::Error>(())
+    };
+    tokio::pin!(broker);
+    let result = tokio::select! {
+        result = http => result,
+        result = &mut broker => {
+            result?;
+            anyhow::bail!("forwarding broker exited unexpectedly");
+        }
     };
     realtime.file_relay.close();
     realtime.realtime.close().await;
     refresh.abort();
     let _ = activity_stop.send(true);
+    if porthub_runtime::socket::forward_ssh_path(api_socket.as_deref()).is_some() {
+        broker.await?;
+    }
     #[cfg(feature="private-sparse")]
     private_recovery.await?;
 

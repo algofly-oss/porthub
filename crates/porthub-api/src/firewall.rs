@@ -204,6 +204,7 @@ pub async fn sync_machine(app: &App, id: mongodb::bson::oid::ObjectId) -> ApiRes
     Ok(())
 }
 pub async fn sync(app: &App, connection: &Document) -> ApiResult<()> {
+    if connection.contains_key("forward_reservation") {return crate::port_forward_bridge::sync_reservation(app,connection).await;}
     let (Some(client), Some(port)) = (&app.firewall, port(connection)) else {
         return Ok(());
     };

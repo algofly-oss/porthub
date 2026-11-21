@@ -24,6 +24,8 @@ pub mod domain;
 pub mod enrollment_ticket;
 pub mod error;
 pub mod file_relay;
+pub mod port_forward_auth;
+pub mod port_forward_bridge;
 pub mod firewall;
 pub mod firewall_history;
 pub mod gateway_apply;
@@ -82,6 +84,9 @@ pub struct App {
     pub native_media: native_media::Hub,
     pub machine_metrics_initialized: tokio::sync::OnceCell<()>,
     pub boards: boards::Hub,
+    pub forward_registry: porthub_forward_ssh::Registry,
+    pub(crate) forward_bridge: port_forward_bridge::Bridge,
+    forward_keys: tokio::sync::OnceCell<porthub_forward_ssh::Master>,
     pub file_relay: file_relay::Hub,
     pub terminals: porthub_terminal::hub::Hub,
     pub image_rooms_initialized: tokio::sync::OnceCell<()>,
@@ -160,6 +165,9 @@ impl App {
             native_media: Default::default(),
             machine_metrics_initialized: Default::default(),
             boards: Default::default(),
+            forward_registry: Default::default(),
+            forward_keys: Default::default(),
+            forward_bridge: Default::default(),
             file_relay: Default::default(),
             terminals: Default::default(),
             hosted_images_initialized: Default::default(),

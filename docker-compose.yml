@@ -49,6 +49,9 @@ services:
       PORTHUB_AGENT_RELEASE_SOURCE: ${PORTHUB_AGENT_RELEASE_SOURCE:-github}
       PORTHUB_AGENT_RELEASE_REPOSITORY: ${PORTHUB_AGENT_RELEASE_REPOSITORY:-algofly-oss/porthub}
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_FORWARD_SSH_SOCKET: /run/porthub-api/forward-ssh.sock
+      PORTHUB_FORWARD_SSH_ENDPOINT: ${PORTHUB_FORWARD_SSH_ENDPOINT:-}
+      PORTHUB_FORWARD_SSH_MASTER: /data/port-forwards/master.seed
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_DB_INITIALIZE: "true"
       PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS: ${PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS:-off}
@@ -98,6 +101,7 @@ services:
     cap_add: [NET_BIND_SERVICE]
     environment:
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_FORWARD_SSH_SOCKET: /run/porthub-api/forward-ssh.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS: ${PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS:-120}
       PORTHUB_WEB_ROUTES_CONFIG_PATH: /run/porthub-config/web-routes.json

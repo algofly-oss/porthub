@@ -85,6 +85,14 @@ jobs:
         run: |
           python3 scripts/test_speech_cpu_policy.py
           cargo test --locked -p porthub-api --test speech_portability speech_backend_devices_enumerate_without_model_or_application -- --ignored --exact --nocapture
+          cargo test --locked -p porthub-forward-ssh
+          cargo test --locked -p porthub-api --test port_forwards -- --include-ignored
+          cargo test --locked -p porthub-api --lib port_forward -- --include-ignored
+          cargo test --locked -p porthub-agent --lib private_network::port_forwards
+          cargo test --locked -p porthub-edge --test forward_bridge
+          cargo test --locked -p porthub-edge --test embedded_client ssh_import_uses_exact_authenticated_control_channel
+          broker_test=$(cargo test --locked -p porthub-forward-ssh --test openssh --no-run --message-format=json | jq -r 'select(.executable != null) | .executable')
+          PORTHUB_FORWARD_BROKER_TEST="$broker_test" node --test ui/tests/port-forwards-command.test.mjs
           cargo test --locked -p porthub-terminal --lib
           cargo test --locked -p porthub-runtime --lib web_activity::tests
           cargo test --locked -p porthub-runtime --test upstreams

@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [features]
 # Negotiated bounded private-network policy; legacy peers retain their protocol.
-private-sparse = []
+private-sparse = ["dep:porthub-egress"]
 default = ["private-stream", "local-tor", "terminal-direct", "private-sparse"]
 local-tor = ["private-stream", "dep:porthub-egress"]
 netns-tests = ["porthub-network/netns-tests"]

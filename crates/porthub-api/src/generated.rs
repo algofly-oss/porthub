@@ -32,6 +32,7 @@ struct Gateway {
 }
 
 pub fn service_key(connection: &Document) -> String {
+    if let Ok(name) = connection.get_str("forward_import_service") {return name.to_owned();}
     let raw = store::id(connection.get("_id"));
     let mut name = String::new();
     for character in raw.chars() {
@@ -69,6 +70,11 @@ pub fn render(machines: &[Document], connections: &[Document]) -> anyhow::Result
         let Some(machine) = machines.get(&store::id(connection.get("machine_id"))) else {
             continue;
         };
+        if let Ok(key) = connection.get_str("forward_import_service") {
+            anyhow::ensure!(key.starts_with("porthub_import_"),"invalid import service");
+            anyhow::ensure!(services.insert(key.into(),Service {token:store::string(machine,"token").into(), bind_addr:"127.0.0.1:0".into(),access:None}).is_none(),"duplicate import service");
+            continue;
+        }
         let port = match connection.get("external_port") {
             Some(Bson::Int32(port)) => u16::try_from(*port).ok(),
             Some(Bson::Int64(port)) => u16::try_from(*port).ok(),
@@ -155,13 +161,14 @@ async fn publish(app: &App, apply: bool) -> ApiResult<()> {
         .iter()
         .filter_map(|machine| machine.get("_id").cloned())
         .collect();
-    let connections: Vec<Document> = app
+    let mut connections: Vec<Document> = app
         .collection("connections")
         .find(doc! {"machine_id":{"$in":ids},"enabled":{"$ne":false}})
         .sort(doc! {"external_port":1,"_id":1})
         .await?
         .try_collect()
         .await?;
+    connections.extend(crate::port_forward_bridge::imports(app, &machines).await?);
     let content = render(&machines, &connections).map_err(internal)?;
     let digest = porthub_runtime::gateway_apply::digest(content.as_bytes());
     let path = path.clone();
