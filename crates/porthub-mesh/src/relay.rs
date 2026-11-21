@@ -88,6 +88,69 @@ impl Conn for Transport {
     }
 }
 
+fn start_wire<S>(
+    mut websocket: tokio_tungstenite::WebSocketStream<S>,
+    mut output_rx: mpsc::Receiver<Vec<u8>>,
+    input: mpsc::Sender<Vec<u8>>,
+    wire_cancel: CancellationToken,
+) -> JoinHandle<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    tokio::spawn(async move {
+        let result: Result<()> = async {
+            let mut bytes = Vec::new();
+            loop { tokio::select! {
+                _ = wire_cancel.cancelled() => break,
+                packet = output_rx.recv() => {
+                    let Some(packet) = packet else { break; };
+                    tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Binary(packet.into()))).await??;
+                },
+                message = websocket.next() => match message {
+                    Some(Ok(Message::Binary(packet))) => {
+                        ensure!(bytes.len() + packet.len() <= 65536, "private TURN frame exceeds limit");
+                        bytes.extend_from_slice(&packet);
+                        while bytes.len() >= 4 {
+                            let length = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+                            let size = match bytes[0] & 0xc0 {
+                                0 => { ensure!(length % 4 == 0, "invalid TURN STUN length"); 20 + length },
+                                0x40 => (4 + length + 3) & !3,
+                                _ => anyhow::bail!("invalid TURN frame"),
+                            };
+                            ensure!(size <= 65536, "private TURN frame exceeds limit");
+                            if bytes.len() < size { break; }
+                            let packet = bytes.drain(..size).collect();
+                            if wire_cancel.is_cancelled() {
+                                return Ok(());
+                            }
+                            match input.try_send(packet) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                                Err(mpsc::error::TrySendError::Full(packet)) => {
+                                    // A stopped TURN consumer also holds up outgoing data and Pongs.
+                                    tokio::select! {
+                                        _ = wire_cancel.cancelled() => return Ok(()),
+                                        result = tokio::time::timeout(Duration::from_secs(5), input.send(packet)) => {
+                                            if !matches!(result, Ok(Ok(()))) { return Ok(()); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Ok(Message::Ping(packet))) => { tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Pong(packet))).await??; },
+                    Some(Ok(Message::Pong(_))) => {},
+                    _ => break,
+                }
+            }}
+            Ok(())
+        }.await;
+        // Errors intentionally contain no URL or credential in normal logs.
+        let _ = result;
+        wire_cancel.cancel();
+    })
+}
+
 struct Lifetime {
     cancel: CancellationToken,
     cleanup: Mutex<Option<JoinHandle<()>>>,
@@ -179,7 +242,7 @@ impl Allocation {
             .write_buffer_size(8192)
             .max_message_size(Some(65536))
             .max_frame_size(Some(65536));
-        let (mut websocket, _) = tokio::time::timeout(
+        let (websocket, _) = tokio::time::timeout(
             Duration::from_secs(5),
             async {
                 let stream = connect_turn_stream(&url, local).await?;
@@ -197,51 +260,14 @@ impl Allocation {
             _ => {}
         }
         let cancel = CancellationToken::new();
-        let wire_cancel = cancel.clone();
         let (input, input_rx) = mpsc::channel(128);
-        let (output, mut output_rx) = mpsc::channel(128);
+        let (output, output_rx) = mpsc::channel(128);
         let transport = Arc::new(Transport {
             input: AsyncMutex::new(input_rx),
             output,
             cancel: cancel.clone(),
         });
-        let wire = tokio::spawn(async move {
-            let result: Result<()> = async {
-                let mut bytes = Vec::new();
-                loop { tokio::select! {
-                    _ = wire_cancel.cancelled() => break,
-                    packet = output_rx.recv() => {
-                        let Some(packet) = packet else { break; };
-                        tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Binary(packet.into()))).await??;
-                    },
-                    message = websocket.next() => match message {
-                        Some(Ok(Message::Binary(packet))) => {
-                            ensure!(bytes.len() + packet.len() <= 65536, "private TURN frame exceeds limit");
-                            bytes.extend_from_slice(&packet);
-                            while bytes.len() >= 4 {
-                                let length = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
-                                let size = match bytes[0] & 0xc0 {
-                                    0 => { ensure!(length % 4 == 0, "invalid TURN STUN length"); 20 + length },
-                                    0x40 => (4 + length + 3) & !3,
-                                    _ => anyhow::bail!("invalid TURN frame"),
-                                };
-                                ensure!(size <= 65536, "private TURN frame exceeds limit");
-                                if bytes.len() < size { break; }
-                                let packet = bytes.drain(..size).collect();
-                                tokio::select! { _ = wire_cancel.cancelled() => return Ok(()), result = input.send(packet) => { if result.is_err() { return Ok(()); } } }
-                            }
-                        },
-                        Some(Ok(Message::Ping(packet))) => { tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Pong(packet))).await??; },
-                        Some(Ok(Message::Pong(_))) => {},
-                        _ => break,
-                    }
-                }}
-                Ok(())
-            }.await;
-            // Errors intentionally contain no URL or credential in normal logs.
-            let _ = result;
-            wire_cancel.cancel();
-        });
+        let wire = start_wire(websocket, output_rx, input, cancel.clone());
         let mut setup = Setup {
             cancel: cancel.clone(),
             wire: Some(wire),
@@ -324,6 +350,44 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn full_turn_input_recovers_from_a_short_pause_and_retires_after_a_stall() -> Result<()> {
+        use tokio::time::{sleep, timeout};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let connect = async {
+            let stream = tokio::net::TcpStream::connect(address).await?;
+            anyhow::Ok(tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await?.0)
+        };
+        let accept = async {
+            anyhow::Ok(tokio_tungstenite::accept_async(listener.accept().await?.0).await?)
+        };
+        let (client, mut server) = tokio::try_join!(connect, accept)?;
+        let (input, mut incoming) = mpsc::channel(1);
+        let (outbound, output) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task = start_wire(client, output, input, cancel.clone());
+        let record = |tag| vec![0x40, 1, 0, 4, tag, tag, tag, tag];
+        for tag in 1..=2 {
+            server.send(Message::Binary(record(tag).into())).await?;
+        }
+        sleep(Duration::from_millis(100)).await;
+        for tag in 1..=2 {
+            assert_eq!(timeout(Duration::from_secs(2), incoming.recv()).await?, Some(record(tag)));
+        }
+        outbound.send(record(3)).await?;
+        assert_eq!(timeout(Duration::from_secs(2), server.next()).await?.unwrap()?,
+                   Message::Binary(record(3).into()));
+        for tag in 4..=5 {
+            server.send(Message::Binary(record(tag).into())).await?;
+        }
+        // The consumer and peer remain open. The wire must retire this allocation itself.
+        timeout(Duration::from_secs(7), cancel.cancelled()).await?;
+        task.await?;
+        assert!(outbound.is_closed());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn turn_datagrams_disable_nagle_on_bound_and_default_routes() -> Result<()> {

@@ -645,6 +645,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 local_address.check(own.ip)?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
                 let first_ready = device.is_none();
+                let mut starting_resolver = None;
                 policy.apply(snapshot.clone())?;
                 installed_authority=Some(authority.retained());
                 sparse_authority=Some(snapshot.clone());
@@ -722,7 +723,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     zone=Some(server.zone.clone());
                     #[cfg(any(target_os="linux",feature="local-tor"))]
                     {dns_upstream=Some(server.upstream.clone());}
-                    tasks.spawn(server.serve(work.clone()));
+                    starting_resolver = Some(server);
                     dns_port=Some(port);
                     device=Some(tun);
                 }
@@ -807,6 +808,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
                 {let mut zone=zone.as_ref().unwrap().write().await;authority.check()?;zone.update(&route_snapshot)?;}
+                // The bound sockets can queue requests while routes and policy are
+                // installed. Read them only after the authorized zone is ready.
+                if let Some(server) = starting_resolver {
+                    tasks.spawn(server.serve(work.clone()));
+                }
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
                 suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
@@ -1530,6 +1536,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             sent_bytes = stats.sent_bytes,
                             received_bytes = stats.received_bytes,
                             dropped_outgoing = stats.dropped_outgoing,
+                            outgoing_queue_full = stats.outgoing_queue_full,
                             dropped_incoming = stats.dropped_incoming,
                             write_errors = stats.write_errors,
                             read_errors = stats.read_errors,

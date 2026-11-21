@@ -179,11 +179,11 @@ impl Zone {
         );
         reply.metadata.authoritative = true;
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
+        reply.add_query(q.clone());
         if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()) {
             reply.metadata.response_code=ResponseCode::ServFail;
             return reply.to_vec().ok();
         }
-        reply.add_query(q.clone());
         if query.metadata.op_code == OpCode::Query {
             if porthub_mesh::dns_policy::matching(&self.rules, &name).is_some() {
                 reply.metadata.response_code = ResponseCode::NXDomain;
@@ -266,6 +266,24 @@ mod tor_coexistence_tests {
 mod sparse_dns_tests {
     use super::*;
     use hickory_proto::{op::Query,rr::Name};
+    #[test]
+    fn revoked_dns_authority_returns_a_matching_failure() -> Result<()> {
+        let (handle, _control) = super::super::sparse::channel();
+        let mut zone = Zone::default();
+        zone.set_sparse(handle.clone());
+        handle.revoke_all();
+
+        let mut query = Message::query();
+        query.metadata.id = 7343;
+        query.add_query(Query::query(Name::from_ascii("peer.phub.")?, RecordType::AAAA));
+        let response = Message::from_vec(&zone.answer(&query.to_vec()?).unwrap())?;
+        assert_eq!(response.metadata.id, query.metadata.id);
+        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(response.queries, query.queries);
+        assert!(response.answers.is_empty());
+        Ok(())
+    }
+
     #[tokio::test(start_paused=true)]
     async fn private_miss_does_not_fall_through_even_when_public_dns_is_forwarded()->Result<()> {
         let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"dns_suffixes":["custom.internal"],"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;

@@ -25,6 +25,7 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         .filter(|link| {
             let name = link.name().unwrap_or("");
             link.is_up()
+                && link.carrier() != Some(false)
                 && !porthub_mesh::underlay::overlay_interface(name, link.kind().unwrap_or(""))
                 && ![
                     "lo", "ph", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "lxc",
@@ -174,7 +175,7 @@ mod tests {
     #[ignore = "requires an owned disposable container namespace and NET_ADMIN"]
     async fn kernel_events_refresh_underlay_addresses_and_ignore_owned_overlay_links() -> Result<()>
     {
-        use nlink::netlink::link::DummyLink;
+        use nlink::netlink::link::{DummyLink, VethLink};
         anyhow::ensure!(
             std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
                 && std::path::Path::new("/.dockerenv").is_file(),
@@ -182,8 +183,9 @@ mod tests {
         );
         let connection = Connection::<Route>::new()?;
         let underlay = "enphverify0";
+        let peer = "phpeer0";
         let overlays = ["phverify0", "tun0ph1234abcd", "tailscale0", "wt0", "zt01234567"];
-        for name in std::iter::once(underlay).chain(overlays) {
+        for name in [underlay, peer].into_iter().chain(overlays) {
             anyhow::ensure!(connection.get_link_by_name(name).await?.is_none());
         }
         let (output, mut input) = watch::channel(vec!["127.0.0.1:1".parse()?]);
@@ -191,7 +193,8 @@ mod tests {
         let task = tokio::spawn(watch(output, cancel.clone()));
         let result = async {
             wait_snapshot(&mut input, &[]).await?;
-            connection.add_link(DummyLink::new(underlay)).await?;
+            connection.add_link(VethLink::new(underlay, peer)).await?;
+            connection.set_link_up(peer).await?;
             let underlay_index = connection
                 .get_link_by_name(underlay)
                 .await?
@@ -224,6 +227,14 @@ mod tests {
                 !input.has_changed()?,
                 "overlay changes were published as underlay changes"
             );
+            // Unplugging Ethernet keeps the local address and IFF_UP.
+            connection.set_link_down(peer).await?;
+            let disconnected = connection.get_link_by_name(underlay).await?.unwrap();
+            anyhow::ensure!(disconnected.is_up() && disconnected.carrier() == Some(false));
+            anyhow::ensure!(current().await?.is_empty(), "disconnected Ethernet address still advertised");
+            wait_snapshot(&mut input, &[]).await?;
+            connection.set_link_up(peer).await?;
+            wait_snapshot(&mut input, &["192.0.2.11:0".parse()?]).await?;
             connection.set_link_down(underlay).await?;
             wait_snapshot(&mut input, &[]).await?;
             anyhow::Ok(())

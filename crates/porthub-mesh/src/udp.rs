@@ -202,6 +202,8 @@ pub struct Statistics {
     pub sent_bytes: u64,
     pub received_bytes: u64,
     pub dropped_outgoing: u64,
+    /// Nonblocking sends refused before entering the full peer queue.
+    pub outgoing_queue_full: u64,
     pub dropped_incoming: u64,
     pub write_errors: u64,
     pub read_errors: u64,
@@ -264,6 +266,7 @@ enum Command {
     Statistics(oneshot::Sender<Statistics>),
 }
 struct Lifetime {
+    outgoing_queue_full: std::sync::atomic::AtomicU64,
     cancel: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
     _allocation: Option<Allocation>,
@@ -476,6 +479,7 @@ impl Session {
                 state,
                 description,
                 lifetime: Arc::new(Lifetime {
+                    outgoing_queue_full: Default::default(),
                     cancel,
                     task: Mutex::new(Some(task)),
                     _allocation: allocation,
@@ -533,9 +537,16 @@ impl Session {
             (20..=MAX_PACKET).contains(&packet.len()),
             "invalid private packet size"
         );
-        self.packets
-            .try_send({if let Some(permit)=&permit {ensure!(permit.valid(),"private packet admission retired");self.guarded.store(true,std::sync::atomic::Ordering::SeqCst);}Outbound{bytes:packet,permit}})
-            .map_err(|_| anyhow::anyhow!("private peer send queue unavailable"))
+        if let Some(permit) = &permit {
+            ensure!(permit.valid(), "private packet admission retired");
+            self.guarded.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.packets.try_send(Outbound { bytes: packet, permit }).map_err(|error| {
+            if matches!(error, mpsc::error::TrySendError::Full(_)) {
+                self.lifetime.outgoing_queue_full.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            anyhow::anyhow!("private peer send queue unavailable")
+        })
     }
     /// Reliable stream carriers propagate bounded queue pressure in their own
     /// worker, without blocking the TUN packet owner or control-plane work.
@@ -559,9 +570,9 @@ impl Session {
             .send(Command::Statistics(reply))
             .await
             .map_err(|_| anyhow::anyhow!("private peer closed"))?;
-        result
-            .await
-            .map_err(|_| anyhow::anyhow!("private peer closed"))
+        let mut stats = result.await.map_err(|_| anyhow::anyhow!("private peer closed"))?;
+        stats.outgoing_queue_full = self.lifetime.outgoing_queue_full.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(stats)
     }
     pub async fn close(&self) {
         self.lifetime.cancel.cancel();
@@ -807,7 +818,7 @@ mod io_tests {
         Ok(())
     }
     #[derive(Clone, Copy, PartialEq)]
-    enum Fault { Unreachable, ClosedInterface, RetiredPermit, SilentLoss }
+    enum Fault { Unreachable, ClosedInterface, RetiredPermit, SilentLoss, FullQueue }
     async fn exercise(fault: Fault) -> Result<()> {
         let dead_interface = fault == Fault::ClosedInterface;
         let gate=Arc::new(Gate::default());
@@ -893,6 +904,21 @@ mod io_tests {
                         && left.statistics().await?.write_errors > 0
                 );
             }
+            if fault == Fault::FullQueue {
+                let before = left.statistics().await?;
+                let held = left.packets.reserve_many(left.packets.max_capacity()).await?;
+                let sender = left.clone();
+                let packet = Bytes::from(vec![0x45; MAX_PACKET]);
+                assert!(sender.send(Bytes::new()).is_err());
+                assert!(sender.send_guarded(packet.clone(), Some(SendPermit::new(|| false))).is_err());
+                assert!(sender.send(packet.clone()).is_err());
+                assert!(left.send(packet).is_err());
+                drop(held);
+                exchange(&left, &mut right_rx).await?;
+                let after = left.statistics().await?;
+                assert_eq!(after.outgoing_queue_full - before.outgoing_queue_full, 2);
+                assert_eq!(after.dropped_outgoing, before.dropped_outgoing);
+            }
             if fault == Fault::SilentLoss {
                 gate.isolated.store(true, Ordering::SeqCst);
                 // Keep an otherwise healthy control queue busy while the established
@@ -946,6 +972,10 @@ mod io_tests {
     }
     #[tokio::test]
     async fn actual_native_udp_pending_send_cannot_resume_after_admission_retirement()->Result<()> {exercise(Fault::RetiredPermit).await}
+    #[tokio::test]
+    async fn counts_only_full_queue_rejections_across_session_clones() -> Result<()> {
+        exercise(Fault::FullQueue).await
+    }
     #[tokio::test]
     async fn busy_session_detects_silent_loss_of_established_path() -> Result<()> {
         exercise(Fault::SilentLoss).await
