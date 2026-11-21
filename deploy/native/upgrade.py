@@ -280,7 +280,7 @@ def replace_private(path, payload, metadata):
 
 class ReleaseSelection:
     """Preflight and transaction for the ordinary Compose restart configuration."""
-    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub", depot=None, hotfix_from=None):
+    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub", depot=None, hotfix_from=None, restore_canonical=None):
         self.path = root / '.env'
         self.metadata = self.path.lstat()
         if not stat.S_ISREG(self.metadata.st_mode) or self.metadata.st_mode & 0o077:
@@ -291,6 +291,9 @@ class ReleaseSelection:
         self.canonical_aliases = {}
         if hotfix_from is not None and (not re.fullmatch(r'[a-f0-9]{40}', hotfix_from) or hotfix_from == revision):
             raise ValueError('A same-version hotfix requires a different full predecessor revision')
+        if restore_canonical is not None and (hotfix_from is not None or set(images) != {'core'}
+                or not re.fullmatch(r'sha256:[a-f0-9]{64}', restore_canonical)):
+            raise ValueError('Restoring a qualified core requires its recorded canonical image ID')
         for role, image in images.items():
             stable = namespace + ':' + role
             if configuration['services'][role]['image'] != stable:
@@ -305,6 +308,13 @@ class ReleaseSelection:
                     raise ValueError('The running role must match the canonical image and expected hotfix predecessor')
                 self.canonical_aliases[immutable] = previous
                 immutable += '-' + revision
+            if restore_canonical is not None:
+                qualified = immutable + '-' + revision
+                if (image_reference(immutable) != restore_canonical or restore_canonical == image['Id']
+                        or image_reference(qualified) != image['Id'] or image_reference(stable) != previous):
+                    raise ValueError('Qualified restore requires both retained aliases and a matching current image')
+                self.canonical_aliases.update({immutable: restore_canonical, qualified: image['Id']})
+                immutable = qualified
             rollback = namespace + ':rollback-' + role + '-' + previous.removeprefix('sha256:')[:12]
             for reference, expected in ((immutable, image['Id']), (rollback, previous)):
                 existing = image_reference(reference)
@@ -451,7 +461,8 @@ def perform_candidate(args, root, roles, current, images, base, depot):
     if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
     selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project,
-                                 depot=depot, hotfix_from=getattr(args, 'hotfix_from_revision', None))
+                                 depot=depot, hotfix_from=getattr(args, 'hotfix_from_revision', None),
+                                 restore_canonical=getattr(args, 'restore_qualified_core', None))
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
@@ -540,6 +551,8 @@ def main():
     parser.add_argument('--roles', nargs='+', choices=ROLES, default=list(ROLES), help='Replace only these roles; omitted roles must keep running unchanged')
     parser.add_argument('--hotfix-from-revision', metavar='PREDECESSOR_SHA',
                         help='Use a revision-qualified immutable alias for a same-version hotfix of the running canonical image')
+    parser.add_argument('--restore-qualified-core', metavar='CANONICAL_IMAGE_ID',
+                        help='Restore an existing revision-qualified core image and retain the recorded canonical alias')
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--native-build-depot', type=Path, help='First-time opt-in: existing dedicated read-only artifact depot; later upgrades preserve it automatically')
     parser.add_argument('--native-build-depot-owner-uid', type=int, help='First-time opt-in: trusted artifact publisher UID')
