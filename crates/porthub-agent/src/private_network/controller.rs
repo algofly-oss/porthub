@@ -401,6 +401,7 @@ pub(crate) async fn run_endpoint(
     let (change_cursor, cursor_rx) = watch::channel(None);
     let change_wake = Arc::new(tokio::sync::Notify::new());
     let mut announced_edit = false;
+    let mut retrying_renewal = false;
     let mut change_listener = JoinSet::new();
     let listen = |control| changes::listen(control, profile.clone(), instance.clone(), cursor_rx.clone(), change_wake.clone());
     change_listener.spawn(listen(control.clone()));
@@ -512,7 +513,22 @@ pub(crate) async fn run_endpoint(
             }
         }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
-        let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
+        // Keep time for a fresh sync if one pooled connection stops responding.
+        // Admission and the recovery request retain the ordinary transport budget.
+        let renewal_budget = if retrying_renewal {
+            None
+        } else {
+            sparse.as_ref().and_then(|resolver| {
+                let remaining = resolver.handle().current_base()?.remaining().ok()??;
+                Some((remaining / 2).min(Duration::from_secs(5)))
+            }).filter(|budget| *budget >= Duration::from_secs(1))
+        };
+        let received = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = await_private_sync(request, renewal_budget) => result,
+        };
+        retrying_renewal = received.is_none();
+        let result = received.unwrap_or(Err(crate::control::Failure::Unavailable));
         match result {
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
@@ -885,7 +901,11 @@ pub(crate) async fn run_endpoint(
             }
         }
         while readers.try_join_next().is_some() {}
-        let interval = if sparse.as_ref().is_some_and(|s|s.handle().enabled()&&s.urgent()){1}else if pending.is_empty()
+        let interval = if retrying_renewal {
+            0
+        } else if sparse.as_ref().is_some_and(|s| s.handle().enabled() && s.urgent()) {
+            1
+        } else if pending.is_empty()
             && in_flight.is_empty()
             && peers
                 .values()
@@ -916,6 +936,18 @@ pub(crate) async fn run_endpoint(
             }
         }
 
+    }
+}
+
+/// Dropping a stalled HTTP operation discards its response and request-start
+/// witness. The next controller cycle builds a new request and nonce.
+async fn await_private_sync<T>(
+    request: impl std::future::Future<Output = T>,
+    budget: Option<Duration>,
+) -> Option<T> {
+    match budget {
+        Some(budget) => tokio::time::timeout(budget, request).await.ok(),
+        None => Some(request.await),
     }
 }
 
@@ -953,6 +985,41 @@ async fn wait_cycle(
 
 fn sync_deadline(start: tokio::time::Instant, picker_demand: bool) -> tokio::time::Instant {
     start + if picker_demand { Duration::from_millis(100) } else { Duration::from_secs(1) }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn incomplete_sync_body_yields_to_a_fresh_request_and_denial() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let public_profile = serde_json::from_value(serde_json::json!({
+            "server": format!("http://{address}"), "machine_id": "fixture",
+            "token": "test-token", "allow_insecure_http_for_tests": true
+        }))?;
+        let control = crate::control::Control::new(public_profile)?;
+        let server = tokio::spawn(async move {
+            let (mut stale, _) = listener.accept().await?;
+            let mut buf = [0; 4096];
+            let n = stale.read(&mut buf).await?;
+            anyhow::ensure!(String::from_utf8_lossy(&buf[..n]).contains("POST /api/access/private/sync"));
+            stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{").await?;
+            // Keep the original successful headers and incomplete body on their own socket.
+            let (mut fresh, _) = listener.accept().await?;
+            anyhow::ensure!(fresh.read(&mut buf).await? > 0);
+            fresh.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let sync = || control.request(reqwest::Method::POST, "access/private/sync", Some(serde_json::json!({})), &[]);
+        assert!(await_private_sync(sync(), Some(Duration::from_millis(600))).await.is_none());
+        let fresh = tokio::time::timeout(Duration::from_secs(3), await_private_sync(sync(), None)).await?;
+        assert!(matches!(fresh, Some(Err(crate::control::Failure::Rejected(403)))));
+        server.await??;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
