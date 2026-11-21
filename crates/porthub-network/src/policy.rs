@@ -5,7 +5,7 @@ pub mod exit_pick;
 pub use exit_pick::{ExitPickRequest,ExitPickResponse,ExitPickStatus,ExitChoice};
 mod sparse;
 mod tcp_continuity;
-pub use tcp_continuity::{RetryProof, TcpContinuity, TcpResume};
+pub use tcp_continuity::{LocalOpening, RetryProof, TcpContinuity, TcpResume};
 pub use sparse::{ExitIntent,ExitRole,ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 /// Existing full-snapshot ceiling, including the mandatory local identity.
@@ -180,6 +180,8 @@ pub struct Packet {
     fin: bool,
     icmp_type: u8,
     tcp_sequence: u32,
+    tcp_acknowledgement:u32,
+    tcp_data_len:u16,
 }
 impl Packet {
     pub fn source(&self) -> Ipv4Addr {
@@ -240,6 +242,7 @@ impl Packet {
             fin: false,
             icmp_type: 0,
             tcp_sequence: 0,
+            tcp_acknowledgement:0, tcp_data_len:0,
         };
         match bytes[9] {
             6 => {
@@ -250,6 +253,8 @@ impl Packet {
                 if header < 20 || header > n - h {
                     return None;
                 }
+                packet.tcp_data_len=(n-h-header) as u16;
+                packet.tcp_acknowledgement=u32::from_be_bytes(bytes[h+8..h+12].try_into().ok()?);
                 packet.tcp_sequence = u32::from_be_bytes(bytes[h + 4..h + 8].try_into().ok()?);
                 packet.syn = bytes[h + 13] & 2 != 0;
                 packet.ack = bytes[h + 13] & 16 != 0;
@@ -315,6 +320,7 @@ struct Flow {
     phase: u8,
     raw_path: u8,
     resumed: Option<std::sync::Arc<TcpResume>>,
+    tcp_send:tcp_continuity::TcpSendWindow,
     fin_directions: u8,
     close_until: Option<Instant>,
     _permit:Option<tokio::sync::OwnedSemaphorePermit>,
@@ -738,6 +744,7 @@ fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &
                 phase: 0,
                 raw_path: 0,
                 resumed: None,
+                tcp_send:Default::default(),
                 fin_directions: 0,
                 close_until: None,
             },
@@ -762,7 +769,7 @@ mod lifetime_tests {
         let start = Instant::now();
         let syn = Packet {
             key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
-            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1, tcp_acknowledgement:0, tcp_data_len:0,
         };
         let reply = Packet { key: Key { src: syn.key.dst, dst: syn.key.src, sport: syn.key.dport, dport: syn.key.sport, ..syn.key }, ack: true, ..syn };
         let ack = Packet { syn: false, ack: true, ..syn };
@@ -786,7 +793,7 @@ mod lifetime_tests {
         let now = Instant::now();
         let syn = Packet {
             key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
-            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1, tcp_acknowledgement:0, tcp_data_len:0,
         };
         let mut flows = HashMap::new();
         assert!(track_packet(&mut flows, syn, "exit-a", true, now));
@@ -804,7 +811,7 @@ mod lifetime_tests {
         let start = Instant::now();
         let syn = Packet {
             key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
-            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1, tcp_acknowledgement:0, tcp_data_len:0,
         };
         let reply = Packet { key: Key { src: syn.key.dst, dst: syn.key.src, sport: syn.key.dport, dport: syn.key.sport, ..syn.key }, ack: true, ..syn };
         let ack = Packet { syn: false, ack: true, ..syn };

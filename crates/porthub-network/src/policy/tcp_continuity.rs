@@ -10,6 +10,8 @@ const CONFIRM: Duration = Duration::from_secs(6);
 const HEADER: usize = 37;
 type Opening = [u8; 16];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LocalOpening(Opening);
 pub struct TcpResume {
     pub(super) at: Instant,
     alive: std::sync::atomic::AtomicBool,
@@ -32,15 +34,36 @@ pub struct RetryProof {
     nonce: [u8; 16],
 }
 impl RetryProof {
+    pub fn matches_opening(&self, opening: LocalOpening) -> bool {
+        self.opening == opening.0
+    }
+    pub fn same_challenge(&self, other: &Self) -> bool {
+        self.nonce == other.nonce
+    }
     pub fn request(&self, generation: [u8; 16]) -> Vec<u8> {
-        frame(3, generation, self.nonce, std::iter::once(self.opening))
+        self.request_batch(generation, std::iter::once(self))
+    }
+    pub fn request_batch<'a>(
+        &self,
+        generation: [u8; 16],
+        batch: impl Iterator<Item = &'a Self>,
+    ) -> Vec<u8> {
+        frame(
+            3,
+            generation,
+            self.nonce,
+            batch.filter(|p| self.same_challenge(p)).map(|p| p.opening),
+        )
     }
     pub fn matches_reply(&self, generation: [u8; 16], wire: &[u8]) -> bool {
-        wire.len() == HEADER + 16
+        (HEADER + 16..=HEADER + 16 * BATCH).contains(&wire.len())
+            && (wire.len() - HEADER).is_multiple_of(16)
             && &wire[..5] == b"PHC1\x04"
             && wire[5..21] == generation
             && wire[21..37] == self.nonce
-            && wire[37..] == self.opening
+            && wire[37..]
+                .chunks_exact(16)
+                .any(|opening| opening == self.opening)
     }
 }
 fn encode(packet: Packet) -> Opening {
@@ -94,8 +117,47 @@ fn established(flow: &Flow, now: Instant) -> bool {
         && flow.raw_path & 7 == 3
 }
 
+/// The OS TCP send window as observed on the previously authorized raw path.
+/// Serial arithmetic is bounded to the last MiB; ambiguous ranges are discarded.
+#[derive(Clone, Copy, Default)]
+pub(super) struct TcpSendWindow {
+    end: Option<u32>,
+    ack: Option<u32>,
+}
+impl TcpSendWindow {
+    fn advance(high: &mut Option<u32>, next: u32) {
+        if high.is_none_or(|old| next.wrapping_sub(old) < (1 << 31)) {
+            *high = Some(next);
+        }
+    }
+    fn observe(&mut self, packet: Packet, inbound: bool) {
+        if inbound {
+            if packet.ack {
+                Self::advance(&mut self.ack, packet.tcp_acknowledgement);
+            }
+        } else {
+            Self::advance(
+                &mut self.end,
+                packet
+                    .tcp_sequence
+                    .wrapping_add(u32::from(packet.tcp_data_len)),
+            );
+        }
+    }
+    fn covers(&self, packet: Packet) -> bool {
+        let (Some(end), Some(ack)) = (self.end, self.ack) else {
+            return false;
+        };
+        let past = end.wrapping_sub(ack);
+        let offset = packet.tcp_sequence.wrapping_sub(ack);
+        past <= 1_048_576
+            && offset <= past
+            && (offset == past || offset + u32::from(packet.tcp_data_len) <= past)
+    }
+}
 struct Candidate {
     opening: Packet,
+    tcp_send: TcpSendWindow,
     until: Instant,
 }
 struct Pair {
@@ -113,6 +175,26 @@ pub struct TcpContinuity {
 }
 
 impl TcpContinuity {
+    /// A locator for a local retransmission. This imparts no send or receive permission.
+    pub fn local_opening(&self, packet: Packet) -> Option<(&str, LocalOpening)> {
+        let now = Instant::now();
+        let k = packet.key;
+        self.pending.iter().find_map(|(id, p)| {
+            if p.until <= now
+                || p.challenge.is_some_and(|(_, end)| end <= now)
+                || k.src != p.local.ip
+                || k.dst != p.peer.ip
+            {
+                return None;
+            }
+            let f = p.flows.iter().find(|f| {
+                f.until > now
+                    && f.tcp_send.covers(packet)
+                    && (f.opening.key == k || f.opening.key == reverse(k))
+            })?;
+            Some((id.as_str(), LocalOpening(encode(f.opening))))
+        })
+    }
     pub fn peers(&self) -> impl Iterator<Item = &str> {
         self.pending.keys().map(String::as_str)
     }
@@ -186,6 +268,7 @@ impl TcpContinuity {
             .take(remaining)
             .map(|f| Candidate {
                 opening: f.opening,
+                tcp_send: f.tcp_send,
                 until: f.expires,
             })
             .collect();
@@ -276,14 +359,16 @@ impl Engine {
         let matches = |opening: Packet| opening.key == k || reverse(opening.key) == k;
         if let Some(old) = pending.pending.get(id).filter(|old| old.until > now) {
             if let Some((nonce, _)) = old.challenge.filter(|(_, end)| *end > now) {
-                let f = old
+                if let Some(f) = old
                     .flows
                     .iter()
-                    .find(|f| f.until > now && matches(f.opening) && p.allowed(f.opening))?;
-                return Some(RetryProof {
-                    opening: encode(f.opening),
-                    nonce,
-                });
+                    .find(|f| f.until > now && matches(f.opening) && p.allowed(f.opening))
+                {
+                    return Some(RetryProof {
+                        opening: encode(f.opening),
+                        nonce,
+                    });
+                }
             }
         }
         let f = p.flows.get(&k).or_else(|| p.flows.get(&reverse(k)))?;
@@ -335,6 +420,9 @@ impl Engine {
             reverse(k)
         };
         if let Some(f) = pair.flows.get_mut(&k) {
+            if raw {
+                f.tcp_send.observe(packet, inbound);
+            }
             if !raw {
                 if let Some(r) = &f.resumed {
                     r.retire();
@@ -544,6 +632,7 @@ impl Engine {
                         Flow {
                             remote: String::new(),
                             opening: e.opening,
+                            tcp_send: e.tcp_send,
                             expires: e.until,
                             phase: 2,
                             raw_path: 8,

@@ -25,6 +25,38 @@ pub struct Tun {
     _source_lease: super::native_owner::source::OwnerLease,
 }
 
+/// A retired utun has one native receive queue. Only its data-plane reader is
+/// exposed during recovery, after the kernel proves all old datagrams are gone.
+pub(super) struct RetrySource(std::sync::Arc<Tun>);
+pub(super) struct RetryReader(std::sync::Arc<Tun>);
+fn drain_previous_datagrams(fd:std::os::fd::RawFd)->Result<()> {
+    let mut discarded=[0u8;porthub_mesh::MAX_PACKET+16];
+    for _ in 0..=64 {
+        let n=unsafe{libc::recv(fd,discarded.as_mut_ptr().cast(),discarded.len(),libc::MSG_DONTWAIT)};
+        if n>0 {continue;}
+        if n<0 {
+            let e=std::io::Error::last_os_error();
+            if e.kind()==std::io::ErrorKind::WouldBlock {return Ok(());}
+            if e.kind()==std::io::ErrorKind::Interrupted {continue;}
+            return Err(e.into());
+        }
+        anyhow::bail!("retired utun reached end of stream");
+    }
+    anyhow::bail!("retired utun did not reach an empty queue")
+}
+impl RetrySource {
+    pub(super) fn open(self)->Result<RetryReader>{
+        use std::os::fd::AsRawFd;
+        let name=CString::new(self.0.name.as_str())?;
+        ensure!(unsafe{libc::if_nametoindex(name.as_ptr())}==self.0.index && self.0.has_source_lease()?,
+            "retired utun source ownership changed");
+        drain_previous_datagrams(self.0.device.as_raw_fd())?;
+        Ok(RetryReader(self.0))
+    }
+}
+impl RetryReader {
+    pub(super) async fn read(&self,buffer:&mut [u8])->Result<usize>{self.0.read(buffer).await}
+}
 fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
     let prefix = route.prefix().min(32);
     if prefix == 0 {
@@ -38,6 +70,11 @@ fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
 }
 
 impl Tun {
+    pub(super) fn retry_source(self:&std::sync::Arc<Self>)->Option<RetrySource>{
+        if !self.has_source_lease().ok()?{return None;}
+        self.packet_loop.retire();
+        Some(RetrySource(self.clone()))
+    }
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
     pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
     pub(super) fn has_source_lease(&self)->Result<bool>{self._source_lease.held()}
@@ -225,6 +262,21 @@ mod tests {
     use route_manager::Route;
     use std::net::IpAddr;
 
+    #[test]
+    fn retry_reader_requires_actual_empty_kernel_queue_and_rejects_a_backlog(){
+        use std::os::{fd::AsRawFd,unix::net::UnixDatagram};
+        let (producer,consumer)=UnixDatagram::pair().unwrap();
+        producer.send(b"previous-worker").unwrap();
+        super::drain_previous_datagrams(consumer.as_raw_fd()).unwrap();
+        producer.send(b"current-worker").unwrap();
+        let mut out=[0;32];
+        let n=consumer.recv(&mut out).unwrap();assert_eq!(&out[..n],b"current-worker");
+        producer.set_nonblocking(true).unwrap();
+        let mut sent=0;
+        while sent<66 && producer.send(b"x").is_ok(){sent+=1;}
+        // macOS may impose a smaller datagram high-water mark.
+        if sent>=65 {assert!(super::drain_previous_datagrams(consumer.as_raw_fd()).is_err());}
+    }
     #[test]
     fn route_preflight_detects_only_overlapping_ipv4_networks() {
         let lan = Route::new("192.168.80.0".parse::<IpAddr>().unwrap(), 24);

@@ -374,6 +374,9 @@ pub async fn run_with_logs(
 #[derive(Default)]
 struct Continuity {
     generation: Option<uuid::Uuid>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    retry_source:Option<super::device::RetrySource>,
+    last_fast_retry:Option<Instant>,
     sleep_count: Option<super::sleep_generation::Generation>,
     clock_sample: Option<(std::time::SystemTime, Instant)>,
     control_window:Option<Instant>,
@@ -450,7 +453,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             #[cfg(not(any(target_os="linux",target_os="macos")))]
             let dns=false;
             if (dns||tcp) && Profile::load(&path).context(PrivateStage::Profile)?==profile {
-                tokio::select!{_=cancel.cancelled()=>return Ok(()),_=crate::unified::suspend_aware_delay(Duration::from_secs(5))=>{}}
+                // A pending kernel connection merits one immediate attempt. Further
+                // failures retain normal backoff and cannot increase the idle request rate.
+                if tcp && continuity.last_fast_retry.is_none_or(|at|at.elapsed()>=Duration::from_secs(35)){
+                    continuity.last_fast_retry=Some(Instant::now());
+                } else {
+                    tokio::select!{_=cancel.cancelled()=>return Ok(()),_=crate::unified::suspend_aware_delay(Duration::from_secs(5))=>{}}
+                }
                 if Profile::load(&path).context(PrivateStage::Profile)?==profile {
                     if !tcp || !continuity.scoped(continuity.generation){
                         continuity.pending=Default::default();
@@ -673,6 +682,11 @@ async fn run_authorized_worker(
     let mut buffer = [0u8; porthub_mesh::MAX_PACKET + 1];
     let mut status_tick = tokio::time::interval(Duration::from_secs(30));
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let mut retry_reader=continuity.retry_source.take().and_then(|src|src.open().ok());
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let mut preauth_buffer=[0u8;porthub_mesh::MAX_PACKET+1];
+    let mut quarantine=super::tcp_retry::Quarantine::default();
     let mut local_retries=super::tcp_retry::LocalRetries::default();
     let mut retry_until=None;
     let mut retry_tick=tokio::time::interval(Duration::from_millis(250));
@@ -722,7 +736,10 @@ async fn run_authorized_worker(
                 #[cfg(feature="local-tor")]
                 let cached_authority=authority.clone();
                 let snapshot=authority.accepted()?.clone();
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                {drop(retry_reader.take());}
                 continuity.observe(&mut policy,authority.workspace_generation());
+                quarantine.expire(continuity.generation);
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 #[cfg(feature="private-sparse")]
                 component_clock.send_replace(authority.clock_sample());
@@ -1076,6 +1093,10 @@ async fn run_authorized_worker(
                     sparse_handle.installed_authority(&response.query,lease.clone(),authority.retained());
                     if generation==authority.workspace_generation() && continuity.scoped(generation) && sparse_handle.peer_is_live(&id) {
                         if policy.prepare_tcp(&mut continuity.pending,&lease) {
+                            if let Some(generation)=generation {
+                                quarantine.admit(&mut local_retries,&policy,&continuity.pending,&id,generation,
+                                    ||super::authority_event::send_permit(installed_authority.as_ref(),&sparse_handle,&id).ok().flatten());
+                            }
                             retry_until=Some(Instant::now()+Duration::from_secs(6));
                             retry_tick.reset_immediately();
                         }
@@ -1114,7 +1135,7 @@ async fn run_authorized_worker(
                     let Some(generation)=installed_authority.as_ref().and_then(|base|base.workspace_generation()) else{continue};
                     if !continuity.admit_control(&peer) || !continuity.scoped(Some(generation)) || sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation) {continue;}
                     if envelope.payload.get(4)==Some(&4) {
-                        if let Some((segment,permit))=local_retries.ready(&policy,&peer,generation,&envelope.payload,
+                        while let Some((segment,permit))=local_retries.ready(&policy,&peer,generation,&envelope.payload,
                             ||super::authority_event::send_permit(installed_authority.as_ref(),&sparse_handle,&peer).ok().flatten()) {
                             let peers=sessions.read().await;
                             // A stale ICE path can still report ready. The local kernel's
@@ -1348,6 +1369,11 @@ async fn run_authorized_worker(
             check_installed_authority(installed_authority.as_ref())?;
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             continuity.pending.observe_lifecycle(parsed);
+            if continuity.pending.peers().next().is_some() {
+                if let Some(generation)=installed_authority.as_ref().and_then(|a|a.workspace_generation()).filter(|g|Some(*g)==continuity.generation) {
+                    quarantine.observe(&continuity.pending,generation,parsed,&buffer[..size],&local_retries);
+                }
+            }
             #[cfg(feature="local-tor")]
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
                 tor.packet(bytes::Bytes::copy_from_slice(&buffer[..size]));continue;
@@ -1605,9 +1631,30 @@ async fn run_authorized_worker(
                 }else{cold_datagrams.pending(item);}
             }
         },
-        _=retry_tick.tick(),if local_retries.active()||retry_until.is_some_and(|end|end>Instant::now())=>{
+        local=async {
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            {match &retry_reader{Some(reader)=>reader.read(&mut preauth_buffer).await,None=>std::future::pending().await}}
+            #[cfg(not(any(target_os="linux",target_os="macos")))]
+            {std::future::pending::<Result<usize>>().await}
+        }=>{
+            #[cfg(not(any(target_os="linux",target_os="macos")))]let _=local;
+            #[cfg(any(target_os="linux",target_os="macos"))]match local {
+                Ok(n) if n>0 && n<=porthub_mesh::MAX_PACKET && continuity.scoped(continuity.generation)=>{
+                    if let (Some(packet),Some(generation))=(Packet::parse(&preauth_buffer[..n]),continuity.generation){
+                        continuity.pending.observe_lifecycle(packet);
+                        quarantine.observe(&continuity.pending,generation,packet,&preauth_buffer[..n],&local_retries);
+                    }
+                }
+                _=>{drop(retry_reader.take());}
+            }
+        },
+        _=retry_tick.tick(),if local_retries.active()||quarantine.active()||retry_until.is_some_and(|end|end>Instant::now())||continuity.pending.peers().next().is_some()=>{
+            continuity.pending.expire();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if retry_reader.is_some() && (continuity.pending.peers().next().is_none() || !continuity.scoped(continuity.generation)) {drop(retry_reader.take());}
             let current=installed_authority.as_ref().and_then(|a|a.workspace_generation());
             let generation=current.filter(|g|continuity.scoped(Some(*g)));
+            quarantine.expire(continuity.generation.filter(|_|continuity.scoped(continuity.generation)));
             let mut frames=local_retries.requests(&policy,generation);
             if let Some(generation)=generation {
                 frames.extend(continuity.pending.requests(*generation.as_bytes()));
@@ -1840,6 +1887,8 @@ async fn run_authorized_worker(
     #[cfg(feature="private-sparse")]
     if result.as_ref().is_err_and(|error|error.is::<super::authority_clock::RequestExpired>()) {
         continuity.capture(&policy, installed_authority.as_ref());
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if recovery_scope.is_some() && private_status.native_repair.is_none() && continuity.pending.peers().next().is_some() {continuity.retry_source=device.as_ref().and_then(|tun|tun.retry_source());}
     } else {continuity.pending=Default::default();}
     if authority_expired {
         policy.revoke();

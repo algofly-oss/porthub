@@ -554,6 +554,11 @@ mod tests {
         assert!(remote.tcp_confirmation(&mut remote_saved,"b",generation,&proofs[0].request(generation)).is_none());
         engine.tcp_confirmation(&mut before,"b",generation,&grant);
         let ready=engine.tcp_confirmation(&mut before,"b",generation,&proofs[0].request(generation)).unwrap();
+        let batch=proofs[0].request_batch(generation,proofs.iter().take(3));
+        let batched=engine.tcp_confirmation(&mut before,"b",generation,&batch).unwrap();
+        assert!(proofs[..3].iter().all(|p|p.matches_reply(generation,&batched)));
+        assert!(!proofs[3].matches_reply(generation,&batched));
+        assert!(!proofs[0].matches_reply(generation,&batched[..batched.len()-1]));
         assert!(proofs[0].matches_reply(generation,&ready));assert!(!proofs[0].matches_reply([1;16],&ready));
         assert!(!proofs[1].matches_reply(generation,&ready));
         let guards:Vec<_>=proofs.iter().map(|p|engine.retry_owner("b",*p).unwrap()).collect();
@@ -564,6 +569,26 @@ mod tests {
         engine.discard_tcp_query(&Lookup{kind:"peer".into(),value:"b".into()});
         assert!(engine.retry_owner("b",proofs[2]).is_none());assert!(guards[2].upgrade().is_none_or(|r|!r.alive()));
         engine.revoke();assert!(guards[3].upgrade().is_none());
+    }
+
+    #[test]
+    fn unconfirmed_local_segment_must_match_original_senders_sequence_window() {
+        let epoch="a".repeat(64);let lease=pair(&epoch);
+        let mut e=Engine::default();e.apply(base(&epoch)).unwrap();e.install_pair(lease).unwrap();
+        establish(&mut e,41000,true);
+        let mut sent=Packet::parse(&tcp_segment(false,16,41000)).unwrap();
+        sent.tcp_sequence=5000;sent.tcp_data_len=640;e.observe_raw_tcp("b",sent,false,true);
+        let mut peer=Packet::parse(&tcp_segment(true,16,41000)).unwrap();
+        peer.tcp_acknowledgement=5050;e.observe_raw_tcp("b",peer,true,true);
+        let mut frozen=e.pause_established_tcp();
+        sent.tcp_sequence=5050;sent.tcp_data_len=463;assert!(frozen.local_opening(sent).is_some());
+        sent.tcp_sequence=5640;assert!(frozen.local_opening(sent).is_some());
+        sent.tcp_sequence=5530;assert!(frozen.local_opening(sent).is_none());
+        sent.tcp_sequence=5050u32.wrapping_sub(1);assert!(frozen.local_opening(sent).is_none());
+        sent.tcp_sequence=5050u32.wrapping_add(1<<31);assert!(frozen.local_opening(sent).is_none());
+        assert!(frozen.local_opening(peer).is_none());
+        frozen.observe_lifecycle(Packet::parse(&tcp_segment(false,2,41000)).unwrap());
+        sent.tcp_sequence=5050;assert!(frozen.local_opening(sent).is_none());
     }
 
     #[test]
