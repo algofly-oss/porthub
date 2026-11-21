@@ -191,6 +191,10 @@ impl Tun {
         let retained_peers:Vec<_>=self.routes.lock().await.iter().copied().filter(|p|audit.accepted_peers.contains(p)).collect();
         self.update_routes(&retained_peers).await?;
         audit.capture=self.update_capture_routes(pools).await?;
+        // Another VPN may install an overlapping prefix between inventory and
+        // exclusive add. The caller must retire the source through its normal
+        // conflict handler before any packet can use the new assignment.
+        let audit=super::native_owner::conflict(audit)?;
         self.update_routes(&audit.accepted_peers).await?;
         Ok(audit)
     }
