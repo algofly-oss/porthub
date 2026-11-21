@@ -4,6 +4,7 @@
 use crate::App;
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
+use futures_util::SinkExt;
 use axum::extract::ws::{Message, WebSocket};
 use std::{
     collections::HashMap,
@@ -343,6 +344,23 @@ impl Framing {
         Ok(Some(self.bytes.drain(..size).collect()))
     }
 }
+const MAX_READY_WRITES: usize = 8;
+
+async fn write_ready_packets<S: futures_util::Sink<Message> + Unpin>(
+    socket: &mut S,
+    first: Vec<u8>,
+    pending: &mut mpsc::Receiver<Vec<u8>>,
+) -> std::result::Result<(), S::Error> {
+    socket.feed(Message::Binary(first.into())).await?;
+    // Never wait for another packet. Bursts share a flush, and an interactive
+    // peer sending just one message can receive its reply immediately.
+    for _ in 1..MAX_READY_WRITES {
+        let Ok(packet) = pending.try_recv() else { break };
+        socket.feed(Message::Binary(packet.into())).await?;
+    }
+    socket.flush().await
+}
+
 pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
     let Ok(_permit) = app.legacy_turn.connections.clone().try_acquire_owned() else {
         return;
@@ -384,7 +402,11 @@ pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
             if authentication.proved.load(Ordering::Acquire) {if !peer.is_some_and(|peer|app.private_relay.peer_alive(&peer)){break;}}
             else if started.elapsed()>Duration::from_secs(10){break;}
         },
-        packet=output_rx.recv()=>{let Some(packet)=packet else{break;};tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Binary(packet.into()))).await??;},
+        packet = output_rx.recv() => {
+            let Some(packet) = packet else { break };
+            tokio::time::timeout(Duration::from_secs(5),
+                write_ready_packets(&mut socket, packet, &mut output_rx)).await??;
+        },
         frame=socket.recv()=>match frame {
             Some(Ok(Message::Binary(bytes)))=>{framing.push(&bytes)?;while let Some(packet)=framing.packet()? {tokio::time::timeout(Duration::from_secs(5),input.send(packet)).await??;}},
             Some(Ok(Message::Ping(bytes)))=>{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Pong(bytes))).await??;},
@@ -504,4 +526,35 @@ pub async fn speedtest(
         StatusCode::METHOD_NOT_ALLOWED,
         "Method not allowed",
     ))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn ready_writes_flush_single_packets_and_preserve_order_across_bursts() {
+    for count in [1, MAX_READY_WRITES + 3] {
+        let (tx, mut pending) = mpsc::channel(count);
+        for index in 0..count {
+            tx.try_send(vec![index as u8]).unwrap();
+        }
+        // Keep tx alive: an idle open connection must flush without waiting
+        // for another input. The unfold sink delivers its final item on flush.
+        let (observed, mut rx) = mpsc::unbounded_channel();
+        let mut socket = Box::pin(futures_util::sink::unfold(observed, |tx, frame| async move {
+            tx.send(frame).unwrap();
+            Ok::<_, std::convert::Infallible>(tx)
+        }));
+        let mut sent = 0;
+        while let Ok(first) = pending.try_recv() {
+            tokio::time::timeout(Duration::from_secs(1), write_ready_packets(&mut socket, first, &mut pending))
+                .await.unwrap().unwrap();
+            let end = (sent + MAX_READY_WRITES).min(count);
+            for index in sent..end {
+                let Message::Binary(frame) = rx.try_recv().unwrap() else { panic!("expected TURN binary frame") };
+                assert_eq!(frame.as_ref(), &[index as u8]);
+            }
+            assert!(rx.try_recv().is_err());
+            sent = end;
+        }
+        assert_eq!(sent, count);
+    }
 }
