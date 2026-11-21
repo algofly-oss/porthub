@@ -144,9 +144,12 @@ pub(super) fn activated(path: &Path) -> Result<UnixListener> {
     ensure!(owned.len() == 1, "unexpected launchd socket count");
     let listener = std::os::unix::net::UnixListener::from(owned.pop().unwrap());
     ensure!(
-        listener.local_addr()?.as_pathname() == Some(path),
+        listener.local_addr()?.as_pathname().is_some(),
         "unexpected launchd control socket"
     );
+    // launchd binds Control in its private runtime directory and publishes a
+    // second name at SockPathName. The accepted root service PID authenticates
+    // the connection to that publicized, root-owned control node.
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let metadata = std::fs::symlink_metadata(path).context("missing DNS control socket")?;
     ensure!(
@@ -156,4 +159,25 @@ pub(super) fn activated(path: &Path) -> Result<UnixListener> {
     listener.set_nonblocking(true)?;
     rustix::io::fcntl_setfd(&listener, rustix::io::FdFlags::CLOEXEC)?;
     Ok(UnixListener::from_std(listener)?)
+}
+
+pub(super) async fn connect(path: &Path) -> Result<UnixStream> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match UnixStream::connect(path).await {
+                Ok(stream) => return Ok(stream),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    })
+    .await
+    .context("launchd did not publish its control socket")?
 }

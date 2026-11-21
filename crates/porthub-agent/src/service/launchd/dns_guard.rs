@@ -25,6 +25,42 @@ fn contents(spec: &Spec) -> Result<String> {
         marker(&spec.identity),path(&spec.executable)?,spec.identity,path(&socket)?))
 }
 
+fn socket_identity(path: &Path) -> Result<Option<(u64, u64)>> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => {
+            ensure!(
+                m.uid() == 0 && m.file_type().is_socket() && m.mode() & 0o077 == 0,
+                "unowned DNS socket node"
+            );
+            Ok(Some((m.dev() as u64, m.ino())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn unlink_stopped_socket(path: &Path, expected: (u64, u64)) -> Result<()> {
+    let Some(identity) = socket_identity(path)? else {
+        return Ok(());
+    };
+    ensure!(
+        identity == expected,
+        "DNS control socket replaced during shutdown"
+    );
+    match tokio::net::UnixStream::connect(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        _ => anyhow::bail!("another listener still owns the DNS control socket"),
+    }
+    ensure!(
+        socket_identity(path)? == Some(expected),
+        "DNS control socket changed before unlink"
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
 async fn reconcile(spec: &Spec, wanted: bool) -> Result<Option<PathBuf>> {
     if spec.user {
         return Ok(None);
@@ -44,6 +80,7 @@ async fn reconcile(spec: &Spec, wanted: bool) -> Result<Option<PathBuf>> {
     let target = format!("system/{label}");
     let description = Launchd::command(&["print", &target]).await?;
     let file = plist.to_str().context("invalid DNS service path")?;
+    let original = socket_identity(&socket)?;
     if description.status.success() {
         ensure!(
             previous.is_some() && loaded_job_matches(&String::from_utf8(description.stdout)?, file),
@@ -58,6 +95,13 @@ async fn reconcile(spec: &Spec, wanted: bool) -> Result<Option<PathBuf>> {
             description.status.code() == Some(113),
             "cannot inspect owned DNS service"
         );
+    }
+    if let Some(identity) = original {
+        ensure!(
+            previous.is_some(),
+            "DNS control path already exists without an owned job"
+        );
+        unlink_stopped_socket(&socket, identity).await?;
     }
     if !wanted {
         if previous.is_some() {

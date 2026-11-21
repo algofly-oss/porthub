@@ -26,7 +26,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const WINDOW: Duration = Duration::from_secs(12);
-const HANDSHAKE: Duration = Duration::from_secs(2);
+const IDLE: Duration = Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +96,7 @@ pub(super) async fn claim(
         suffixes: scope.suffixes().to_vec(),
     };
     let claim = async {
-        let mut stream = UnixStream::connect(socket).await?;
+        let mut stream = ipc::connect(&socket).await?;
         ipc::write(&mut stream, &serde_json::to_vec(&request)?).await?;
         let key = String::from_utf8(ipc::read(&mut stream).await?)?;
         let uuid = key
@@ -201,21 +201,24 @@ pub async fn run(registration: &str, cancel: CancellationToken) -> Result<()> {
         "DNS guard requires the managed system service"
     );
     let listener = ipc::activated(&job::socket(registration)?)?;
-    tokio::select! {biased; _=cancel.cancelled()=>Ok(()), result=serve(registration,listener)=>result}
+    tokio::select! {biased; _=cancel.cancelled()=>Ok(()), result=serve(listener, |pid| job::authorized(registration,pid))=>result}
 }
 
-async fn serve(registration: &str, listener: tokio::net::UnixListener) -> Result<()> {
+async fn serve<F, A>(listener: tokio::net::UnixListener, authorize: F) -> Result<()>
+where
+    F: Fn(u32) -> A,
+    A: std::future::Future<Output = Result<bool>>,
+{
     let mut previous: Option<Published> = None;
     let mut deadline = None;
     loop {
-        let paused = deadline.is_some();
-        let remaining = deadline.map_or(HANDSHAKE, |end: Duration| {
+        let remaining = deadline.map_or(IDLE, |end: Duration| {
             end.saturating_sub(NativeClock.elapsed_since_boot().unwrap_or(Duration::MAX))
         });
         let next = async {
             let (mut stream, _) = listener.accept().await?;
             ensure!(
-                job::authorized(registration, ipc::peer_pid(&stream)?).await?,
+                authorize(ipc::peer_pid(&stream)?).await?,
                 "DNS guard client is not the registered service"
             );
             let request: Claim = serde_json::from_slice(&ipc::read(&mut stream).await?)?;
@@ -228,7 +231,7 @@ async fn serve(registration: &str, listener: tokio::net::UnixListener) -> Result
         };
         let (mut stream, request) = tokio::select! {
             biased;
-            _=crate::unified::suspend_aware_delay(if paused{remaining}else{Duration::from_secs(10)})=>{ if let Some(old)=previous.take(){old.close().await?;} return Ok(()); },
+            _=crate::unified::suspend_aware_delay(remaining)=>{ if let Some(old)=previous.take(){old.close().await?;} return Ok(()); },
             pair=next=>pair?,
         };
         let resume = previous.as_ref().is_some_and(|old| {
@@ -247,7 +250,9 @@ async fn serve(registration: &str, listener: tokio::net::UnixListener) -> Result
             Published::open(request).await?
         };
         if !current.client(&mut stream).await? {
-            current.close().await?;
+            // The parent reconciles the OS table against the replacement and
+            // may intentionally keep overlapping endpoints during a rule edit.
+            current.session.close().await?;
             stream.write_all(b"X").await?;
             return Ok(());
         }
@@ -264,3 +269,6 @@ async fn serve(registration: &str, listener: tokio::net::UnixListener) -> Result
         previous = Some(current);
     }
 }
+
+#[cfg(test)]
+mod tests;
