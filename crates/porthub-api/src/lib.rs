@@ -46,6 +46,7 @@ pub mod machine_delete;
 mod peer_proxy;
 pub mod pairdrop;
 pub mod private_relay;
+pub mod relay_write_progress;
 pub mod private_transport;
 pub mod realtime;
 pub mod release_cache;

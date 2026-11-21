@@ -1,5 +1,5 @@
 use anyhow::Result;
-use porthub_api::{config::Config, App};
+use porthub_api::{config::Config, relay_write_progress::{MeasuredListener, WriteProgress}, App};
 use std::sync::Arc;
 
 #[tokio::main(worker_threads = 2)]
@@ -163,13 +163,13 @@ async fn main() -> Result<()> {
     let result = if let Some(path) = std::env::var_os("PORTHUB_API_SOCKET") {
         let (listener, _lease) = porthub_runtime::socket::bind(std::path::Path::new(&path)).await?;
         tracing::info!("native API listening on internal Unix socket");
-        axum::serve(listener, router)
+        axum::serve(MeasuredListener(listener), router.into_make_service_with_connect_info::<WriteProgress>())
             .with_graceful_shutdown(shutdown)
             .await
     } else {
         let listener = tokio::net::TcpListener::bind(&tcp_address).await?;
         tracing::info!(listen = %tcp_address, "native API listening");
-        axum::serve(listener, router)
+        axum::serve(MeasuredListener(listener), router.into_make_service_with_connect_info::<WriteProgress>())
             .with_graceful_shutdown(shutdown)
             .await
     };
