@@ -30,6 +30,18 @@ impl std::fmt::Display for ExpiredDuringSuspend {
 }
 impl std::error::Error for ExpiredDuringSuspend {}
 
+/// A request spanning an entire authority window asleep can be replaced on wake.
+/// Awake expiry retains a delay when the gateway is slow or unavailable.
+pub(super) fn standalone_retry_delay(error: &anyhow::Error) -> Option<Duration> {
+    if error.is::<ExpiredDuringSuspend>() {
+        Some(Duration::ZERO)
+    } else if error.is::<RequestExpired>() {
+        Some(Duration::from_secs(5))
+    } else {
+        None
+    }
+}
+
 pub(crate) trait SuspendClock: Send + Sync {
     fn elapsed_since_boot(&self) -> Result<Duration>;
 }
@@ -221,6 +233,27 @@ mod tests {
     fn expiry() -> SystemTime {
         SystemTime::now() + Duration::from_secs(60)
     }
+    #[test]
+    fn standalone_reacquires_on_wake_but_backs_off_after_awake_expiry() -> Result<()> {
+        let clock = Arc::new(Clock(AtomicU64::new(100)));
+        let before_sleep = RequestWindow::start(clock.clone())?;
+        clock.0.store(20_100, Ordering::SeqCst);
+        let sleep_error = before_sleep.check(expiry()).unwrap_err().context("private authority");
+        assert_eq!(standalone_retry_delay(&sleep_error), Some(Duration::ZERO));
+
+        let after_wake = RequestWindow::start(clock.clone())?;
+        after_wake.check(expiry())?;
+        clock.0.store(20_601, Ordering::SeqCst);
+        let stale = after_wake.remaining_within(Duration::from_millis(500)).unwrap_err();
+        assert_eq!(standalone_retry_delay(&stale), Some(Duration::from_secs(5)));
+        let invalid_clock = {
+            clock.0.store(99, Ordering::SeqCst);
+            after_wake.check(expiry()).unwrap_err()
+        };
+        assert_eq!(standalone_retry_delay(&invalid_clock), None);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn actual_delayed_operation_and_retry_cannot_mint_fresh_authority() {
         let clock = Arc::new(Clock(AtomicU64::new(100)));
