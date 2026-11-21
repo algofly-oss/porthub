@@ -401,6 +401,7 @@ pub(crate) async fn run_endpoint(
     let (change_cursor, cursor_rx) = watch::channel(None);
     let change_wake = Arc::new(tokio::sync::Notify::new());
     let mut announced_edit = false;
+    let mut retrying_renewal = false;
     let mut change_listener = JoinSet::new();
     let listen = |control| changes::listen(control, profile.clone(), instance.clone(), cursor_rx.clone(), change_wake.clone());
     change_listener.spawn(listen(control.clone()));
@@ -455,7 +456,7 @@ pub(crate) async fn run_endpoint(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"watch_changes":true,"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"pinned_relay":true,"watch_changes":true,"tcp_continuity":1,"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if virtual_endpoint {
             body["stream_transport"] = serde_json::json!("");
@@ -490,6 +491,8 @@ pub(crate) async fn run_endpoint(
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let mut reply = None;
+        #[cfg(feature="private-sparse")]
+        let mut workspace_generation=None;
         if virtual_endpoint {
             for key in ["native_repair","exit_pick","tor_exit","application_proxy","lan_exit","lan_networks","virtual_host_provider","exit_pair_protocol","exit_ready","exit_ready_peers","exit_pair_failed"] {
                 body.as_object_mut().expect("private sync object").remove(key);
@@ -510,7 +513,22 @@ pub(crate) async fn run_endpoint(
             }
         }
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
-        let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
+        // Keep time for a fresh sync if one pooled connection stops responding.
+        // Admission and the recovery request retain the ordinary transport budget.
+        let renewal_budget = if retrying_renewal {
+            None
+        } else {
+            sparse.as_ref().and_then(|resolver| {
+                let remaining = resolver.handle().current_base()?.remaining().ok()??;
+                Some((remaining / 2).min(Duration::from_secs(5)))
+            }).filter(|budget| *budget >= Duration::from_secs(1))
+        };
+        let received = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = await_private_sync(request, renewal_budget) => result,
+        };
+        retrying_renewal = received.is_none();
+        let result = received.unwrap_or(Err(crate::control::Failure::Unavailable));
         match result {
             Ok(value) => {
                 if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
@@ -520,6 +538,10 @@ pub(crate) async fn run_endpoint(
                     refresh_clock_origin = Instant::now() + Duration::from_secs(6 * 3600);
                 }
                 if reply.is_some() {
+                    #[cfg(feature="private-sparse")]
+                    if value.authenticated_tls || profile.allow_insecure_http_for_tests {
+                        workspace_generation=value.headers.get("x-porthub-workspace-generation").and_then(|v|v.to_str().ok()) .and_then(|v|v.parse().ok());
+                    }
                     let cursor = (value.authenticated_tls || profile.allow_insecure_http_for_tests)
                         .then(|| value.headers.get("x-porthub-private-cursor")?.to_str().ok()?.parse::<uuid::Uuid>().ok()).flatten();
                     if cursor.is_some() && change_cursor.borrow().is_some() && *change_cursor.borrow()!=cursor {
@@ -556,9 +578,12 @@ pub(crate) async fn run_endpoint(
             #[cfg(feature="private-sparse")]
             let mut request_window = request_window;
             #[cfg(feature="private-sparse")]
+            if let Some(window)=&mut request_window {window.workspace_generation=workspace_generation;}
+            #[cfg(feature="private-sparse")]
             if let (Some(window), Some(clock)) = (&mut request_window, &reply.authority_clock) {
                 ensure!(clock.nonce == clock_nonce, "private authority response does not match request");
                 window.use_relative_deadlines();
+
                 window.clock_sample=super::gateway_time::ClockSample::from_sync(clock.server_time);
                 reply.snapshot.expires_at = window.local_expiry(clock.server_time, reply.snapshot.expires_at)?;
                 let leases = reply.pair_responses.iter_mut().filter_map(|p| p.lease.as_mut())
@@ -876,7 +901,11 @@ pub(crate) async fn run_endpoint(
             }
         }
         while readers.try_join_next().is_some() {}
-        let interval = if sparse.as_ref().is_some_and(|s|s.handle().enabled()&&s.urgent()){1}else if pending.is_empty()
+        let interval = if retrying_renewal {
+            0
+        } else if sparse.as_ref().is_some_and(|s| s.handle().enabled() && s.urgent()) {
+            1
+        } else if pending.is_empty()
             && in_flight.is_empty()
             && peers
                 .values()
@@ -907,6 +936,18 @@ pub(crate) async fn run_endpoint(
             }
         }
 
+    }
+}
+
+/// Dropping a stalled HTTP operation discards its response and request-start
+/// witness. The next controller cycle builds a new request and nonce.
+async fn await_private_sync<T>(
+    request: impl std::future::Future<Output = T>,
+    budget: Option<Duration>,
+) -> Option<T> {
+    match budget {
+        Some(budget) => tokio::time::timeout(budget, request).await.ok(),
+        None => Some(request.await),
     }
 }
 
@@ -944,6 +985,41 @@ async fn wait_cycle(
 
 fn sync_deadline(start: tokio::time::Instant, picker_demand: bool) -> tokio::time::Instant {
     start + if picker_demand { Duration::from_millis(100) } else { Duration::from_secs(1) }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn incomplete_sync_body_yields_to_a_fresh_request_and_denial() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let public_profile = serde_json::from_value(serde_json::json!({
+            "server": format!("http://{address}"), "machine_id": "0123456789abcdef01234567",
+            "token": "test-token", "allow_insecure_http_for_tests": true
+        }))?;
+        let control = crate::control::Control::new(public_profile)?;
+        let server = tokio::spawn(async move {
+            let (mut stale, _) = listener.accept().await?;
+            let mut buf = [0; 4096];
+            let n = stale.read(&mut buf).await?;
+            anyhow::ensure!(String::from_utf8_lossy(&buf[..n]).contains("POST /api/access/private/sync"));
+            stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{").await?;
+            // Keep the original successful headers and incomplete body on their own socket.
+            let (mut fresh, _) = listener.accept().await?;
+            anyhow::ensure!(fresh.read(&mut buf).await? > 0);
+            fresh.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let sync = || control.request(reqwest::Method::POST, "access/private/sync", Some(serde_json::json!({})), &[]);
+        assert!(await_private_sync(sync(), Some(Duration::from_millis(600))).await.is_none());
+        let fresh = tokio::time::timeout(Duration::from_secs(3), await_private_sync(sync(), None)).await?;
+        assert!(matches!(fresh, Some(Err(crate::control::Failure::Rejected(403)))));
+        server.await??;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

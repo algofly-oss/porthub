@@ -123,6 +123,7 @@ async fn prepare_with_fault(
         return Err(conflict("Invalid migration job or reserved pools"));
     }
     guard.require_allocation()?;
+    crate::private_continuity::write(guard.app, Some(guard.workspace), async {
     indexes(guard.app).await?;
     let digest = plan_digest(rows)?;
     let first = &rows[0];
@@ -325,6 +326,7 @@ async fn prepare_with_fault(
     app.private_relay
         .workspace_generation(&first.workspace, first.generation, true);
     Ok(())
+    }).await
 }
 #[cfg(test)]
 mod tests {

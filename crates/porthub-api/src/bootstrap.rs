@@ -4,8 +4,13 @@ use crate::config::Config;
 use anyhow::{Context, Result};
 use mongodb::{bson::doc, Client, Database};
 
+async fn gateway_client(config:&Config)->Result<Client>{
+    let mut opts=mongodb::options::ClientOptions::parse(&config.mongo_uri).await?;
+    if config.fences_private_writes() {opts.app_name=Some(crate::private_continuity::app_name(crate::private_continuity::process()));}
+    Ok(Client::with_options(opts)?)
+}
 pub async fn database(config: &Config) -> Result<Database> {
-    let client = Client::with_uri_str(&config.mongo_uri).await?;
+    let client = gateway_client(config).await?;
     let database = client.database(&config.mongo_database);
     let authenticated = database.run_command(doc! {"ping":1}).await;
     if authenticated.is_ok() {
@@ -35,7 +40,7 @@ pub async fn database(config: &Config) -> Result<Database> {
         .context("initialize core-local MongoDB administrator")?;
     // A client that already failed authentication may retain the failed pool;
     // create a fresh authenticated connection after the user is committed.
-    let client = Client::with_uri_str(&config.mongo_uri).await?;
+    let client = gateway_client(config).await?;
     let database = client.database(&config.mongo_database);
     database
         .run_command(doc! {"ping":1})

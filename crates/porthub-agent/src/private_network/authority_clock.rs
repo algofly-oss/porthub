@@ -122,6 +122,7 @@ pub(crate) struct RequestWindow {
     awake_start: Instant,
     wall_start: SystemTime,
     relative_deadlines: bool,
+    pub(super) workspace_generation: Option<uuid::Uuid>,
     pub(super) clock_sample: Option<super::gateway_time::ClockSample>,
 }
 impl RequestWindow {
@@ -144,6 +145,7 @@ impl RequestWindow {
             awake_start: Instant::now(),
             wall_start: SystemTime::now(),
             relative_deadlines: false,
+            workspace_generation: None,
             clock_sample: None,
         })
     }
@@ -163,11 +165,19 @@ impl RequestWindow {
             server_expiry.duration_since(self.wall_start)?.min(REQUEST_VALIDITY)
         } else { REQUEST_VALIDITY };
         let local = self.remaining_within(limit)?;
-        let server = server_expiry
-            .duration_since(SystemTime::now())
-            .ok()
-            .filter(|n| !n.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("server authority expired"))?;
+        let wall_now = SystemTime::now();
+        let Some(server) = server_expiry.duration_since(wall_now).ok().filter(|n| !n.is_zero()) else {
+            // A projected, signed lifetime can expire just before the monotonic
+            // deadline when the healthy system clock slews. Preserve the typed
+            // timeout without accepting any bytes or extending either deadline.
+            if self.relative_deadlines
+                && wall_now.duration_since(self.wall_start).is_ok_and(|wall_elapsed|
+                    wall_elapsed.abs_diff(self.awake_start.elapsed()) < Duration::from_secs(1))
+            {
+                return Err(RequestExpired.into());
+            }
+            anyhow::bail!("server authority expired");
+        };
         Ok(local.min(server))
     }
     /// Shorten this ORIGINAL start; never begin a new clock for received TTL.
@@ -233,6 +243,28 @@ mod tests {
     fn expiry() -> SystemTime {
         SystemTime::now() + Duration::from_secs(60)
     }
+    #[test]
+    fn projected_wall_expiry_distinguishes_ordinary_slew_from_a_clock_jump() -> Result<()> {
+        let clock = Arc::new(Clock(AtomicU64::new(100)));
+        let mut window = RequestWindow::start(clock)?;
+        window.use_relative_deadlines();
+        // Both native clocks are still inside their logical budget, whereas
+        // the local wall projection has already reached the authenticated TTL.
+        window.wall_start = SystemTime::now() - Duration::from_millis(1700);
+        window.awake_start = Instant::now() - Duration::from_secs(1);
+        let expiry = window.wall_start + Duration::from_millis(1600);
+        assert!(window.remaining(expiry).unwrap_err().is::<RequestExpired>());
+
+        window.relative_deadlines = false;
+        assert!(!window.remaining(expiry).unwrap_err().is::<RequestExpired>());
+        window.use_relative_deadlines();
+        window.wall_start = SystemTime::now() - Duration::from_secs(8);
+        window.awake_start = Instant::now();
+        let jumped_expiry = window.wall_start + Duration::from_secs(4);
+        assert!(!window.remaining(jumped_expiry).unwrap_err().is::<RequestExpired>());
+        Ok(())
+    }
+
     #[test]
     fn standalone_reacquires_on_wake_but_backs_off_after_awake_expiry() -> Result<()> {
         let clock = Arc::new(Clock(AtomicU64::new(100)));

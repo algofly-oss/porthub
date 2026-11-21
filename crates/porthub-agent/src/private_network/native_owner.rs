@@ -117,6 +117,24 @@ fn owner_path(profile:&Path)->Result<PathBuf>{
     #[cfg(windows)]{super::windows_state::state_path(profile,".native-source-owner")}
     #[cfg(not(windows))]{Ok(crate::profile::sibling(profile,".native-source-owner"))}
 }
+/// A control-plane repair probe can briefly own this same native lease. A
+/// bounded retry is still an exclusive acquisition on every attempt.
+async fn acquire_live_owner(path:&Path,wait:std::time::Duration)->Result<crate::profile::Lease>{
+    let deadline=tokio::time::Instant::now()+wait;
+    let mut backoff=std::time::Duration::from_millis(10);
+    loop {
+        match crate::profile::Lease::acquire(path) {
+            Ok(lease)=>return Ok(lease),
+            Err(error)=>{
+                let contended=error.downcast_ref::<std::io::Error>().is_some_and(|e|
+                    e.raw_os_error()==fs2::lock_contended_error().raw_os_error());
+                if !contended || tokio::time::Instant::now()>=deadline{return Err(error).context("acquire private native source owner lease");}
+                tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+backoff)).await;
+                backoff=(backoff*2).min(std::time::Duration::from_millis(125));
+            }
+        }
+    }
+}
 fn probe_absent(profile:&Path,pin:&source::Pin,own:Ipv4Addr)->Result<source::Pin>{
     #[cfg(windows)]{super::device::recover_source_absence(profile,pin,own)}
     #[cfg(not(windows))]{let _=profile;source::verify_absent(pin,own)}
@@ -149,6 +167,9 @@ pub(super) fn repair_request(profile:&Path)->Result<Option<porthub_network::nati
 }
 fn repair_request_with(profile:&Path,probe:impl FnOnce(&source::Pin,Ipv4Addr)->Result<source::Pin>)->Result<Option<porthub_network::native_repair::Request>>{
     if !path(profile)?.try_exists()?{return Ok(None);}
+    // A negative observation can only defer a repair until the next sync.
+    // Publish any positive result only after the existing exclusive rechecks.
+    if read(profile)?.1.repair.is_none(){return Ok(None);}
     let owner=owner_path(profile)?;
     if crate::profile::Lease::running(&owner)?{return Ok(None);}
     let _owner=match crate::profile::Lease::acquire(&owner){Ok(lease)=>lease,Err(error)=>{if crate::profile::Lease::running(&owner)?{return Ok(None);}return Err(error)}};
@@ -212,7 +233,7 @@ fn stage_offline_retirement(profile:&Path,next:Ipv4Addr)->Result<bool>{
 }
 #[cfg(test)]
 pub(super) async fn open(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<Arc<Tun>>{
-    Ok(open_with_dns(profile,name,own,pools,peers, #[cfg(target_os = "linux")] None).await?.0)
+    Ok(open_with_dns(profile,name,own,pools,peers, #[cfg(any(target_os = "linux",all(target_os = "macos",feature="private-sparse")))] None).await?.0)
 }
 
 #[cfg(target_os = "linux")]
@@ -254,8 +275,27 @@ fn retained(profile: &Path, own: Ipv4Addr, local: Option<super::linux_handoff::S
 pub(super) async fn open_with_dns(
     profile: &Path, name: &str, own: Ipv4Addr, pools: &[Network], peers: &[Ipv4Addr],
     #[cfg(target_os = "linux")] local: Option<super::linux_handoff::Stored>,
+    #[cfg(all(target_os = "macos", feature = "private-sparse"))] recovered: Option<super::device::RetryReader>,
 ) -> Result<(Arc<Tun>, Option<super::dns::Server>)> {
-    let _owner=crate::profile::Lease::acquire(&owner_path(profile)?)?;
+    #[cfg(all(target_os = "macos", feature = "private-sparse"))]
+    if let Some(reader) = recovered {
+        match reader.resume(profile, own, pools) {
+            Ok(tun) => {
+                // A new native packet loop may only run after a fresh route
+                // and quarantine audit of the original exclusively held utun.
+                let mut retained = Some(tun);
+                match reconcile(&mut retained, profile, own, pools, peers).await? {
+                    Outcome::Active(_) => {
+                        tracing::debug!("resumed the verified macOS kernel interface with a new packet owner");
+                        return Ok((retained.context("native source owner missing")?, None));
+                    }
+                    Outcome::Retired(_) => anyhow::bail!("native source quarantined during macOS reauthorization"),
+                }
+            }
+            Err(error) => tracing::debug!(%error, "recovering macOS source requires cold native admission"),
+        }
+    }
+    let _owner=acquire_live_owner(&owner_path(profile)?,std::time::Duration::from_secs(1)).await?;
     #[cfg(target_os="linux")]
     let local_handles=local.is_some();
     #[cfg(target_os = "linux")]
@@ -314,6 +354,19 @@ pub(super) async fn open_with_dns(
         Err(error)
     }}
 }
+/// A retained macOS device still holds this profile's exclusive native owner
+/// lease. Verify its durable source pin again before rearming the packet loop.
+#[cfg(all(target_os = "macos", feature = "private-sparse"))]
+pub(super) fn check_retained_utun(profile: &Path, tun: &Tun, own: Ipv4Addr, pools: &[Network]) -> Result<()> {
+    let (_, record) = read(profile)?;
+    ensure!(tun.has_source_lease()? && tun.own_ip() == own && !record.retired.contains(&own)
+        && record.repair.is_none() && record.retirement.is_none(), "retired utun source is no longer eligible");
+    let active = record.active.context("retired utun lacks its native assignment")?;
+    ensure!(active.own == own && active.pools == pools && active.pin.as_ref() == Some(&tun.source_pin()),
+        "retired utun assignment or pin changed");
+    Ok(())
+}
+
 pub(super) enum Outcome{Active(SparseAudit),Retired(SparseAudit)}
 /// Production owner helper, also used by the actual warmed-UDP native fixture.
 /// Backends signal Conflict BEFORE deleting any individual source routes.
@@ -353,6 +406,18 @@ pub(super) async fn reconcile(device:&mut Option<Arc<Tun>>,profile:&Path,own:Ipv
 
 #[cfg(all(test,not(windows)))]
 mod tests {
+    #[tokio::test]
+    async fn native_owner_retries_brief_contention_and_preserves_foreign_exclusivity()->anyhow::Result<()>{
+        use std::time::Duration;
+        let dir=tempfile::tempdir()?;let path=dir.path().join("native-owner");
+        let held=crate::profile::Lease::acquire(&path)?;
+        assert!(super::acquire_live_owner(&path,Duration::from_millis(20)).await.is_err());
+        assert!(crate::profile::Lease::running(&path)?);
+        let release=tokio::spawn(async move{tokio::time::sleep(Duration::from_millis(25)).await;drop(held)});
+        let next=super::acquire_live_owner(&path,Duration::from_secs(1)).await?;
+        release.await?;assert!(crate::profile::Lease::running(&path)?);
+        drop(next);assert!(!crate::profile::Lease::running(&path)?);Ok(())
+    }
     use super::*;
     fn profile()->Result<(tempfile::TempDir,PathBuf)>{
         use std::os::unix::fs::PermissionsExt;

@@ -209,7 +209,6 @@ impl Handle {
         };
         dns_cache_ttl(remaining)
     }
-    #[cfg(all(feature="private-sparse",feature="private-stream"))]
     pub(super) fn current_base(&self) -> Option<super::authority_event::Authority<()>> {
         self.state.lock().ok()?.authority.clone()
     }

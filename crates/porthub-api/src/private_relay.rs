@@ -35,14 +35,16 @@ const MAX_RELAY_PEERS: usize = 4096;
 const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
 #[derive(PartialEq, Eq)]
 struct RelayPeerIdentity {
+    virtual_host: bool,
     id: String,
     credential_hash: String,
     instance: String,
 }
 
 impl RelayPeerIdentity {
-    fn new(id: &str, credential_hash: &str, instance: &str) -> Self {
+    fn new(id: &str, credential_hash: &str, instance: &str, virtual_host: bool) -> Self {
         Self {
+            virtual_host,
             id: id.to_owned(),
             credential_hash: credential_hash.to_owned(),
             instance: instance.to_owned(),
@@ -132,7 +134,7 @@ impl Forward<'_> {
         permit.send(QueuedPacket { bytes, origin: self.origin, receipt: Some(self.receipt), _budget: budget });
     }
 }
-struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
+struct Admission { virtual_host:bool, hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
 type PairTable = hashbrown::HashMap<(String, String), PairAuthority, std::collections::hash_map::RandomState>;
 
 // Hash the same two strings, in the same order, as the owned tuple on insertion.
@@ -179,17 +181,21 @@ struct QueuedPacket {
 
 impl QueuedPacket {
     fn needs_origin(&self, negotiated: bool) -> bool {
-        negotiated && self.origin.is_some() && relay_needs_origin(&self.bytes)
+        let virtual_host = self.receipt.as_ref().is_some_and(|receipt| receipt.target.virtual_host);
+        negotiated && self.origin.is_some() && relay_needs_origin(&self.bytes, virtual_host)
     }
 }
 
 /// Input is the routed record (one peer-name length, peer name, IPv4 packet).
 /// Ordinary TCP data keeps the compact relay encoding.
-fn relay_needs_origin(record: &[u8]) -> bool {
+fn relay_needs_origin(record: &[u8], virtual_host: bool) -> bool {
     let Some((&length, body)) = record.split_first() else { return false };
     let Some(ip) = body.get(usize::from(length)..) else { return false };
     match ip.get(9) {
-        Some(&porthub_mesh::control_packet::EXIT) => true,
+        Some(&porthub_mesh::control_packet::EXIT) | Some(&porthub_mesh::control_packet::TCP_CONTINUITY) => true,
+        // The virtual provider verifies the authenticated sender on every LAN write,
+        // including TCP payload/ACK packets and UDP datagrams.
+        Some(6 | 17) if virtual_host => true,
         Some(&6) if ip[0] >> 4 == 4 => {
             let header = usize::from(ip[0] & 15) * 4;
             header >= 20 && ip.get(header + 13).is_some_and(|flags| flags & 2 != 0)
@@ -266,9 +272,11 @@ impl Hub {
     }
     /// A bounded authenticated control-read ticket. A denial/identity replacement invalidates
     /// earlier in-flight reads without quarantining later newly authorized requests.
-    pub(crate) fn begin_admission(&self,id:&str,hash:&str,instance:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,None)}
-    pub(crate) fn begin_workspace_admission(&self,id:&str,hash:&str,instance:&str,workspace:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,Some(workspace))}
-    fn begin_admission_bound(&self,id:&str,hash:&str,instance:&str,workspace:Option<&str>)->Option<u64>{
+    #[cfg(test)]
+    pub(crate) fn begin_admission(&self,id:&str,hash:&str,instance:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,None,false)}
+    #[cfg(test)]
+    pub(crate) fn begin_workspace_admission(&self,id:&str,hash:&str,instance:&str,workspace:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,Some(workspace),false)}
+    pub(crate) fn begin_admission_bound(&self,id:&str,hash:&str,instance:&str,workspace:Option<&str>,virtual_host:bool)->Option<u64>{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         let workspace=match workspace {
             Some(w)=>Some((w.to_owned(),hub.workspace_generations.get(w).filter(|(_,blocked)|!*blocked)?.0)),
@@ -280,7 +288,7 @@ impl Hub {
         if hub.admissions.len()>=16384&&!hub.admissions.contains_key(id){return None;}
         hub.admission_generation=hub.admission_generation.checked_add(1)?;
         let generation=hub.admission_generation;
-        hub.admissions.insert(id.into(),Admission{hash:hash.into(),instance:instance.into(),generation,expires:now+Duration::from_secs(60),workspace});
+        hub.admissions.insert(id.into(),Admission{virtual_host,hash:hash.into(),instance:instance.into(),generation,expires:now+Duration::from_secs(60),workspace});
         Some(generation)
     }
     pub(crate) fn admission_snapshot(&self,id:&str,hash:&str,instance:&str)->Option<u64>{
@@ -332,7 +340,12 @@ impl Hub {
     pub(crate) fn publish_admitted(&self,id:&str,hash:&str,instance:&str,ip:Ipv4Addr,allowed:HashSet<String>,admission:Option<u64>)->String {
         let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        if admission.is_some_and(|g|!hub.admissions.get(id).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==g&&a.expires>now)){return String::new();}
+        let ticket = admission.and_then(|_| hub.admissions.get(id));
+        if admission.is_some_and(|generation| !ticket.is_some_and(|a|
+            a.hash == hash && a.instance == instance && a.generation == generation && a.expires > now
+        )) { return String::new(); }
+        let virtual_host = ticket.is_some_and(|a| a.virtual_host);
+        let workspace = ticket.and_then(|a| a.workspace.clone());
         if hub.revoked_cleanup_at.is_some_and(|next|next<=now) {
             hub.revoked.retain(|_, expires| *expires > now);
             hub.revoked_cleanup_at=(!hub.revoked.is_empty()).then_some(now+Duration::from_secs(60));
@@ -350,16 +363,15 @@ impl Hub {
             })
             .map(|lease| lease.relay_token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         let old=hub.leases.get(id);
         let old_origin=old.and_then(|lease|lease.origin.clone());
-        let stable=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
+        let stable=old.filter(|l|l.identity.virtual_host==virtual_host&&l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         let origin=old_origin.filter(|_|stable.is_some());
         hub.leases.insert(
             id.into(),
             Lease {
-                identity: Arc::new(RelayPeerIdentity::new(id, hash, instance)),
+                identity: Arc::new(RelayPeerIdentity::new(id, hash, instance, virtual_host)),
                 origin,
                 identity_generation,
                 hash: token_digest(&relay_token),
@@ -389,23 +401,29 @@ impl Hub {
         let valid=|v:&str|v.len()==64&&v.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase());
         if !valid(epoch)||exit_epoch.is_some_and(|e|!valid(e)){return String::new();}
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
-        if admission.is_some_and(|g|!hub.admissions.get(id).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==g&&a.expires>now)){return String::new();}
+        let ticket = admission.and_then(|_| hub.admissions.get(id));
+        if admission.is_some_and(|generation| !ticket.is_some_and(|a|
+            a.hash == hash && a.instance == instance && a.generation == generation && a.expires > now
+        )) { return String::new(); }
+        let virtual_host = ticket.is_some_and(|a| a.virtual_host);
+        let workspace = ticket.and_then(|a| a.workspace.clone());
         if hub.revoked.get(id).is_some_and(|expires|*expires>now) {return String::new();}
         hub.leases.retain(|_,lease|lease.expires>now);hub.pairs.retain(|_,p|p.expires>now);
         hub.exit_pairs.retain(|_,p|p.expires>now);
         if hub.leases.len()>=16384 && !hub.leases.contains_key(id) {return String::new();}
         let old=hub.leases.get(id);
-        let unchanged=old.is_some_and(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
-        let exit_unchanged=old.is_some_and(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.exit_epoch.as_deref()==exit_epoch);
+        let same_identity = old.filter(|l| l.identity.virtual_host == virtual_host
+            && l.identity.credential_hash == hash && l.identity.instance == instance && l.ip == ip);
+        let unchanged = same_identity.is_some_and(|l| l.sparse_epoch.as_deref() == Some(epoch));
+        let exit_unchanged = same_identity.is_some_and(|l| l.exit_epoch.as_deref() == exit_epoch);
         let token=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
         let old_origin=old.and_then(|lease|lease.origin.clone());
-        let stable=old.filter(|l|l.identity.credential_hash==hash&&l.identity.instance==instance&&l.ip==ip&&l.sparse_epoch.is_some()).map(|l|l.identity_generation);
+        let stable=same_identity.filter(|l|l.sparse_epoch.is_some()).map(|l|l.identity_generation);
         let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         if !unchanged {hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         if !exit_unchanged {hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);}
-        let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         let origin=old_origin.filter(|_|stable.is_some());
-        hub.leases.insert(id.into(),Lease{origin,workspace,identity:Arc::new(RelayPeerIdentity::new(id,hash,instance)),identity_generation,hash:token_digest(&token),relay_token:token.clone(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
+        hub.leases.insert(id.into(),Lease{origin,workspace,identity:Arc::new(RelayPeerIdentity::new(id,hash,instance,virtual_host)),identity_generation,hash:token_digest(&token),relay_token:token.clone(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
         token
     }
     /// Called from the authenticated sync's fresh source projection, never from
@@ -1055,18 +1073,25 @@ mod tests {
             record
         }
         for h in [5, 6, 15] {
-            assert!(relay_needs_origin(&frame(6, h, 0x02)));
-            assert!(relay_needs_origin(&frame(6, h, 0x12)));
+            assert!(relay_needs_origin(&frame(6, h, 0x02), false));
+            assert!(relay_needs_origin(&frame(6, h, 0x12), false));
             for flags in [0x10, 0x18, 0x11, 0x04] {
-                assert!(!relay_needs_origin(&frame(6, h, flags)));
+                let packet = frame(6, h, flags);
+                assert!(!relay_needs_origin(&packet, false));
+                assert!(relay_needs_origin(&packet, true));
             }
         }
-        assert!(relay_needs_origin(&frame(porthub_mesh::control_packet::EXIT, 5, 0)));
-        assert!(!relay_needs_origin(&frame(17, 5, 2)));
-        assert!(!relay_needs_origin(&frame(6, 4, 2)));
+        assert!(relay_needs_origin(&frame(porthub_mesh::control_packet::EXIT, 5, 0), false));
+        assert!(!relay_needs_origin(&frame(17, 5, 2), false));
+        for virtual_host in [false,true] {
+            assert!(relay_needs_origin(&frame(porthub_mesh::control_packet::TCP_CONTINUITY,5,0),virtual_host));
+        }
+        assert!(relay_needs_origin(&frame(17, 5, 0), true));
+        assert!(!relay_needs_origin(&frame(1, 5, 0), true));
+        assert!(!relay_needs_origin(&frame(6, 4, 2), false));
         let syn = frame(6, 5, 2);
         for prefix in 0..(2 + 20 + 14) {
-            assert!(!relay_needs_origin(&syn[..prefix]));
+            assert!(!relay_needs_origin(&syn[..prefix], false));
         }
     }
 
@@ -1739,6 +1764,44 @@ mod origin_tests {
         assert!(!queued.receipt.as_ref().unwrap().valid(&hub.0.lock().unwrap(),Instant::now()));
         assert_eq!(queued.origin.as_ref().unwrap().stamp,original);
         assert_ne!(hub.0.lock().unwrap().leases["a"].origin.as_ref().unwrap().stamp,original);
+    }
+    #[tokio::test]
+    async fn virtual_destination_role_is_pinned_to_the_authenticated_receipt() {
+        let hub = Hub::default();
+        let epoch = "a".repeat(64);
+        publish(&hub);
+        let target = Ipv4Addr::new(10, 203, 0, 2);
+        let issue = |virtual_host| {
+            hub.begin_admission_bound("b", "hash-b", "instance-b", None, virtual_host).unwrap()
+        };
+        let enroll = |admission| {
+            hub.publish_sparse_admitted("b", "hash-b", "instance-b", target, &epoch, Some(admission))
+        };
+        let ticket = issue(true);
+        assert!(!enroll(ticket).is_empty());
+        assert!(hub.publish_pair("a", "b", &epoch));
+        let (output, mut received) = mpsc::channel(4);
+        hub.0.lock().unwrap().connections.insert("b".into(), HashMap::from([(
+            0, Connection { instance: "instance-b".into(), generation: 1, output },
+        )]));
+        let mut frame = vec![1, b'b', 0x45, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0];
+        frame.extend([10, 203, 0, 1]);
+        frame.extend(target.octets());
+        frame.extend([0, 17, 0, 42, 0, 8, 0, 0]);
+        let frame = Bytes::from(frame);
+        hub.route("a", "hash", "instance", 0, frame.clone()).await;
+        let old = received.try_recv().unwrap();
+        assert!(old.needs_origin(true));
+        assert!(!old.needs_origin(false));
+        let current = issue(false);
+        assert!(enroll(ticket).is_empty(), "a stale virtual ticket must not change the role");
+        assert!(!enroll(current).is_empty());
+        assert!(!old.receipt.as_ref().unwrap().valid(&hub.0.lock().unwrap(), Instant::now()));
+        hub.route("a", "hash", "instance", 0, frame.clone()).await;
+        assert!(received.try_recv().is_err(), "the retired pair still forwarded a datagram");
+        assert!(hub.publish_pair("a", "b", &epoch));
+        hub.route("a", "hash", "instance", 0, frame).await;
+        assert!(!received.try_recv().unwrap().needs_origin(true));
     }
     #[test]
     fn heartbeat_retains_stamp_but_expiry_restart_and_fingerprint_rebind_do_not(){

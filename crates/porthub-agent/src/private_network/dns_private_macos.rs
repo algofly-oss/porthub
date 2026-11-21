@@ -73,18 +73,11 @@ impl Session {
         if self.endpoints.len() != suffixes.len() || self.endpoints.iter().any(|endpoint|
             endpoint.port != port || !suffixes.contains(&endpoint.suffix)
         ) { return Ok(false); }
-        let key = self.key.clone();
-        let domains = suffixes.to_vec();
-        let exact = tokio::task::spawn_blocking(move || -> Result<bool> {
-            let store = SCDynamicStoreBuilder::new("PortHub private DNS verification")
-                .build().context("cannot inspect private DNS session")?;
-            let value = store.get(key.as_str());
-            Ok([100, 101].iter().any(|order| value.as_ref() == Some(&resolver_value(&domains, port, *order))))
-        }).await??;
-        if !exact { return Ok(false); }
-        let effective = super::dns_convergence_macos::observe().await?;
-        super::dns_convergence_macos::converged(&effective, &self.endpoints, &[])
+        published(&self.key, &self.endpoints, suffixes, port).await
     }
+
+    #[cfg(feature="private-sparse")]
+    pub(super) fn key(&self) -> &str { &self.key }
 
     pub fn maintain(&mut self, recovered_name: bool) {
         let now = Instant::now();
@@ -124,6 +117,20 @@ impl Session {
         Ok(())
     }
 }
+
+pub(super) async fn published(key: &str, endpoints: &[Endpoint], suffixes: &[String], port: u16) -> Result<bool> {
+        let key = key.to_owned();
+        let domains = suffixes.to_vec();
+        let exact = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let store = SCDynamicStoreBuilder::new("PortHub private DNS verification")
+                .build().context("cannot inspect private DNS session")?;
+            let value = store.get(key.as_str());
+            Ok([100, 101].iter().any(|order| value.as_ref() == Some(&resolver_value(&domains, port, *order))))
+        }).await??;
+        if !exact { return Ok(false); }
+        let effective = super::dns_convergence_macos::observe().await?;
+        super::dns_convergence_macos::converged(&effective, endpoints, &[])
+    }
 
 fn resolver_value(domains: &[String], port: u16, order: i32) -> CFPropertyList {
     let domain_values: Vec<_> = domains.iter().map(|s| CFString::new(s)).collect();

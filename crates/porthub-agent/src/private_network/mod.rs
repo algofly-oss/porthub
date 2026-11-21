@@ -1,6 +1,7 @@
 #[cfg(any(windows, target_os = "macos", test))]
 mod route_debounce;
 pub mod controller;
+mod tcp_retry;
 #[cfg(target_os = "linux")]
 pub mod device;
 #[cfg(target_os = "linux")]
@@ -14,6 +15,8 @@ pub mod device;
 #[path = "device_windows.rs"]
 pub mod device;
 pub mod dns;
+#[cfg(all(target_os="macos",feature="private-sparse"))]
+pub mod macos_dns_guard;
 #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
 mod dns_recovery;
 #[cfg(target_os="macos")]
@@ -137,3 +140,5 @@ mod native_owner;
 
 #[cfg(all(feature = "private-stream", feature = "private-sparse"))]
 mod virtual_hosts;
+
+mod sleep_generation;

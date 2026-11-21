@@ -85,69 +85,71 @@ async fn save(
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
-    let machine_id = object_id(&machine, "Invalid machine id")?;
-    let input: Input =
-        serde_json::from_value(raw).map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
-    let rules = dns_policy::prepare(&input.rules)
-        .map_err(|error| ApiError::bad_request(&error.to_string()))?;
-    let _guard = app.connection_lock.lock().await;
-    if app
-        .collection("machines")
-        .find_one(doc! {"_id":machine_id,"user_id":owner,"deletion_pending":{"$ne":true}})
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "Machine not found in this workspace",
-        ));
-    }
-    let prefs = app
-        .collection("private_networks")
-        .find_one(doc! {"_id":owner.to_hex()})
-        .await?
-        .unwrap_or_default();
-    let (_, suffix) = crate::domain::enrollment::preferences(&prefs)?;
-    let mut zones = vec![suffix];
-    use futures_util::TryStreamExt;
-    let machines: Vec<Document> = app
-        .collection("machines")
-        .find(doc! {"user_id":owner})
-        .projection(doc! {"private_domains":1})
-        .await?
-        .try_collect()
-        .await?;
-    for machine in machines {
-        zones.extend(
-            crate::domain::private_domains::from_document(&machine)
-                .into_iter()
-                .filter(|domain| !domain.default)
-                .map(|domain| domain.suffix),
-        );
-    }
-    for rule in &rules {
-        if zones.iter().any(|zone| {
-            dns_policy::zone(rule) == zone
-                || dns_policy::zone(rule).ends_with(&format!(".{zone}"))
-                || zone.ends_with(&format!(".{}", dns_policy::zone(rule)))
-        }) {
-            return Err(ApiError::bad_request(
-                "DNS rule conflicts with a private identity zone",
+    crate::private_continuity::write(&app, Some(owner), async {
+        let machine_id = object_id(&machine, "Invalid machine id")?;
+        let input: Input =
+            serde_json::from_value(raw).map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
+        let rules = dns_policy::prepare(&input.rules)
+            .map_err(|error| ApiError::bad_request(&error.to_string()))?;
+        let _guard = app.connection_lock.lock().await;
+        if app
+            .collection("machines")
+            .find_one(doc! {"_id":machine_id,"user_id":owner,"deletion_pending":{"$ne":true}})
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "Machine not found in this workspace",
             ));
         }
-    }
-    let id = format!("{owner}:{machine_id}");
-    if rules.is_empty() {
-        app.collection("private_dns_rules")
-            .delete_one(doc! {"_id":&id,"workspace_id":owner})
+        let prefs = app
+            .collection("private_networks")
+            .find_one(doc! {"_id":owner.to_hex()})
+            .await?
+            .unwrap_or_default();
+        let (_, suffix) = crate::domain::enrollment::preferences(&prefs)?;
+        let mut zones = vec![suffix];
+        use futures_util::TryStreamExt;
+        let machines: Vec<Document> = app
+            .collection("machines")
+            .find(doc! {"user_id":owner})
+            .projection(doc! {"private_domains":1})
+            .await?
+            .try_collect()
             .await?;
-    } else {
-        let rules = mongodb::bson::to_bson(&rules)
-            .map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
-        app.collection("private_dns_rules").update_one(doc! {"_id":&id},doc! {"$set":{"workspace_id":owner,"machine_id":machine_id,"rules":rules,"updated_at":DateTime::now()}}).upsert(true).await?;
-    }
-    app.private_changes.changed(owner);
-    Ok(Json(
-        json!({"data":{"machine_id":machine_id.to_hex(),"rules":rules}}),
-    ))
+        for machine in machines {
+            zones.extend(
+                crate::domain::private_domains::from_document(&machine)
+                    .into_iter()
+                    .filter(|domain| !domain.default)
+                    .map(|domain| domain.suffix),
+            );
+        }
+        for rule in &rules {
+            if zones.iter().any(|zone| {
+                dns_policy::zone(rule) == zone
+                    || dns_policy::zone(rule).ends_with(&format!(".{zone}"))
+                    || zone.ends_with(&format!(".{}", dns_policy::zone(rule)))
+            }) {
+                return Err(ApiError::bad_request(
+                    "DNS rule conflicts with a private identity zone",
+                ));
+            }
+        }
+        let id = format!("{owner}:{machine_id}");
+        if rules.is_empty() {
+            app.collection("private_dns_rules")
+                .delete_one(doc! {"_id":&id,"workspace_id":owner})
+                .await?;
+        } else {
+            let rules = mongodb::bson::to_bson(&rules)
+                .map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
+            app.collection("private_dns_rules").update_one(doc! {"_id":&id},doc! {"$set":{"workspace_id":owner,"machine_id":machine_id,"rules":rules,"updated_at":DateTime::now()}}).upsert(true).await?;
+        }
+        app.private_changes.changed(owner);
+        Ok(Json(
+            json!({"data":{"machine_id":machine_id.to_hex(),"rules":rules}}),
+        ))
+    }).await
 }

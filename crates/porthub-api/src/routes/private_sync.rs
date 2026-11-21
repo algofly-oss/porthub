@@ -211,6 +211,7 @@ async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResul
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let _lifecycle=app.account_lifecycle.read().await;
     let traffic=raw.get("traffic").cloned().map(serde_json::from_value::<porthub_mesh::traffic_report::Report>);
+    let wants_continuity=cfg!(feature="private-sparse") && raw.get("tcp_continuity").and_then(Value::as_u64)==Some(1);
     let raw_watch=raw.get("watch_changes").and_then(Value::as_bool)==Some(true);
     let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
     let observed=app.private_relay.admission_snapshot(&input.peer_id,&hash,&input.instance);
@@ -219,8 +220,12 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         if let Some(observed)=observed{app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,observed);}
         return Err(forbidden("Private credential invalid or revoked"));
     };
+    // The first credential lookup identifies the workspace. The sparse path
+    // re-reads credentials and evaluates the entire admission under this fence.
+    let workspace_id=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
+    let before=if wants_continuity {crate::private_continuity::before(&app,workspace_id).await} else {None};
     #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?).await?;
+    let _workspace_guard=crate::private_renumber::fence::stable(&app,workspace_id).await?;
     #[cfg(feature="private-sparse")]
     let peer=app.collection("private_peers").find_one(doc!{"_id":&input.peer_id,"workspace_id":peer.get("workspace_id"),"enabled":true,"credential_hash":&hash}).await?
         .ok_or_else(||forbidden("Private credential changed or was revoked while waiting"))?;
@@ -228,11 +233,14 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         return Err(forbidden("Virtual provider unavailable or unsupported agent capability"));
     }
     #[cfg(feature="private-sparse")]
-    let admission=app.private_relay.begin_workspace_admission(&input.peer_id,&hash,&input.instance,&peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex())
-        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    let workspace=Some(peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex());
     #[cfg(not(feature="private-sparse"))]
-    let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
-        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    let workspace:Option<String>=None;
+    // The authenticated server record identifies a virtual destination. The sender
+    // and the recipient's WebSocket headers cannot grant this role.
+    let admission=app.private_relay.begin_admission_bound(
+        &input.peer_id,&hash,&input.instance,workspace.as_deref(),peer.contains_key("virtual_parent"),
+    ).ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let observed_exit_pairs=if cfg!(feature="private-sparse")&&input.exit_pair_protocol==Some(1){app.private_relay.observe_exit_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let cursor = if raw_watch { peer.get_object_id("workspace_id").ok().and_then(|owner|app.private_changes.subscribe(owner)).and_then(|ws| {
@@ -246,6 +254,11 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     }
     if let (Ok(reply), Some(cursor)) = (&mut result, cursor) {
         if app.private_relay.change_workspace(&input.peer_id,&hash,&input.instance).is_some() {
+            if let Some(generation)=before {
+                if crate::private_continuity::witness(&app,workspace_id).await==Some(generation) {
+                    reply.headers_mut().insert("x-porthub-workspace-generation",generation.to_string().parse().expect("UUID header"));
+                }
+            }
             reply.headers_mut().insert("x-porthub-private-cursor", cursor.parse().expect("UUID header"));
         }
     }
@@ -307,9 +320,20 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"virtual_host_provider":input.virtual_host_provider,"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
-        "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
-        .ok_or_else(||forbidden("Private credential revoked"))?;
+    let fields=doc!{"virtual_host_provider":input.virtual_host_provider,"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
+        "paths":mongodb::bson::to_document(&input.paths).expect("string map")};
+    let mut pinned=filter.clone();
+    let identity_fields=["instance","fingerprint","virtual_host_provider","lan_exit","tor_exit","application_proxy"];
+    let changed=identity_fields.iter().any(|key|peer.get(*key)!=fields.get(*key));
+    for field in identity_fields {
+        pinned.insert(field,peer.get(field).cloned().unwrap_or(mongodb::bson::Bson::Null));
+    }
+    let heartbeat=async {
+        app.collection("private_peers").find_one_and_update(pinned,doc!{"$set":fields,"$inc":{"revision":1_i64}})
+            .return_document(ReturnDocument::After).await?
+            .ok_or_else(||ApiError::new(StatusCode::CONFLICT,"Private identity changed during sync; retry"))
+    };
+    let updated=if changed {crate::private_continuity::write(app,Some(owner),heartbeat).await?}else{heartbeat.await?};
     #[cfg(feature="private-sparse")]
     if let Some(repair)=&input.native_repair{crate::private_renumber::native_repair::record(app,owner,&updated,repair).await?;}
     for p in &mut peers {

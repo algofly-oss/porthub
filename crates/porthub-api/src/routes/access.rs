@@ -229,50 +229,52 @@ async fn remove_member(
 ) -> ApiResult<Json<Value>> {
     let (user, owner, role) =
         browser(&app, &headers, &Method::DELETE, &query.workspace, true).await?;
-    let target = workspaces::object_id(&id, "Invalid member")?;
-    if target == owner {
-        return Err(ApiError::bad_request(
-            "The workspace owner cannot be removed",
-        ));
-    }
-    let key = format!("{}:{}", owner.to_hex(), target.to_hex());
-    let membership = app
-        .collection("workspace_members")
-        .find_one(doc! {"_id":&key})
-        .await?;
-    if membership
-        .as_ref()
-        .is_some_and(|member| store::string(member, "role") == "admin")
-        && role != "owner"
-    {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "Only the owner can remove administrators",
-        ));
-    }
-    if user.get_object_id("_id").ok() == Some(target) {
-        return Err(ApiError::bad_request(
-            "Ask the workspace owner to remove your administrative membership",
-        ));
-    }
-    app.collection("workspace_members")
-        .delete_one(doc! {"_id":key})
-        .await?;
-    app.collection("machines")
-        .update_many(
-            doc! {"user_id":owner,"private_owner_id":target},
-            doc! {"$set":{"private_owner_revoked":true}},
-        )
-        .await?;
-    app.collection("machine_groups")
-        .update_many(doc! {"user_id":owner}, doc! {"$pull":{"user_ids":target}})
-        .await?;
-    app.collection("workspace_invites")
-        .update_many(
-            doc! {"user_id":owner,"created_by":target,"consumed_at":Bson::Null},
-            doc! {"$set":{"revoked_at":DateTime::now()}},
-        )
-        .await?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"msg":"Member removed"})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let target = workspaces::object_id(&id, "Invalid member")?;
+        if target == owner {
+            return Err(ApiError::bad_request(
+                "The workspace owner cannot be removed",
+            ));
+        }
+        let key = format!("{}:{}", owner.to_hex(), target.to_hex());
+        let membership = app
+            .collection("workspace_members")
+            .find_one(doc! {"_id":&key})
+            .await?;
+        if membership
+            .as_ref()
+            .is_some_and(|member| store::string(member, "role") == "admin")
+            && role != "owner"
+        {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Only the owner can remove administrators",
+            ));
+        }
+        if user.get_object_id("_id").ok() == Some(target) {
+            return Err(ApiError::bad_request(
+                "Ask the workspace owner to remove your administrative membership",
+            ));
+        }
+        app.collection("workspace_members")
+            .delete_one(doc! {"_id":key})
+            .await?;
+        app.collection("machines")
+            .update_many(
+                doc! {"user_id":owner,"private_owner_id":target},
+                doc! {"$set":{"private_owner_revoked":true}},
+            )
+            .await?;
+        app.collection("machine_groups")
+            .update_many(doc! {"user_id":owner}, doc! {"$pull":{"user_ids":target}})
+            .await?;
+        app.collection("workspace_invites")
+            .update_many(
+                doc! {"user_id":owner,"created_by":target,"consumed_at":Bson::Null},
+                doc! {"$set":{"revoked_at":DateTime::now()}},
+            )
+            .await?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"msg":"Member removed"})))
+    }).await
 }
