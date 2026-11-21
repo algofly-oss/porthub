@@ -233,7 +233,7 @@ fn stage_offline_retirement(profile:&Path,next:Ipv4Addr)->Result<bool>{
 }
 #[cfg(test)]
 pub(super) async fn open(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<Arc<Tun>>{
-    Ok(open_with_dns(profile,name,own,pools,peers, #[cfg(target_os = "linux")] None).await?.0)
+    Ok(open_with_dns(profile,name,own,pools,peers, #[cfg(any(target_os = "linux",all(target_os = "macos",feature="private-sparse")))] None).await?.0)
 }
 
 #[cfg(target_os = "linux")]
@@ -275,7 +275,26 @@ fn retained(profile: &Path, own: Ipv4Addr, local: Option<super::linux_handoff::S
 pub(super) async fn open_with_dns(
     profile: &Path, name: &str, own: Ipv4Addr, pools: &[Network], peers: &[Ipv4Addr],
     #[cfg(target_os = "linux")] local: Option<super::linux_handoff::Stored>,
+    #[cfg(all(target_os = "macos", feature = "private-sparse"))] recovered: Option<super::device::RetryReader>,
 ) -> Result<(Arc<Tun>, Option<super::dns::Server>)> {
+    #[cfg(all(target_os = "macos", feature = "private-sparse"))]
+    if let Some(reader) = recovered {
+        match reader.resume(profile, own, pools) {
+            Ok(tun) => {
+                // A new native packet loop may only run after a fresh route
+                // and quarantine audit of the original exclusively held utun.
+                let mut retained = Some(tun);
+                match reconcile(&mut retained, profile, own, pools, peers).await? {
+                    Outcome::Active(_) => {
+                        tracing::debug!("resumed the verified macOS kernel interface with a new packet owner");
+                        return Ok((retained.context("native source owner missing")?, None));
+                    }
+                    Outcome::Retired(_) => anyhow::bail!("native source quarantined during macOS reauthorization"),
+                }
+            }
+            Err(error) => tracing::debug!(%error, "recovering macOS source requires cold native admission"),
+        }
+    }
     let _owner=acquire_live_owner(&owner_path(profile)?,std::time::Duration::from_secs(1)).await?;
     #[cfg(target_os="linux")]
     let local_handles=local.is_some();
@@ -335,6 +354,19 @@ pub(super) async fn open_with_dns(
         Err(error)
     }}
 }
+/// A retained macOS device still holds this profile's exclusive native owner
+/// lease. Verify its durable source pin again before rearming the packet loop.
+#[cfg(all(target_os = "macos", feature = "private-sparse"))]
+pub(super) fn check_retained_utun(profile: &Path, tun: &Tun, own: Ipv4Addr, pools: &[Network]) -> Result<()> {
+    let (_, record) = read(profile)?;
+    ensure!(tun.has_source_lease()? && tun.own_ip() == own && !record.retired.contains(&own)
+        && record.repair.is_none() && record.retirement.is_none(), "retired utun source is no longer eligible");
+    let active = record.active.context("retired utun lacks its native assignment")?;
+    ensure!(active.own == own && active.pools == pools && active.pin.as_ref() == Some(&tun.source_pin()),
+        "retired utun assignment or pin changed");
+    Ok(())
+}
+
 pub(super) enum Outcome{Active(SparseAudit),Retired(SparseAudit)}
 /// Production owner helper, also used by the actual warmed-UDP native fixture.
 /// Backends signal Conflict BEFORE deleting any individual source routes.

@@ -736,7 +736,7 @@ async fn run_authorized_worker(
                 #[cfg(feature="local-tor")]
                 let cached_authority=authority.clone();
                 let snapshot=authority.accepted()?.clone();
-                #[cfg(any(target_os="linux",target_os="macos"))]
+                #[cfg(any(target_os="linux",all(target_os="macos",not(feature="private-sparse"))))]
                 {drop(retry_reader.take());}
                 continuity.observe(&mut policy,authority.workspace_generation());
                 quarantine.expire(continuity.generation);
@@ -835,14 +835,21 @@ async fn run_authorized_worker(
                             .unwrap_or_default();
                         #[cfg(all(target_os = "linux", not(feature = "private-sparse")))]
                         let local = None;
+                        #[cfg(all(target_os = "macos", feature = "private-sparse"))]
+                        let retained_utun = retry_reader.take().filter(|_| queued.is_some()
+                            && continuity.pending.peers().next().is_some()
+                            && continuity.scoped(authority.workspace_generation()));
                         let opened = super::native_owner::open_with_dns(
                             &path, &name, own.ip, &sparse.capture_pools, &routes,
                             #[cfg(target_os = "linux")] local,
+                            #[cfg(all(target_os = "macos", feature = "private-sparse"))] retained_utun,
                         ).await.context(PrivateStage::NativeOwner)?;
                         #[cfg(all(target_os = "linux", feature = "private-sparse"))]
                         if opened.1.is_some() { dns_registration = previous_registration; }
                         opened
                     }else{
+                        #[cfg(all(target_os = "macos", feature = "private-sparse"))]
+                        {drop(retry_reader.take());}
                         super::native_owner::admit_legacy(&path,own.ip).context(PrivateStage::LegacyAdmission)?;
                         #[cfg(target_os="linux")]
                         if super::linux_handoff::take().is_some() { super::linux_handoff::clear()?; }

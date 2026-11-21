@@ -55,6 +55,23 @@ impl RetrySource {
     }
 }
 impl RetryReader {
+    /// Preserve the kernel socket's bound source and interface while replacing
+    /// the former packet owner. No other reference may survive the old worker.
+    #[cfg(feature = "private-sparse")]
+    pub(super) fn resume(self, profile: &std::path::Path, own: Ipv4Addr, pools: &[porthub_mesh::lan_routes::Network]) -> Result<std::sync::Arc<Tun>> {
+        use std::os::fd::AsRawFd;
+        let mut tun = std::sync::Arc::try_unwrap(self.0)
+            .map_err(|_| anyhow::anyhow!("retired utun still has another owner"))?;
+        super::native_owner::check_retained_utun(profile, &tun, own, pools)?;
+        let name = CString::new(tun.name.as_str())?;
+        ensure!(unsafe { libc::if_nametoindex(name.as_ptr()) } == tun.index, "retired utun interface changed");
+        tun.address_route.verify()?;
+        // A queued packet that the recovery reader never observed cannot
+        // become fresh data-plane input just because authority was renewed.
+        drain_previous_datagrams(tun.device.as_raw_fd(), 64)?;
+        tun.packet_loop = super::owned_packet_loop::OwnedPacketLoop::new(own, tun.index)?;
+        Ok(std::sync::Arc::new(tun))
+    }
     pub(super) async fn read(&self,buffer:&mut [u8])->Result<usize>{self.0.read(buffer).await}
 }
 fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {

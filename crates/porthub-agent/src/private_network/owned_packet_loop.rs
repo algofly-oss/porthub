@@ -60,11 +60,17 @@ impl OwnedPacketLoop {
             self.active.load(Ordering::SeqCst) && self.generation == io.generation(),
             "native packet source retired or replaced"
         );
-        ensure!(
-            deadline > std::time::Instant::now(),
-            "local base policy lease expired"
-        );
-        authority.check()
+        // Preserve retirement, suspend and invalid-clock errors even when both
+        // the projected native deadline and the authenticated request have expired.
+        authority.check()?;
+        if deadline <= std::time::Instant::now() {
+            #[cfg(feature = "private-sparse")]
+            if authority.remaining()?.is_some() {
+                return Err(super::authority_clock::RequestExpired.into());
+            }
+            anyhow::bail!("local base policy lease expired");
+        }
+        Ok(())
     }
     async fn guarded<T>(
         &self,
@@ -412,6 +418,22 @@ mod tests {
             assert!(io.written.lock().unwrap().is_empty());
         }
     }
+    #[test]
+    #[cfg(feature = "private-sparse")]
+    fn native_deadline_keeps_witnessed_expiry_distinct_from_owner_retirement() {
+        let owner = OwnedPacketLoop::new(own(), 12).unwrap();
+        let io = Fake::new(&owner, udp(own(), own()), false);
+        let domain = super::super::authority_event::Owner::new();
+        let witnessed = authority(&domain);
+        let expired = std::time::Instant::now();
+        let e = owner.check(&io, &witnessed, expired).unwrap_err();
+        assert!(e.is::<super::super::authority_clock::RequestExpired>());
+        let legacy = Authority::new((), None, chrono::Utc::now() + chrono::Duration::seconds(15));
+        assert!(!owner.check(&io, &legacy, expired).unwrap_err().is::<super::super::authority_clock::RequestExpired>());
+        domain.revoke();
+        assert!(!owner.check(&io, &witnessed, expired).unwrap_err().is::<super::super::authority_clock::RequestExpired>());
+    }
+
     #[tokio::test]
     async fn queued_legacy_base_deadline_still_expires_without_request_clock() {
         let owner = OwnedPacketLoop::new(own(), 12).unwrap();
