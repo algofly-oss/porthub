@@ -211,7 +211,7 @@ async fn changes(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResul
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let _lifecycle=app.account_lifecycle.read().await;
     let traffic=raw.get("traffic").cloned().map(serde_json::from_value::<porthub_mesh::traffic_report::Report>);
-    let wants_continuity=raw.get("tcp_continuity").and_then(Value::as_u64)==Some(1);
+    let wants_continuity=cfg!(feature="private-sparse") && raw.get("tcp_continuity").and_then(Value::as_u64)==Some(1);
     let raw_watch=raw.get("watch_changes").and_then(Value::as_bool)==Some(true);
     let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
     let observed=app.private_relay.admission_snapshot(&input.peer_id,&hash,&input.instance);
@@ -220,6 +220,10 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         if let Some(observed)=observed{app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,observed);}
         return Err(forbidden("Private credential invalid or revoked"));
     };
+    // The first credential lookup identifies the workspace. The sparse path
+    // re-reads credentials and evaluates the entire admission under this fence.
+    let workspace=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
+    let before=if wants_continuity {crate::private_continuity::before(&app,workspace).await} else {None};
     #[cfg(feature="private-sparse")]
     let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?).await?;
     #[cfg(feature="private-sparse")]
@@ -241,8 +245,6 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         let combined = notification_cursor(*ws.borrow(), *peer_cursor.borrow());
         Some(combined.to_string())
     }) } else { None };
-    let workspace=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
-    let before=if wants_continuity {crate::private_continuity::before(&app,workspace).await} else {None};
     let mut result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
