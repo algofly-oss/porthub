@@ -39,8 +39,36 @@ fn available(text:&str,suffixes:&[String],owned:&[Endpoint])->Result<bool>{
 }
 #[cfg(target_os="macos")]
 pub(super) async fn ensure_available(suffixes:&[String],owned:&[Endpoint])->Result<()>{
-    ensure!(available(&observe().await?,suffixes,owned)?,"another resolver owns the requested private DNS suffix");Ok(())
+    ensure!(scope_available(suffixes,owned).await?,"another resolver owns the requested private DNS suffix");Ok(())
 }
+#[cfg(target_os = "macos")]
+pub(super) async fn scope_available(suffixes: &[String], owned: &[Endpoint]) -> Result<bool> {
+    available(&observe().await?, suffixes, owned)
+}
+
+// A recovered name may never reach the agent again while the OS caches a
+// failure. Keep that one request pending across transient local errors.
+pub(super) async fn retry_refresh<F, Fut>(mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    use std::time::Duration;
+    let initial_delay = Duration::from_millis(250);
+    let mut delay = initial_delay;
+    loop {
+        match attempt().await {
+            Ok(()) => return,
+            Err(error) if delay == initial_delay => {
+                tracing::warn!(%error, "retrying macOS private DNS refresh");
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
+}
+
 #[cfg(target_os="macos")]
 async fn observe()->Result<String>{
     use tokio::io::AsyncReadExt;
@@ -71,6 +99,21 @@ where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<String>>{
     use super::*;
     fn e()->Endpoint{Endpoint{suffix:"private.test".into(),port:53001}}
     fn text(port:u16,server:&str)->String{format!("DNS configuration\nresolver #1\n domain : private.test\n nameserver[0] : {server}\n port : {port}\n")}
+    #[tokio::test(start_paused = true)]
+    async fn one_refresh_survives_transient_failures_with_capped_backoff() {
+        let mut attempts = Vec::new();
+        let start = tokio::time::Instant::now();
+        retry_refresh(|| {
+            attempts.push(start.elapsed().as_millis());
+            std::future::ready(if attempts.len() < 10 {
+                Err(anyhow::anyhow!("temporary configd failure"))
+            } else {
+                Ok(())
+            })
+        }).await;
+        assert_eq!(attempts, [0, 250, 750, 1750, 3750, 7750, 15750, 31750, 61750, 91750]);
+    }
+
     #[test]fn publication_requires_exact_effective_endpoint_not_file_or_foreign_domain(){
         assert!(!converged("DNS configuration",&[e()],&[]).unwrap());
         assert!(!converged(&text(53002,"127.0.0.1"),&[e()],&[]).unwrap());
