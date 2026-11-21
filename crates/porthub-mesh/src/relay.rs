@@ -17,6 +17,9 @@ use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_util::sync::CancellationToken;
 use turn_util::{Conn, Error as IoError, Result as IoResult};
 
+#[cfg(target_os = "macos")]
+mod mac_write_queue;
+
 const SERVER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
 pub type Socket = Arc<dyn Conn + Send + Sync>;
 
@@ -89,7 +92,7 @@ impl Conn for Transport {
 }
 
 fn start_wire<S>(
-    mut websocket: tokio_tungstenite::WebSocketStream<S>,
+    websocket: tokio_tungstenite::WebSocketStream<S>,
     mut output_rx: mpsc::Receiver<Vec<u8>>,
     input: mpsc::Sender<Vec<u8>>,
     wire_cancel: CancellationToken,
@@ -98,55 +101,65 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     tokio::spawn(async move {
-        let result: Result<()> = async {
+        let (mut outgoing, mut incoming) = websocket.split();
+        let (pong, mut pong_rx) = mpsc::channel(8);
+        // Both halves must be polled while the opposite direction is blocked.
+        // TURN responses include the TCP ACKs and SYN-ACKs for private flows.
+        let read = async {
             let mut bytes = Vec::new();
-            loop { tokio::select! {
-                _ = wire_cancel.cancelled() => break,
-                packet = output_rx.recv() => {
-                    let Some(packet) = packet else { break; };
-                    tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Binary(packet.into()))).await??;
-                },
-                message = websocket.next() => match message {
-                    Some(Ok(Message::Binary(packet))) => {
+            while let Some(frame) = incoming.next().await {
+                match frame? {
+                    Message::Binary(packet) => {
                         ensure!(bytes.len() + packet.len() <= 65536, "private TURN frame exceeds limit");
                         bytes.extend_from_slice(&packet);
                         while bytes.len() >= 4 {
                             let length = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
                             let size = match bytes[0] & 0xc0 {
-                                0 => { ensure!(length % 4 == 0, "invalid TURN STUN length"); 20 + length },
+                                0 => {
+                                    ensure!(length % 4 == 0, "invalid TURN STUN length");
+                                    20 + length
+                                }
                                 0x40 => (4 + length + 3) & !3,
                                 _ => anyhow::bail!("invalid TURN frame"),
                             };
                             ensure!(size <= 65536, "private TURN frame exceeds limit");
-                            if bytes.len() < size { break; }
-                            let packet = bytes.drain(..size).collect();
-                            if wire_cancel.is_cancelled() {
-                                return Ok(());
+                            if bytes.len() < size {
+                                break;
                             }
+                            let packet = bytes.drain(..size).collect();
                             match input.try_send(packet) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
                                 Err(mpsc::error::TrySendError::Full(packet)) => {
-                                    // A stopped TURN consumer also holds up outgoing data and Pongs.
-                                    tokio::select! {
-                                        _ = wire_cancel.cancelled() => return Ok(()),
-                                        result = tokio::time::timeout(Duration::from_secs(5), input.send(packet)) => {
-                                            if !matches!(result, Ok(Ok(()))) { return Ok(()); }
-                                        }
-                                    }
+                                    tokio::time::timeout(Duration::from_secs(5), input.send(packet)).await??;
                                 }
                             }
                         }
-                    },
-                    Some(Ok(Message::Ping(packet))) => { tokio::time::timeout(Duration::from_secs(5), websocket.send(Message::Pong(packet))).await??; },
-                    Some(Ok(Message::Pong(_))) => {},
+                    }
+                    Message::Ping(packet) => pong.try_send(packet)?,
+                    Message::Pong(_) => {}
                     _ => break,
                 }
-            }}
-            Ok(())
-        }.await;
-        // Errors intentionally contain no URL or credential in normal logs.
-        let _ = result;
+            }
+            anyhow::Ok(())
+        };
+        let write = async {
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    reply = pong_rx.recv() => reply.map(Message::Pong),
+                    packet = output_rx.recv() => packet.map(|bytes| Message::Binary(bytes.into())),
+                };
+                let Some(message) = message else { break };
+                tokio::time::timeout(Duration::from_secs(5), outgoing.send(message)).await??;
+            }
+            anyhow::Ok(())
+        };
+        tokio::select! {
+            _ = wire_cancel.cancelled() => {}
+            _ = read => {}
+            _ = write => {}
+        }
         wire_cancel.cancel();
     })
 }
@@ -246,12 +259,15 @@ impl Allocation {
             Duration::from_secs(5),
             async {
                 let stream = connect_turn_stream(&url, local).await?;
+                #[cfg(target_os = "macos")]
+                let stream = mac_write_queue::WriteQueue::new(stream);
                 Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), connector).await?)
             },
         )
         .await
         .map_err(|_| anyhow::anyhow!("private relay connection timed out"))?
         .map_err(|_| anyhow::anyhow!("private relay connection failed"))?;
+        #[cfg(not(target_os = "macos"))]
         match websocket.get_ref() {
             tokio_tungstenite::MaybeTlsStream::Plain(stream) => crate::configure_tcp(stream),
             tokio_tungstenite::MaybeTlsStream::Rustls(stream) => {
@@ -350,6 +366,34 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blocked_turn_upload_still_delivers_incoming_records() -> Result<()> {
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (client, server) = tokio::io::duplex(64);
+        let client = tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (input, mut incoming) = mpsc::channel(1);
+        let (outbound, output) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task = start_wire(client, output, input, cancel.clone());
+
+        outbound.send(vec![0; 4096]).await?;
+        timeout(Duration::from_secs(2), async {
+            while outbound.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await?;
+        // Leave the peer's read side undrained so the 4096-byte write stays blocked.
+        let reply = vec![0x40, 1, 0, 4, 7, 8, 9, 10];
+        server.send(Message::Binary(reply.clone().into())).await?;
+        assert_eq!(timeout(Duration::from_secs(2), incoming.recv()).await?, Some(reply));
+        cancel.cancel();
+        task.await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn full_turn_input_recovers_from_a_short_pause_and_retires_after_a_stall() -> Result<()> {

@@ -5,6 +5,7 @@ use crate::App;
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
@@ -343,7 +344,7 @@ impl Framing {
         Ok(Some(self.bytes.drain(..size).collect()))
     }
 }
-pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
+pub async fn serve(app: Arc<App>, socket: WebSocket) {
     let Ok(_permit) = app.legacy_turn.connections.clone().try_acquire_owned() else {
         return;
     };
@@ -375,23 +376,58 @@ pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
     let Ok(server) = turn::server::Server::new(config).await else {
         return;
     };
-    let started = std::time::Instant::now();
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    let mut framing = Framing::default();
-    let outcome:Result<()>=async {loop {tokio::select! {
-        _=interval.tick()=>{
-            let peer=authentication.peer.lock().unwrap_or_else(|p|p.into_inner()).clone();
-            if authentication.proved.load(Ordering::Acquire) {if !peer.is_some_and(|peer|app.private_relay.peer_alive(&peer)){break;}}
-            else if started.elapsed()>Duration::from_secs(10){break;}
-        },
-        packet=output_rx.recv()=>{let Some(packet)=packet else{break;};tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Binary(packet.into()))).await??;},
-        frame=socket.recv()=>match frame {
-            Some(Ok(Message::Binary(bytes)))=>{framing.push(&bytes)?;while let Some(packet)=framing.packet()? {tokio::time::timeout(Duration::from_secs(5),input.send(packet)).await??;}},
-            Some(Ok(Message::Ping(bytes)))=>{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Pong(bytes))).await??;},
-            Some(Ok(Message::Pong(_)))=>{},_=>break,
+    let (mut outgoing, mut incoming) = socket.split();
+    let (pong, mut pong_rx) = mpsc::channel(8);
+    let read = async {
+        let mut framing = Framing::default();
+        while let Some(frame) = incoming.next().await {
+            match frame? {
+                Message::Binary(bytes) => {
+                    framing.push(&bytes)?;
+                    while let Some(packet) = framing.packet()? {
+                        tokio::time::timeout(Duration::from_secs(5), input.send(packet)).await??;
+                    }
+                }
+                Message::Ping(bytes) => pong.try_send(bytes)?,
+                Message::Pong(_) => {}
+                _ => break,
+            }
         }
-    }}Ok(())}.await;
-    let _ = outcome;
+        anyhow::Ok(())
+    };
+    let write = async {
+        loop {
+            let message = tokio::select! {
+                biased;
+                reply = pong_rx.recv() => reply.map(Message::Pong),
+                packet = output_rx.recv() => packet.map(|bytes| Message::Binary(bytes.into())),
+            };
+            let Some(message) = message else { break };
+            tokio::time::timeout(Duration::from_secs(5), outgoing.send(message)).await??;
+        }
+        anyhow::Ok(())
+    };
+    let liveness = async {
+        let started = std::time::Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let peer = authentication.peer.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if authentication.proved.load(Ordering::Acquire) {
+                if !peer.is_some_and(|peer| app.private_relay.peer_alive(&peer)) {
+                    break;
+                }
+            } else if started.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = read => {}
+        _ = write => {}
+        _ = liveness => {}
+    }
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(3), server.close()).await;
 }
@@ -408,7 +444,6 @@ pub async fn speedtest(
         http::{header, Method, StatusCode},
         response::IntoResponse,
     };
-    use futures_util::StreamExt;
     let denied =
         || crate::error::ApiError::new(StatusCode::FORBIDDEN, "Private relay credential required");
     let username = request
