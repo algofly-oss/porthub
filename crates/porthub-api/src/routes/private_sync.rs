@@ -222,10 +222,10 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     };
     // The first credential lookup identifies the workspace. The sparse path
     // re-reads credentials and evaluates the entire admission under this fence.
-    let workspace=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
-    let before=if wants_continuity {crate::private_continuity::before(&app,workspace).await} else {None};
+    let workspace_id=peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?;
+    let before=if wants_continuity {crate::private_continuity::before(&app,workspace_id).await} else {None};
     #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?).await?;
+    let _workspace_guard=crate::private_renumber::fence::stable(&app,workspace_id).await?;
     #[cfg(feature="private-sparse")]
     let peer=app.collection("private_peers").find_one(doc!{"_id":&input.peer_id,"workspace_id":peer.get("workspace_id"),"enabled":true,"credential_hash":&hash}).await?
         .ok_or_else(||forbidden("Private credential changed or was revoked while waiting"))?;
@@ -255,7 +255,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     if let (Ok(reply), Some(cursor)) = (&mut result, cursor) {
         if app.private_relay.change_workspace(&input.peer_id,&hash,&input.instance).is_some() {
             if let Some(generation)=before {
-                if crate::private_continuity::witness(&app,workspace).await==Some(generation) {
+                if crate::private_continuity::witness(&app,workspace_id).await==Some(generation) {
                     reply.headers_mut().insert("x-porthub-workspace-generation",generation.to_string().parse().expect("UUID header"));
                 }
             }
