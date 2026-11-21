@@ -233,11 +233,14 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         return Err(forbidden("Virtual provider unavailable or unsupported agent capability"));
     }
     #[cfg(feature="private-sparse")]
-    let admission=app.private_relay.begin_workspace_admission(&input.peer_id,&hash,&input.instance,&peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex())
-        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    let workspace=Some(peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex());
     #[cfg(not(feature="private-sparse"))]
-    let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
-        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    let workspace:Option<String>=None;
+    // The authenticated server record identifies a virtual destination. The sender
+    // and the recipient's WebSocket headers cannot grant this role.
+    let admission=app.private_relay.begin_admission_bound(
+        &input.peer_id,&hash,&input.instance,workspace.as_deref(),peer.contains_key("virtual_parent"),
+    ).ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let observed_exit_pairs=if cfg!(feature="private-sparse")&&input.exit_pair_protocol==Some(1){app.private_relay.observe_exit_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
     let cursor = if raw_watch { peer.get_object_id("workspace_id").ok().and_then(|owner|app.private_changes.subscribe(owner)).and_then(|ws| {
