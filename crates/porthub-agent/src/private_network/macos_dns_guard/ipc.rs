@@ -87,6 +87,11 @@ pub(super) async fn receive(stream: &UnixStream) -> Result<(File, File)> {
                 rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
             }
             let [udp, tcp]: [OwnedFd; 2] = fds.try_into().unwrap();
+            if rustix::net::sockopt::socket_type(&udp)? != rustix::net::SocketType::DGRAM
+                || rustix::net::sockopt::socket_type(&tcp)? != rustix::net::SocketType::STREAM
+            {
+                return Err(std::io::Error::other("unexpected DNS descriptor roles"));
+            }
             Ok((File::from(udp), File::from(tcp)))
         })
         .await?;

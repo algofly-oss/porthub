@@ -88,7 +88,7 @@ pub(super) async fn claim(
     profile: &Profile,
     scope: &Scope,
 ) -> Result<Option<(dns::Server, Handle)>> {
-    let Some(socket) = job::registered_socket(path).await? else {
+    let Some(socket) = job::registered_socket(path, profile).await? else {
         return Ok(None);
     };
     let request = Claim {

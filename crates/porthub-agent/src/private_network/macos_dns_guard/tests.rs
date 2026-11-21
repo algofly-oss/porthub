@@ -144,3 +144,17 @@ async fn client_waits_for_the_launchd_socket_to_appear() -> Result<()> {
     connecting.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn reversed_socket_roles_cannot_be_adopted() -> Result<()> {
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let tcp = TcpListener::bind(udp.local_addr()?)?;
+    let reversed = (
+        File::from(OwnedFd::from(tcp)),
+        File::from(OwnedFd::from(udp)),
+    );
+    let (left, right) = UnixStream::pair()?;
+    ipc::send(&left, &reversed).await?;
+    ensure!(ipc::receive(&right).await.is_err());
+    Ok(())
+}

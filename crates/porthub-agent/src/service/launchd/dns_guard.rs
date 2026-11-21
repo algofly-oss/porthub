@@ -114,7 +114,10 @@ async fn reconcile(spec: &Spec, wanted: bool) -> Result<Option<PathBuf>> {
     Ok(Some(socket))
 }
 
-pub(crate) async fn registered_socket(profile: &Path) -> Result<Option<PathBuf>> {
+pub(crate) async fn registered_socket(
+    profile: &Path,
+    enrollment: &crate::private_profile::Profile,
+) -> Result<Option<PathBuf>> {
     if !rustix::process::geteuid().is_root() {
         return Ok(None);
     }
@@ -122,21 +125,31 @@ pub(crate) async fn registered_socket(profile: &Path) -> Result<Option<PathBuf>>
     if profile.parent() != Some(layout.state.as_path()) {
         return Ok(None);
     }
+    let meta = std::fs::symlink_metadata(&layout.state)?;
+    ensure!(
+        meta.is_dir() && service::trusted_directory(&layout.state, &meta),
+        "untrusted private service state"
+    );
+    let standalone = service::RegistrationProfile::Private(enrollment.clone()).identity();
+    let public = service::identity(&enrollment.control_profile());
     let manager = Launchd::connect(false).await?;
-    for entry in service::registrations(&layout)? {
-        let spec = &entry.spec;
-        if spec.profile != profile
-            && service::private_module_profile(&spec.profile)
-                .ok()
-                .flatten()
-                .as_deref()
-                != Some(profile)
-        {
+    for id in [&standalone, &public] {
+        let Some(spec) = service::installed(&layout, id)? else {
+            continue;
+        };
+        if !manager.owns_process(&spec, std::process::id()).await? {
             continue;
         }
-        if manager.owns_process(spec, std::process::id()).await? {
-            return reconcile(spec, true).await;
+        if id == &public {
+            let public = crate::profile::Profile::load(&spec.profile)?;
+            let module = crate::unified::load(&spec.profile, &public)?;
+            if !module.is_some_and(|m| m.enabled && m.private_profile == profile) {
+                continue;
+            }
+        } else if spec.profile != profile {
+            continue;
         }
+        return reconcile(&spec, true).await;
     }
     Ok(None)
 }
