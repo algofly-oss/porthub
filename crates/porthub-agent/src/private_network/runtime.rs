@@ -1530,6 +1530,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             sent_bytes = stats.sent_bytes,
                             received_bytes = stats.received_bytes,
                             dropped_outgoing = stats.dropped_outgoing,
+                            outgoing_queue_full = stats.outgoing_queue_full,
                             dropped_incoming = stats.dropped_incoming,
                             write_errors = stats.write_errors,
                             read_errors = stats.read_errors,
