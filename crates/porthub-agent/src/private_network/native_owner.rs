@@ -212,13 +212,13 @@ fn stage_offline_retirement(profile:&Path,next:Ipv4Addr)->Result<bool>{
 }
 #[cfg(test)]
 pub(super) async fn open(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<Arc<Tun>>{
-    Ok(open_with_dns(profile,name,own,pools,peers).await?.0)
+    Ok(open_with_dns(profile,name,own,pools,peers, #[cfg(target_os = "linux")] None).await?.0)
 }
 
 #[cfg(target_os = "linux")]
-fn retained(profile: &Path, own: Ipv4Addr) -> Result<Option<(super::device::RetainedLink, std::fs::File, super::dns::Server)>> {
+fn retained(profile: &Path, own: Ipv4Addr, local: Option<super::linux_handoff::Stored>) -> Result<Option<(super::device::RetainedLink, std::fs::File, super::dns::Server)>> {
     use std::os::unix::fs::FileExt;
-    let Some(stored) = super::linux_handoff::take() else { return Ok(None); };
+    let Some(stored) = local.or_else(super::linux_handoff::take) else { return Ok(None); };
     let checked = (move || {
         let (_,record) = read(profile)?;
         ensure!(record.repair.is_none() && !record.retired.contains(&own), "previous private owner requires retirement");
@@ -251,10 +251,15 @@ fn retained(profile: &Path, own: Ipv4Addr) -> Result<Option<(super::device::Reta
     }
 }
 
-pub(super) async fn open_with_dns(profile:&Path,name:&str,own:Ipv4Addr,pools:&[Network],peers:&[Ipv4Addr])->Result<(Arc<Tun>, Option<super::dns::Server>)>{
+pub(super) async fn open_with_dns(
+    profile: &Path, name: &str, own: Ipv4Addr, pools: &[Network], peers: &[Ipv4Addr],
+    #[cfg(target_os = "linux")] local: Option<super::linux_handoff::Stored>,
+) -> Result<(Arc<Tun>, Option<super::dns::Server>)> {
     let _owner=crate::profile::Lease::acquire(&owner_path(profile)?)?;
+    #[cfg(target_os="linux")]
+    let local_handles=local.is_some();
     #[cfg(target_os = "linux")]
-    let mut inherited = retained(profile, own)?;
+    let mut inherited = retained(profile, own, local)?;
     if read(profile)?.1.repair.is_some(){repair_under_owner(profile,|pin,own|probe_absent(profile,pin,own))?;}
     if stage_offline_retirement(profile,own)?{repair_under_owner(profile,|pin,own|probe_absent(profile,pin,own))?;}
     if let Err(error) = prepare(profile,own,pools) {
@@ -277,7 +282,7 @@ pub(super) async fn open_with_dns(profile:&Path,name:&str,own:Ipv4Addr,pools:&[N
         if let Some((link,journal,server)) = inherited {
             match Tun::restore(link,name,own,pools,peers).await {
                 Ok(mut tun) => {
-                    tun.mark_restored();
+                    if !local_handles { tun.mark_restored(); }
                     tun.journal_routes(&binding, Some(journal)).await?;
                     dns = Some(server);
                     return Ok(tun);
@@ -289,7 +294,7 @@ pub(super) async fn open_with_dns(profile:&Path,name:&str,own:Ipv4Addr,pools:&[N
             }
         }
         Tun::preflight_sparse(own,pools,peers).await?;
-        if !super::linux_handoff::available() { return Tun::open(name,own,peers).await; }
+        if !cfg!(feature="private-sparse") && !super::linux_handoff::available() { return Tun::open(name,own,peers).await; }
         let restartable = async {
             let mut tun = Tun::create(name,own,peers,true).await?;
             tun.journal_routes(&binding,None).await?;

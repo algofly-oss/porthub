@@ -53,6 +53,7 @@ impl Drop for DnsChange {
 }
 
 pub(super) struct Session {
+    key: String,
     pub endpoints: Vec<Endpoint>,
     changes: DnsChange,
     awaiting_publication: bool,
@@ -68,6 +69,23 @@ impl Drop for Session {
 }
 
 impl Session {
+    pub(super) async fn is_published(&self, suffixes: &[String], port: u16) -> Result<bool> {
+        if self.endpoints.len() != suffixes.len() || self.endpoints.iter().any(|endpoint|
+            endpoint.port != port || !suffixes.contains(&endpoint.suffix)
+        ) { return Ok(false); }
+        let key = self.key.clone();
+        let domains = suffixes.to_vec();
+        let exact = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let store = SCDynamicStoreBuilder::new("PortHub private DNS verification")
+                .build().context("cannot inspect private DNS session")?;
+            let value = store.get(key.as_str());
+            Ok([100, 101].iter().any(|order| value.as_ref() == Some(&resolver_value(&domains, port, *order))))
+        }).await??;
+        if !exact { return Ok(false); }
+        let effective = super::dns_convergence_macos::observe().await?;
+        super::dns_convergence_macos::converged(&effective, &self.endpoints, &[])
+    }
+
     pub fn maintain(&mut self, recovered_name: bool) {
         let now = Instant::now();
         if !recovered_name && !self.changes.changed().unwrap_or(false) && now < self.next_inspection {
@@ -208,7 +226,7 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
     tokio::task::spawn_blocking(move || {
         match OwnedResolver::publish(&domains, port) {
             Ok(resolver) => {
-                if ready.send(Ok(())).is_ok() {
+                if ready.send(Ok(resolver.key.clone())).is_ok() {
                     let mut handled_generation = 0;
                     while runtime.block_on(requests.changed()).is_ok() {
                         let generation = *requests.borrow_and_update();
@@ -234,9 +252,9 @@ pub(super) async fn register(port: u16, suffixes: &[String], allowed: &[Endpoint
         }
         let _ = finished.send(());
     });
-    let mut session=Session { endpoints, changes, awaiting_publication, next_inspection: Instant::now() + Duration::from_secs(60), closing, refresh_sender: Some(refresh_sender), finished: Some(completion) };
+    let mut session=Session { key:String::new(), endpoints, changes, awaiting_publication, next_inspection: Instant::now() + Duration::from_secs(60), closing, refresh_sender: Some(refresh_sender), finished: Some(completion) };
     let readiness=async {
-        tokio::time::timeout(std::time::Duration::from_secs(2),result).await
+        session.key = tokio::time::timeout(std::time::Duration::from_secs(2),result).await
             .context("private DNS session publication timed out")?
             .context("private DNS session owner stopped before readiness")??;
         Ok::<_,anyhow::Error>(())
@@ -273,8 +291,11 @@ async fn restores_a_missing_owned_service_after_macos_withdraws_the_resolver() -
         .filter(|key| store.get(key.as_str()).as_ref() == Some(&expected)).collect();
     let [key] = matches.as_slice() else { anyhow::bail!("isolated resolver key must be unique") };
     let result: Result<()> = async {
+        ensure!(session.is_published(&domains, port).await?);
         ensure!(store.remove(key.as_str()), "cannot withdraw isolated resolver key");
+        ensure!(!session.is_published(&domains, port).await?, "a missing key cannot resume queued DNS");
         wait_for_restoration(&mut session, &store, key).await?;
+        ensure!(session.is_published(&domains, port).await?);
         ensure!(store.get(key.as_str()).as_ref() == Some(&expected));
 
         let other_listener = std::net::UdpSocket::bind(("127.0.0.1", 0))?;
@@ -286,6 +307,7 @@ async fn restores_a_missing_owned_service_after_macos_withdraws_the_resolver() -
             }
             Ok::<_, anyhow::Error>(())
         }).await.context("macOS did not publish the competing test resolver")??;
+        ensure!(!session.is_published(&domains, port).await?, "a competing DNS scope cannot resume queued DNS");
         ensure!(store.remove(key.as_str()));
         for _ in 0..3 {
             session.maintain(true);

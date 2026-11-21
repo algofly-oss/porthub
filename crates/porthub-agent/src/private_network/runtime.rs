@@ -377,8 +377,37 @@ pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Re
 }
 
 async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
-    let profile = Profile::load(&path).context(PrivateStage::Profile)?;
     let _lease = Lease::acquire(&path).context(PrivateStage::Lease)?;
+    let profile = Profile::load(&path).context(PrivateStage::Profile)?;
+    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+    let mut pending = None;
+    loop {
+        let result = run_authorized_worker(
+            path.clone(), profile.clone(), cancel.child_token(), logs.clone(),
+            #[cfg(all(feature = "private-sparse", any(target_os = "linux", target_os = "macos")))]
+            &mut pending,
+        ).await;
+        #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+        if pending.as_ref().is_some_and(super::dns_recovery::Pending::awaiting_authorization)
+            && result.as_ref().is_err_and(|e| e.is::<super::authority_clock::RequestExpired>())
+        {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = crate::unified::suspend_aware_delay(Duration::from_secs(5)) => {}
+            }
+            if !cancel.is_cancelled() && Profile::load(&path).context(PrivateStage::Profile)? == profile {
+                continue;
+            }
+        }
+        return result;
+    }
+}
+
+async fn run_authorized_worker(
+    path: PathBuf, profile: Profile, cancel: CancellationToken, logs: Option<crate::logs::Buffer>,
+    #[cfg(all(feature = "private-sparse", any(target_os = "linux", target_os = "macos")))]
+    pending: &mut Option<super::dns_recovery::Pending>,
+) -> Result<()> {
     // Declared after Lease: revocation drops before another runtime can own it.
     let authority_owner=super::authority_event::Owner::new();
     let control = Arc::new(crate::control::Control::new_private(&profile).context(PrivateStage::Control)?);
@@ -488,6 +517,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut stream_owner_generation=0u64;
     let mut stream_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
     let mut zone = None;
+    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+    let mut recovery_sockets = None;
+    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+    let mut recovery_scope = None;
     let mut dns_registration: Option<dns::Registration> = None;
     let mut registered_suffixes: Vec<String> = Vec::new();
     let mut registered_rules = Vec::new();
@@ -644,6 +677,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
                 local_address.check(own.ip)?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
+                #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+                { recovery_scope=super::dns_recovery::Scope::new(&route_snapshot); }
                 let first_ready = device.is_none();
                 let mut starting_resolver = None;
                 policy.apply(snapshot.clone())?;
@@ -703,8 +738,26 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(tun)=&device {
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
+                    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+                    let mut queued = if let Some(previous) = pending.take() {
+                        // An administrator can rotate or replace the file while the control request is in flight.
+                        ensure!(Profile::load(&path).context(PrivateStage::Profile)? == profile, "private profile changed during reauthorization");
+                        previous.resume(recovery_scope.as_ref())
+                    } else { None };
                     let (tun, retained_dns)=if let Some(sparse)=&snapshot.sparse{
-                        super::native_owner::open_with_dns(&path,&name,own.ip,&sparse.capture_pools,&routes).await.context(PrivateStage::NativeOwner)?
+                        #[cfg(all(target_os = "linux", feature = "private-sparse"))]
+                        let (local, previous_registration) = queued.take()
+                            .map(|held| (Some(held.handles), Some(held.registration)))
+                            .unwrap_or_default();
+                        #[cfg(all(target_os = "linux", not(feature = "private-sparse")))]
+                        let local = None;
+                        let opened = super::native_owner::open_with_dns(
+                            &path, &name, own.ip, &sparse.capture_pools, &routes,
+                            #[cfg(target_os = "linux")] local,
+                        ).await.context(PrivateStage::NativeOwner)?;
+                        #[cfg(all(target_os = "linux", feature = "private-sparse"))]
+                        if opened.1.is_some() { dns_registration = previous_registration; }
+                        opened
                     }else{
                         super::native_owner::admit_legacy(&path,own.ip).context(PrivateStage::LegacyAdmission)?;
                         #[cfg(target_os="linux")]
@@ -714,10 +767,24 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         (tun,None)
                     };
                     local_address.configured(own.ip)?;
+                    #[cfg(all(target_os="macos",feature="private-sparse"))]
+                    let retained_dns = if let (Some(held), Some(scope)) = (queued.take(), recovery_scope.as_ref()) {
+                        let server = dns::Server::from_local_queue(held.handles)?;
+                        if held.registration.private_scope_is_published(scope.suffixes(), server.port()?).await {
+                            dns_registration = Some(held.registration);
+                            Some(server)
+                        } else {
+                            // Retire only our old key. The normal preflight will respect any new owner.
+                            dns::shutdown_registration(&mut Some(held.registration)).await?;
+                            None
+                        }
+                    } else { retained_dns };
                     let server = match retained_dns {
                         Some(server) => server,
                         None => dns::Server::bind(own.ip).await.context(PrivateStage::DnsListener)?,
                     };
+                    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+                    { recovery_sockets = server.recovery_sockets().ok(); }
                     let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
                     #[cfg(feature="local-tor")]
@@ -838,7 +905,19 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let isolated = false;
                     #[cfg(target_os="linux")]
                     let _dns_guard = dns_write.lock().await;
-                    if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await.context(PrivateStage::DnsRegistration)?; }
+                    #[cfg(target_os="linux")]
+                    let already_published = if first_ready && dns_registration.is_some() {
+                        // Replacing an identical systemd-resolved link can cancel its in-flight transaction.
+                        let expected = crate::private_dns_setup::LinkDns {
+                            interface: tun.name.clone(), index: tun.index, port, suffixes: suffixes.clone(),
+                        };
+                        matches!(tokio::time::timeout(Duration::from_secs(1), expected.matches(own.ip)).await, Ok(Ok(true)))
+                    } else {false};
+                    #[cfg(target_os="macos")]
+                    let already_published = first_ready && dns_registration.is_some(); // Verified before adopting the queued sockets.
+                    #[cfg(not(any(target_os="linux",target_os="macos")))]
+                    let already_published=false;
+                    if !isolated && !already_published { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await.context(PrivateStage::DnsRegistration)?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
                         let next=Some(crate::private_dns_setup::LookupTarget {
@@ -1656,6 +1735,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let final_traffic=traffic.clone();let _=tokio::task::spawn_blocking(move||final_traffic.sample()).await;
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
+    }
+    #[cfg(all(feature="private-sparse", any(target_os="linux",target_os="macos")))]
+    if !cancel.is_cancelled() && result.as_ref().is_err_and(|e|e.is::<super::authority_clock::RequestExpired>()) {
+        if let (Some(scope), Some(_device), Some(sockets)) = (recovery_scope, device.as_ref(), recovery_sockets) {
+            *pending = super::dns_recovery::Pending::hold(
+                scope, #[cfg(target_os = "linux")] _device, sockets, &mut dns_registration,
+            );
+        }
     }
     if let Err(error)=dns::shutdown_registration(&mut dns_registration).await{tracing::warn!("owned private DNS cleanup pending: {error}");}
     drop(dns_registration);
