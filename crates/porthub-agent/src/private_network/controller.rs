@@ -997,7 +997,7 @@ mod renewal_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let public_profile = serde_json::from_value(serde_json::json!({
-            "server": format!("http://{address}"), "machine_id": "fixture",
+            "server": format!("http://{address}"), "machine_id": "0123456789abcdef01234567",
             "token": "test-token", "allow_insecure_http_for_tests": true
         }))?;
         let control = crate::control::Control::new(public_profile)?;
