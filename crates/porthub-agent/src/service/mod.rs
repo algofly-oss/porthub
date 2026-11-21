@@ -1214,6 +1214,7 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                     ".drive-health-policy.json",
                     ".drive-health-schedule.json",
                     ".status.json",
+                    crate::private_worker_diagnostics::SUFFIX,
                     ".update-attempt.json",
                     ".update-commit.json",
                     ".private-module.json",
@@ -1228,7 +1229,7 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                 if let Some(module) = &module {
                     anyhow::ensure!(!profile::Lease::running(&module.private_profile)?, "private module still has a running owner");
                     purge_tor_directory(&module.private_profile)?;
-                    for suffix in [".status.json", ".path-strategy.json", ".tor-settings.json", ".lock", ""] {
+                    for suffix in [".status.json", crate::private_worker_diagnostics::SUFFIX, ".path-strategy.json", ".tor-settings.json", ".lock", ""] {
                         let path = profile::sibling(&module.private_profile, suffix);
                         if regular(&path)?.is_some() { std::fs::remove_file(path)?; }
                     }

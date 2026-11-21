@@ -47,7 +47,8 @@ impl Tun {
     /// Fresh native inventory BEFORE assigning a source address. Never recreate
     /// an old bound source transiently while a conflicting LAN is still live.
     pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
-        let mut manager=AsyncRouteManager::new()?;let native=manager.list().await?;
+        let mut manager = AsyncRouteManager::new().context("macOS native route preflight failed")?;
+        let native = manager.list().await.context("macOS native route preflight failed")?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(porthub_network::capture_routes::ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
         super::native_owner::conflict(porthub_network::capture_routes::audit(pools,own,peers,&existing,u32::MAX)?)?;Ok(())
     }
@@ -60,7 +61,7 @@ impl Tun {
 
         // Require positive pre-address absence; unknown is never absence/adoption.
         let local_before=address_route::BeforeAddress::observe(own);
-        local_before.validate()?; // No address is assigned on unknown/foreign pre-state.
+        local_before.validate().context("macOS private source preflight failed")?; // No address is assigned on unknown/foreign pre-state.
         let device = DeviceBuilder::new()
             .ipv4(own, 32, None)
             .mtu(porthub_mesh::MAX_PACKET as u16)
@@ -77,7 +78,7 @@ impl Tun {
         // SAFETY: the interface name is a live NUL-terminated CString.
         let index = unsafe { libc::if_nametoindex(interface_name.as_ptr()) };
         ensure!(index != 0, "cannot find macOS private utun interface");
-        let address_route=address_route::AddressRoute::confirm(&name,index,own,local_before)?;
+        let address_route=address_route::AddressRoute::confirm(&name,index,own,local_before).context("macOS private source verification failed")?;
         let packet_loop=super::owned_packet_loop::OwnedPacketLoop::new(own,index)?;
         let tun = Self {
             device,

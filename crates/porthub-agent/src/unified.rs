@@ -686,6 +686,48 @@ mod tests {
 }
 
 pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
+    #[cfg(feature = "private-sparse")]
+    {
+        if error.is::<crate::private_network::ExpiredDuringSuspend>() {
+            return "private authority request expired during system sleep";
+        }
+        if crate::private_network::logical_request_expired(error) {
+            return "private authority request exceeded its validity window";
+        }
+    }
+    if crate::private_network::native_route_conflict(error) {
+        return "native private route conflicts with an existing network";
+    }
+    // Only exact local error contexts select these fixed output strings. Nested paths,
+    // credentials and arbitrary OS messages never become part of the persisted report.
+    for cause in error.chain() {
+        let reason = match cause.to_string().as_str() {
+            "macOS utun read failed" => "macOS private tunnel packet read failed",
+            "macOS utun write failed" | "short private packet write" => "private tunnel packet write failed",
+            "owned local packet write exceeded bound" => "local private tunnel packet write timed out",
+            "private authority retired" => "private authorization generation was retired",
+            "authority clock regressed" => "suspend-inclusive authority clock moved backwards",
+            "suspend-inclusive authority clock unavailable" | "invalid authority clock" => "suspend-inclusive authority clock unavailable",
+            "native active assignment invalid" | "native quarantine identity/limits changed; repair required" => "native source ownership journal is invalid",
+            "previous native source shutdown is not acknowledged" => "previous native source retirement is unconfirmed",
+            "native packet source retired or replaced" => "native packet source ownership changed",
+            "native packet owner cancelled" => "native packet owner was cancelled",
+            "private background task panicked" => "private background task panicked",
+            "private background task was cancelled" => "private background task was cancelled",
+            "private background task stopped" => "private background task exited unexpectedly",
+            "macOS native route preflight failed" => "macOS native route inventory failed",
+            "macOS private source preflight failed" => "macOS private source preflight failed",
+            "macOS private source verification failed" => "macOS private source verification failed",
+            "cannot create macOS private utun device" => "macOS private tunnel device creation failed",
+            "cannot identify macOS private utun device" | "cannot find macOS private utun interface" => "macOS private tunnel identity verification failed",
+            "cannot add macOS private host route" | "cannot remove macOS private host route" => "macOS private host route update failed",
+            "this machine profile is already running" if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.raw_os_error().is_some() && io.raw_os_error()==fs2::lock_contended_error().raw_os_error()) =>
+                "private worker lock is held by another owner",
+            _ => continue,
+        };
+        return reason;
+    }
     let text = format!("{error:#}").to_ascii_lowercase();
     if text.contains("native source quarantined") || text.contains("native source address quarantined") || text.contains("retained source") { "native source quarantined; safe address repair required" }
     else if text.contains("private address changed") { "private address changed; rebuilding the private tunnel" }

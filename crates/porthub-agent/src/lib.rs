@@ -32,6 +32,7 @@ pub mod update;
 #[cfg(target_os = "macos")]
 mod macos_kqueue;
 mod unified;
+mod private_worker_diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod upgrade;
 pub const VERSION: &str = match option_env!("PORTHUB_VERSION") {
