@@ -10,6 +10,39 @@ const CONFIRM: Duration = Duration::from_secs(6);
 const HEADER: usize = 37;
 type Opening = [u8; 16];
 
+pub struct TcpResume {
+    pub(super) at: Instant,
+    alive: std::sync::atomic::AtomicBool,
+    nonce: [u8; 16],
+}
+impl TcpResume {
+    pub fn alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(super) fn retire(&self) {
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+/// Capability identifier only. The raw packet remains owned by the current
+/// worker and cannot be emitted with this identifier alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RetryProof {
+    opening: Opening,
+    nonce: [u8; 16],
+}
+impl RetryProof {
+    pub fn request(&self, generation: [u8; 16]) -> Vec<u8> {
+        frame(3, generation, self.nonce, std::iter::once(self.opening))
+    }
+    pub fn matches_reply(&self, generation: [u8; 16], wire: &[u8]) -> bool {
+        wire.len() == HEADER + 16
+            && &wire[..5] == b"PHC1\x04"
+            && wire[5..21] == generation
+            && wire[21..37] == self.nonce
+            && wire[37..] == self.opening
+    }
+}
 fn encode(packet: Packet) -> Opening {
     let k = packet.key;
     let mut out = [0; 16];
@@ -228,6 +261,66 @@ fn frame(
     b
 }
 impl Engine {
+    pub fn retry_proof(
+        &self,
+        pending: &TcpContinuity,
+        id: &str,
+        packet: Packet,
+    ) -> Option<RetryProof> {
+        let now = Instant::now();
+        let p = self
+            .pairs
+            .get(id)
+            .filter(|p| self.valid_lease() && p.valid_lease() && p.pair_private_epoch.is_some())?;
+        let k = packet.key;
+        let matches = |opening: Packet| opening.key == k || reverse(opening.key) == k;
+        if let Some(old) = pending.pending.get(id).filter(|old| old.until > now) {
+            if let Some((nonce, _)) = old.challenge.filter(|(_, end)| *end > now) {
+                let f = old
+                    .flows
+                    .iter()
+                    .find(|f| f.until > now && matches(f.opening) && p.allowed(f.opening))?;
+                return Some(RetryProof {
+                    opening: encode(f.opening),
+                    nonce,
+                });
+            }
+        }
+        let f = p.flows.get(&k).or_else(|| p.flows.get(&reverse(k)))?;
+        let r = f.resumed.as_ref()?;
+        if !r.alive()
+            || now.duration_since(r.at) > Duration::from_secs(2)
+            || f.expires <= now
+            || f.fin_directions != 0
+            || f.raw_path & 4 != 0
+            || !p.allowed(f.opening)
+        {
+            return None;
+        }
+        Some(RetryProof {
+            opening: encode(f.opening),
+            nonce: r.nonce,
+        })
+    }
+    /// Check original handshake, current flow owner and opening policy again.
+    /// A weak reference is also checked on the eventual transport write.
+    pub fn retry_owner(&self, id: &str, proof: RetryProof) -> Option<std::sync::Weak<TcpResume>> {
+        let p = self
+            .pairs
+            .get(id)
+            .filter(|p| self.valid_lease() && p.valid_lease() && p.pair_private_epoch.is_some())?;
+        let f = p.flows.get(&key(proof.opening))?;
+        let r = f.resumed.as_ref()?;
+        (r.alive()
+            && r.nonce == proof.nonce
+            && encode(f.opening) == proof.opening
+            && p.allowed(f.opening)
+            && f.fin_directions == 0
+            && f.close_until.is_none()
+            && f.expires > Instant::now()
+            && f.raw_path & 4 == 0)
+            .then(|| std::sync::Arc::downgrade(r))
+    }
     pub fn observe_raw_tcp(&mut self, peer: &str, packet: Packet, inbound: bool, raw: bool) {
         if self.expired_tcp.is_none() || packet.key.protocol != 6 || (raw && packet.syn) {
             return;
@@ -242,6 +335,11 @@ impl Engine {
             reverse(k)
         };
         if let Some(f) = pair.flows.get_mut(&k) {
+            if !raw {
+                if let Some(r) = &f.resumed {
+                    r.retire();
+                }
+            }
             f.raw_path |= if !raw {
                 4
             } else if inbound {
@@ -264,6 +362,9 @@ impl Engine {
             }) {
                 for flow in pair.flows.values_mut() {
                     flow.raw_path |= 4;
+                    if let Some(r) = &flow.resumed {
+                        r.retire();
+                    }
                 }
             }
         }
@@ -294,6 +395,9 @@ impl Engine {
         for p in self.pairs.values_mut() {
             for f in p.flows.values_mut() {
                 f.raw_path |= 4;
+                if let Some(r) = &f.resumed {
+                    r.retire();
+                }
             }
         }
     }
@@ -378,7 +482,8 @@ impl Engine {
         let nonce = wire[21..37].try_into().ok()?;
         let now = Instant::now();
         match wire[4] {
-            1 => {
+            1 | 3 => {
+                let ready_only = wire[4] == 3;
                 let mut approved = Vec::new();
                 for flow in input {
                     let live = p.flows.get(&key(flow)).is_some_and(|f| {
@@ -396,11 +501,18 @@ impl Engine {
                                 encode(f.opening) == flow && f.until > now && p.allowed(f.opening)
                             })
                     });
-                    if live || waiting {
+                    if live || (!ready_only && waiting) {
                         approved.push(flow);
                     }
                 }
-                (!approved.is_empty()).then(|| frame(2, generation, nonce, approved.into_iter()))
+                (!approved.is_empty()).then(|| {
+                    frame(
+                        if ready_only { 4 } else { 2 },
+                        generation,
+                        nonce,
+                        approved.into_iter(),
+                    )
+                })
             }
             2 => {
                 let old = pending.pending.get_mut(id)?;
@@ -435,7 +547,11 @@ impl Engine {
                             expires: e.until,
                             phase: 2,
                             raw_path: 8,
-                            resumed_at: Some(now),
+                            resumed: Some(std::sync::Arc::new(TcpResume {
+                                at: now,
+                                nonce,
+                                alive: true.into(),
+                            })),
                             fin_directions: 0,
                             close_until: None,
                             _permit: Some(permit),

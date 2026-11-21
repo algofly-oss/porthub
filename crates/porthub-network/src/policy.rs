@@ -5,7 +5,7 @@ pub mod exit_pick;
 pub use exit_pick::{ExitPickRequest,ExitPickResponse,ExitPickStatus,ExitChoice};
 mod sparse;
 mod tcp_continuity;
-pub use tcp_continuity::TcpContinuity;
+pub use tcp_continuity::{RetryProof, TcpContinuity, TcpResume};
 pub use sparse::{ExitIntent,ExitRole,ExitPair, Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 /// Existing full-snapshot ceiling, including the mandatory local identity.
@@ -191,6 +191,11 @@ impl Packet {
     pub fn opening_sequence(&self) -> Option<u32> {
         (self.key.protocol == 6 && self.syn && !self.ack && !self.fin && !self.rst).then_some(self.tcp_sequence)
     }
+    pub fn has_tcp_data(&self, bytes:&[u8])->bool {
+        if self.key.protocol!=6 || self.syn || self.rst || self.fin || !self.ack {return false;}
+        let ip=usize::from(bytes.first().copied().unwrap_or_default()&15)*4;
+        bytes.get(ip+12).is_some_and(|header|ip+usize::from(header>>4)*4<bytes.len())
+    }
     pub fn is_finish(&self) -> bool { self.key.protocol == 6 && self.fin }
     pub fn is_reset(&self) -> bool {
         self.key.protocol == 6 && self.rst
@@ -309,7 +314,7 @@ struct Flow {
     opening: Packet,
     phase: u8,
     raw_path: u8,
-    resumed_at: Option<Instant>,
+    resumed: Option<std::sync::Arc<TcpResume>>,
     fin_directions: u8,
     close_until: Option<Instant>,
     _permit:Option<tokio::sync::OwnedSemaphorePermit>,
@@ -514,7 +519,7 @@ impl Engine {
             if let Some((p,packet))=self.pairs.get(peer).filter(|p|p.has_resumed_tcp).and_then(|p|Some((p,Packet::parse(bytes)?))) {
                 let k=packet.key;
                 let reverse=Key{src:k.dst,dst:k.src,sport:k.dport,dport:k.sport,..k};
-                if [k,reverse].iter().any(|k|p.flows.get(k).and_then(|f|f.resumed_at).is_some_and(|admitted|arrival<admitted)){return false;}
+                if [k,reverse].iter().any(|k|p.flows.get(k).and_then(|f|f.resumed.as_ref()).is_some_and(|r|arrival<r.at)){return false;}
             }
         }
         self.check(bytes,peer,true)
@@ -676,6 +681,7 @@ fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &
                     return false;
                 }
                 if key.protocol == 6 {
+                    if packet.fin || packet.rst {if let Some(r)=&flow.resumed {r.retire();}}
                     if packet.rst {
                         flows.remove(&candidate);
                         return true;
@@ -731,7 +737,7 @@ fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &
                 opening: packet,
                 phase: 0,
                 raw_path: 0,
-                resumed_at: None,
+                resumed: None,
                 fin_directions: 0,
                 close_until: None,
             },

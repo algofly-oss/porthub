@@ -1,6 +1,7 @@
 #[cfg(any(windows, target_os = "macos", test))]
 mod route_debounce;
 pub mod controller;
+mod tcp_retry;
 #[cfg(target_os = "linux")]
 pub mod device;
 #[cfg(target_os = "linux")]

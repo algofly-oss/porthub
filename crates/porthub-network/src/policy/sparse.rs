@@ -531,6 +531,42 @@ mod tests {
     }
 
     #[test]
+    fn retry_requires_both_owners_and_rejects_timeout_denial_and_tuple_reuse() {
+        let epoch="a".repeat(64);let lease=pair(&epoch);let generation=[7;16];
+        let mut engine=Engine::default();engine.apply(base(&epoch)).unwrap();engine.install_pair(lease.clone()).unwrap();
+        for port in 41010..41014{establish(&mut engine,port,true);}
+        let mut before=engine.pause_established_tcp();
+        let mut remote=Engine::default();remote.apply(base(&epoch)).unwrap();remote.install_pair(lease.clone()).unwrap();
+        for port in 41010..41014{establish(&mut remote,port,true);}
+        let mut remote_saved=remote.pause_established_tcp();let mut expired=engine.pause_established_tcp();
+        engine.revoke();engine.apply(base(&epoch)).unwrap();engine.install_pair(lease.clone()).unwrap();
+        let packet=|port|Packet::parse(&tcp_segment(false,16,port)).unwrap();
+        assert!(engine.retry_proof(&before,"b",packet(41010)).is_none());
+        assert!(engine.prepare_tcp(&mut before,&lease));assert!(engine.prepare_tcp(&mut expired,&lease));
+        expired.timeout_confirmation("b");assert!(engine.retry_proof(&expired,"b",packet(41010)).is_none());
+        let proofs:Vec<_>=(41010..41014).map(|port|engine.retry_proof(&before,"b",packet(port)).unwrap()).collect();
+        assert!(engine.retry_owner("b",proofs[0]).is_none());
+        let grant=remote.tcp_confirmation(&mut TcpContinuity::default(),"b",generation,&before.requests(generation)[0].1).unwrap();
+        remote.revoke();remote.apply(base(&epoch)).unwrap();remote.install_pair(lease.clone()).unwrap();
+        assert!(remote.prepare_tcp(&mut remote_saved,&lease));
+        // The normal handshake may proceed simultaneously. An unconfirmed peer
+        // cannot attest to being ready to receive a saved local transmission.
+        assert!(remote.tcp_confirmation(&mut remote_saved,"b",generation,&proofs[0].request(generation)).is_none());
+        engine.tcp_confirmation(&mut before,"b",generation,&grant);
+        let ready=engine.tcp_confirmation(&mut before,"b",generation,&proofs[0].request(generation)).unwrap();
+        assert!(proofs[0].matches_reply(generation,&ready));assert!(!proofs[0].matches_reply([1;16],&ready));
+        assert!(!proofs[1].matches_reply(generation,&ready));
+        let guards:Vec<_>=proofs.iter().map(|p|engine.retry_owner("b",*p).unwrap()).collect();
+        let mut replaced=tcp_segment(false,2,41010);replaced[24..28].copy_from_slice(&818u32.to_be_bytes());
+        assert!(engine.check(&replaced,"b",false));assert!(guards[0].upgrade().is_none());
+        assert!(engine.check(&tcp_segment(false,17,41011),"b",false));
+        assert!(guards[1].upgrade().is_none_or(|r|!r.alive()));
+        engine.discard_tcp_query(&Lookup{kind:"peer".into(),value:"b".into()});
+        assert!(engine.retry_owner("b",proofs[2]).is_none());assert!(guards[2].upgrade().is_none_or(|r|!r.alive()));
+        engine.revoke();assert!(guards[3].upgrade().is_none());
+    }
+
+    #[test]
     fn expired_pair_confirms_for_a_bounded_window_and_a_denial_survives_regrant(){
         let epoch="a".repeat(64);let lease=pair(&epoch);let mut e=Engine::default();
         e.apply(base(&epoch)).unwrap();e.install_pair(lease.clone()).unwrap();establish(&mut e,41010,true);

@@ -673,6 +673,10 @@ async fn run_authorized_worker(
     let mut buffer = [0u8; porthub_mesh::MAX_PACKET + 1];
     let mut status_tick = tokio::time::interval(Duration::from_secs(30));
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut local_retries=super::tcp_retry::LocalRetries::default();
+    let mut retry_until=None;
+    let mut retry_tick=tokio::time::interval(Duration::from_millis(250));
+    retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -1071,7 +1075,10 @@ async fn run_authorized_worker(
                     let generation=installed_authority.as_ref().and_then(|a|a.workspace_generation());
                     sparse_handle.installed_authority(&response.query,lease.clone(),authority.retained());
                     if generation==authority.workspace_generation() && continuity.scoped(generation) && sparse_handle.peer_is_live(&id) {
-                        policy.prepare_tcp(&mut continuity.pending,&lease);
+                        if policy.prepare_tcp(&mut continuity.pending,&lease) {
+                            retry_until=Some(Instant::now()+Duration::from_secs(6));
+                            retry_tick.reset_immediately();
+                        }
                     } else {continuity.pending.discard(&id);}
                 } else {
                     sparse_handle.installed_authority(&response.query,lease,authority.retained());
@@ -1106,6 +1113,17 @@ async fn run_authorized_worker(
                         || origin.as_ref().is_none_or(|o|!current.matches_packet_origin(o)||(!direct&&o.relay_origin.is_none())) {continue;}
                     let Some(generation)=installed_authority.as_ref().and_then(|base|base.workspace_generation()) else{continue};
                     if !continuity.admit_control(&peer) || !continuity.scoped(Some(generation)) || sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation) {continue;}
+                    if envelope.payload.get(4)==Some(&4) {
+                        if let Some((segment,permit))=local_retries.ready(&policy,&peer,generation,&envelope.payload,
+                            ||super::authority_event::send_permit(installed_authority.as_ref(),&sparse_handle,&peer).ok().flatten()) {
+                            let peers=sessions.read().await;
+                            // A stale ICE path can still report ready. The local kernel's
+                            // one original segment has one sequence range on either carrier.
+                            if relay_sender.is_ready(){let _=relay_sender.send_guarded(&peer,&segment,Some(permit.clone()));}
+                            if let Some(ready)=peers.get(&peer).filter(|s|s.state()==porthub_mesh::State::Ready){let _=ready.send_guarded(segment,Some(permit));}
+                        }
+                        continue;
+                    }
                     if let Some(reply)=policy.tcp_confirmation(&mut continuity.pending,&peer,*generation.as_bytes(),&envelope.payload) {
                         send_tcp_confirmation(&sessions,&relay_sender,installed_authority.as_ref(),&sparse_handle,&peer,envelope.destination,envelope.source,&reply).await;
                     }
@@ -1329,6 +1347,7 @@ async fn run_authorized_worker(
             #[cfg(not(target_os="macos"))]let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
             check_installed_authority(installed_authority.as_ref())?;
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
+            continuity.pending.observe_lifecycle(parsed);
             #[cfg(feature="local-tor")]
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
                 tor.packet(bytes::Bytes::copy_from_slice(&buffer[..size]));continue;
@@ -1420,7 +1439,14 @@ async fn run_authorized_worker(
                 && peer_ips.get(&profile.peer_id)==Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {continue;}
             let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
             if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||!sparse_handle.touch_peer(peer)){sparse_handle.request_ip(parsed.destination());continue;}
-            continuity.pending.observe_lifecycle(parsed);
+            if retry_until.is_some_and(|until|until>Instant::now()) && peer_ips.get(&profile.peer_id)==Some(&parsed.source()){
+                if let Some(generation)=installed_authority.as_ref().and_then(|a|a.workspace_generation()){
+                    if continuity.generation==Some(generation) && sparse_handle.pair_authority(peer).and_then(|a|a.workspace_generation())==Some(generation){
+                        local_retries.observe(&policy,&continuity.pending,peer,parsed,&buffer[..size],generation,
+                            ||super::authority_event::send_permit(installed_authority.as_ref(),&sparse_handle,peer).ok().flatten());
+                    }
+                }
+            }
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
@@ -1579,6 +1605,20 @@ async fn run_authorized_worker(
                 }else{cold_datagrams.pending(item);}
             }
         },
+        _=retry_tick.tick(),if local_retries.active()||retry_until.is_some_and(|end|end>Instant::now())=>{
+            let current=installed_authority.as_ref().and_then(|a|a.workspace_generation());
+            let generation=current.filter(|g|continuity.scoped(Some(*g)));
+            let mut frames=local_retries.requests(&policy,generation);
+            if let Some(generation)=generation {
+                frames.extend(continuity.pending.requests(*generation.as_bytes()));
+                for (peer,frame) in frames {
+                    if sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation){continue;}
+                    if let (Some(local),Some(remote))=(peer_ips.get(&profile.peer_id),peer_ips.get(&peer)){
+                        send_tcp_confirmation(&sessions,&relay_sender,installed_authority.as_ref(),&sparse_handle,&peer,*local,*remote,&frame).await;
+                    }
+                }
+            }
+        },
         _=probe_tick.tick(),if device.is_some()=>{
             #[cfg(target_os = "macos")]
             if let (Some(zone), Some(registration)) = (zone.as_ref(), dns_registration.as_mut()) {
@@ -1595,12 +1635,6 @@ async fn run_authorized_worker(
             if let Some(generation)=installed_authority.as_ref().and_then(|a|a.workspace_generation()) {
                 if continuity.pending.peers().next().is_some() && continuity.scoped(Some(generation)){
                     for peer in continuity.pending.peers(){if !sparse_handle.peer_is_live(peer){sparse_handle.request_peer_once(peer);}}
-                    for (peer,frame) in continuity.pending.requests(*generation.as_bytes()){
-                        if sparse_handle.pair_authority(&peer).and_then(|a|a.workspace_generation())!=Some(generation){continue;}
-                        if let (Some(local),Some(remote))=(peer_ips.get(&profile.peer_id),peer_ips.get(&peer)){
-                            send_tcp_confirmation(&sessions,&relay_sender,installed_authority.as_ref(),&sparse_handle,&peer,*local,*remote,&frame).await;
-                        }
-                    }
                 }
             }
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
