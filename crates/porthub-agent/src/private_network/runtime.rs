@@ -492,7 +492,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut registered_suffixes: Vec<String> = Vec::new();
     let mut registered_rules = Vec::new();
     let mut dns_port: Option<u16> = None;
-    #[cfg(feature="local-tor")]
+    #[cfg(any(target_os="linux",feature="local-tor"))]
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
     let mut sparse_authority:Option<Snapshot>=None;
@@ -502,13 +502,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut native_stream_safe=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
-    let (dns_target,dns_health,dns_write) = {
+    let (dns_target,dns_health,dns_write,source_updates) = {
+        let (sources,restorations)=watch::channel(None);
         let (target,input)=watch::channel(None);
         let (result,health)=watch::channel(None);
         let write = Arc::new(tokio::sync::Mutex::new(()));
-        tasks.spawn(crate::private_dns_setup::monitor(input,result,write.clone(),work.clone()));
-        (target,health,write)
+        tasks.spawn(crate::private_dns_setup::monitor(input,result,restorations,write.clone(),work.clone()));
+        (target,health,write,sources)
     };
+    #[cfg(target_os="linux")]
+    let (mut alternate_dns_port, mut retry_dns_bind) = (None, Instant::now());
     let mut exit_route = None;
     let mut sparse_exit_intent:Option<porthub_network::policy::ExitIntent>=None;
     let mut cold_datagrams=cold_datagrams::Queue::default();
@@ -583,6 +586,28 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         let run: Result<()> = async {loop {
         check_installed_authority(&mut policy, installed_authority.as_ref())?;
         if !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
+        #[cfg(target_os="linux")]
+        if let Some(tun) = device.as_ref().filter(|tun| tun.source_restored.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() >= retry_dns_bind) {
+            if let (Some(port), Some(zone), Some(upstream)) = (dns_port, &zone, &dns_upstream) {
+                if alternate_dns_port.is_none() {
+                    match dns::Server::bind(tun.own_ip()).await {
+                        Ok(mut server) => {
+                            server.zone = Arc::clone(zone);
+                            server.upstream = Arc::clone(upstream);
+                            alternate_dns_port = Some(server.port()?);
+                            tasks.spawn(server.serve(work.clone()));
+                        }
+                        Err(_) => { retry_dns_bind = Instant::now() + Duration::from_secs(1); }
+                    }
+                }
+                if let Some(alternate) = alternate_dns_port {
+                    source_updates.send_replace(Some(crate::private_dns_setup::RestoredSource {
+                        index: tun.index, address: tun.own_ip(), port, alternate,
+                    }));
+                    tun.source_restored.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         tokio::select! {
         _=cancel.cancelled()=>break,
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
@@ -695,7 +720,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         server.protect_management(names,interfaces.clone()).await;
                     }
                     zone=Some(server.zone.clone());
-                    #[cfg(feature="local-tor")]
+                    #[cfg(any(target_os="linux",feature="local-tor"))]
                     {dns_upstream=Some(server.upstream.clone());}
                     tasks.spawn(server.serve(work.clone()));
                     dns_port=Some(port);

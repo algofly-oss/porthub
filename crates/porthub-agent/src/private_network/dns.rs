@@ -600,7 +600,7 @@ pub async fn register(
     port: u16,
     suffixes: &[String],
 ) -> Result<Registration> {
-    configure_linux_link(index, own, port, suffixes, true).await?;
+    configure_linux_link(index, own, port, suffixes, true, None).await?;
     Ok(Registration::default())
 }
 
@@ -611,6 +611,7 @@ pub(crate) async fn configure_linux_link(
     port: u16,
     suffixes: &[String],
     flush_caches: bool,
+    alternate: Option<u16>,
 ) -> Result<()> {
     let connection = zbus::Connection::system()
         .await
@@ -622,16 +623,14 @@ pub(crate) async fn configure_linux_link(
         "org.freedesktop.resolve1.Manager",
     )
     .await?;
-    proxy
-        .call::<_, _, ()>(
-            "SetLinkDNSEx",
-            &(
-                index as i32,
-                vec![(libc::AF_INET, own.octets().to_vec(), port, "")],
-            ),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("private DNS per-interface registration failed"))?;
+    // After Linux removes a local address, resolved can retain an unusable
+    // socket to an otherwise healthy DNS server. Switch between two live
+    // listeners serving the same policy. The private suffix stays registered.
+    for endpoint in alternate.into_iter().chain(std::iter::once(port)) {
+        proxy.call::<_, _, ()>("SetLinkDNSEx", &(index as i32,
+            vec![(libc::AF_INET, own.octets().to_vec(), endpoint, "")])).await
+            .map_err(|_| anyhow::anyhow!("private DNS per-interface registration failed"))?;
+    }
     let domains = suffixes
         .iter()
         .map(|suffix| (suffix.as_str(), true))
@@ -1135,9 +1134,11 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
     let (probe, input) = watch::channel(Some(target));
     let (report, mut health) = watch::channel(None);
     let registration_lock = Arc::new(Mutex::new(()));
+    let (source, restorations) = watch::channel(None);
     let task = tokio::spawn(monitor(
         input,
         report,
+        restorations,
         registration_lock.clone(),
         cancel.clone(),
     ));
@@ -1276,6 +1277,45 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
         })
         .await
         .map_err(|_| anyhow::anyhow!("registration repair waited for the blocked libc probe"))??;
+        // resolved can retain its old server socket even when DNSEx and the
+        // route-only domains still match. Refresh only the owned DNS link.
+        let mut standby = Server::bind(own).await?;
+        let alternate = standby.port()?;
+        standby.zone = zone.clone();
+        let standby_task = tokio::spawn(standby.serve(cancel.child_token()));
+        for operation in ["del", "add"] {
+            ensure!(tokio::process::Command::new("ip")
+                .args(["addr", operation, "10.219.94.2/32", "dev", "phtest0"])
+                .status()
+                .await?
+                .success());
+            if operation == "del" {
+                // Make a real system query while the local source is missing.
+                let lookup = tokio::process::Command::new("getent")
+                    .args(["ahostsv4", secondary])
+                    .kill_on_drop(true)
+                    .output();
+                ensure!(
+                    !matches!(tokio::time::timeout(Duration::from_millis(300), lookup).await,
+                    Ok(Ok(output)) if output.status.success())
+                );
+            }
+        }
+        source.send_replace(Some(crate::private_dns_setup::RestoredSource {
+            index,
+            address: own,
+            port,
+            alternate,
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !resolves(secondary, own).await? {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        cancel.cancel();
+        standby_task.await??;
         Ok::<(), anyhow::Error>(())
     }
     .await;

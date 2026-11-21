@@ -338,7 +338,7 @@ mod tests {
                 }),
             };
             let (_sender, target) = tokio::sync::watch::channel(Some(stale.clone()));
-            assert!(!stale.repair_if_stale(&target, &lock).await?);
+            assert!(!stale.repair_if_stale(&target, &lock, Some(5533)).await?);
             assert!(foreign.matches(dns_server).await?);
         }
         Ok(())
@@ -497,13 +497,14 @@ impl LookupTarget {
         &self,
         target: &tokio::sync::watch::Receiver<Option<Self>>,
         registration: &tokio::sync::Mutex<()>,
+        alternate: Option<u16>,
     ) -> Result<bool> {
         let Some(link) = &self.link else {
             return Ok(false);
         };
         // Read the owned link before changing anything. NSS can resolve the
         // agent hostname even when a different private suffix has disappeared.
-        if link.matches(self.address).await? {
+        if alternate.is_none() && link.matches(self.address).await? {
             return Ok(false);
         }
         let _guard = registration.lock().await;
@@ -525,6 +526,7 @@ impl LookupTarget {
             link.port,
             &link.suffixes,
             false,
+            alternate,
         )
         .await?;
         Ok(true)
@@ -562,15 +564,25 @@ fn watch_resolved_link(
     Ok(watcher)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RestoredSource {
+    pub index: u32,
+    pub address: std::net::Ipv4Addr,
+    pub port: u16,
+    pub alternate: u16,
+}
+
 async fn monitor_link_registration(
     mut target: tokio::sync::watch::Receiver<Option<LookupTarget>>,
     registration: std::sync::Arc<tokio::sync::Mutex<()>>,
     mut lookup_failures: tokio::sync::mpsc::Receiver<()>,
+    mut restorations: tokio::sync::watch::Receiver<Option<RestoredSource>>,
     repaired: &tokio::sync::Notify,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let (changed, mut changes) = tokio::sync::mpsc::channel(1);
     let mut watcher = None;
+    let mut restore: Option<RestoredSource> = None;
     let mut next_failed_probe_check = tokio::time::Instant::now();
     loop {
         let selected = target.borrow_and_update().clone();
@@ -585,22 +597,32 @@ async fn monitor_link_registration(
                     .map(|w| (index, w))
             });
         }
+        restore = restore.filter(|event| selected.as_ref().is_some_and(|probe| {
+            probe.address == event.address && probe.link.as_ref().is_some_and(|link|
+                link.index == event.index && link.port == event.port)
+        }));
         if let Some(probe) = selected.as_ref().filter(|probe| probe.link.is_some()) {
             if matches!(
                 tokio::time::timeout(
                     Duration::from_secs(2),
-                    probe.repair_if_stale(&target, &registration)
+                    probe.repair_if_stale(&target, &registration, restore.map(|event| event.alternate))
                 )
                 .await,
                 Ok(Ok(true))
             ) {
                 tracing::debug!("restored private DNS on the tunnel interface");
+                restore = None;
                 repaired.notify_one();
             }
         }
 
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
+            event = restorations.changed() => {
+                if event.is_err() { return Ok(()); }
+                restore = *restorations.borrow_and_update();
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)), if restore.is_some() => {}
             changed = target.changed() => {
                 if changed.is_err() { return Ok(()); }
                 next_failed_probe_check = tokio::time::Instant::now();
@@ -629,13 +651,14 @@ async fn monitor_link_registration(
 pub(crate) async fn monitor(
     mut target: tokio::sync::watch::Receiver<Option<LookupTarget>>,
     result: tokio::sync::watch::Sender<Option<bool>>,
+    restorations: tokio::sync::watch::Receiver<Option<RestoredSource>>,
     registration: std::sync::Arc<tokio::sync::Mutex<()>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let (failed, failures) = tokio::sync::mpsc::channel(1);
     let repaired = tokio::sync::Notify::new();
     let native =
-        monitor_link_registration(target.clone(), registration, failures, &repaired, &cancel);
+        monitor_link_registration(target.clone(), registration, failures, restorations, &repaired, &cancel);
     let lookups = async {
         loop {
             let selected = target.borrow_and_update().clone();

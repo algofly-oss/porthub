@@ -19,6 +19,7 @@ pub struct Tun {
     own:Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
     capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
+    pub(super) source_restored: std::sync::atomic::AtomicBool,
     _source_lease: super::native_owner::source::OwnerLease,
 }
 #[derive(Debug)]
@@ -188,6 +189,7 @@ impl Tun {
             name: name.into(),
             routes: Mutex::new(HashSet::new()),
             capture_routes: Mutex::new(std::collections::BTreeSet::new()),
+            source_restored: Default::default(),
             _source_lease: Default::default(),
         };
         tun.update_routes(peers).await?;
@@ -275,6 +277,7 @@ impl Tun {
         if !link.is_up() {
             self.netlink.set_link_up_by_index(self.index).await?;
         }
+        self.source_restored.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(audit)
     }
 
