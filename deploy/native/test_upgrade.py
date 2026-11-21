@@ -502,6 +502,48 @@ class ReleaseSelection(unittest.TestCase):
         self.assertEqual(self.tags, original)
         self.assertEqual(self.env.read_bytes(), self.original)
 
+    def restore_targets(self):
+        canonical = 'porthub:core-1.11.0'
+        qualified = canonical + '-' + 'a'*40
+        original = 'sha256:'+'c'*64
+        self.tags[canonical] = original
+        self.tags[qualified] = self.images['core']['Id']
+        def prepare():
+            return upgrade.ReleaseSelection(self.root, {'core':self.current['core']}, {'core':self.images['core']},
+                self.config, 'a'*40, '1.11.0', restore_canonical=original)
+        return canonical, qualified, original, prepare
+
+    def test_cross_version_restore_selects_retained_hotfix_without_retagging_immutable_images(self):
+        canonical, qualified, original, prepare = self.restore_targets()
+        prepare().apply(self.root, lambda: None)
+        self.assertEqual(self.tags[canonical], original)
+        for tag in (qualified, 'porthub:core'):
+            self.assertEqual(self.tags[tag], self.images['core']['Id'])
+        self.assertFalse(any(call[-1] in (canonical, qualified) for call in self.calls))
+        self.assertEqual(self.tags['porthub:edge'], self.current['edge']['Image'])
+
+    def test_restore_rejects_missing_or_changed_targets_and_tracks_postcheck_rollback(self):
+        canonical, qualified, original, prepare = self.restore_targets()
+        snapshot = dict(self.tags)
+        for tag in (canonical, qualified, 'porthub:core'):
+            del self.tags[tag]
+            with self.assertRaisesRegex(ValueError,'matching current image'):
+                prepare()
+            self.tags.update(snapshot)
+        self.assertEqual(self.calls, [])
+        selection = prepare()
+        self.tags[qualified] = original
+        with self.assertRaisesRegex(ValueError,'changed'):
+            selection.apply(self.root, lambda: None)
+        self.assertEqual(self.calls, [])
+        self.tags.update(snapshot)
+        def fail():
+            raise RuntimeError('health failed')
+        with self.assertRaisesRegex(RuntimeError,'health failed'):
+            prepare().apply(self.root, fail)
+        self.assertEqual(self.tags,snapshot)
+        self.assertEqual(self.env.read_bytes(),self.original)
+
     def test_changed_environment_is_rejected_without_overwriting_it(self):
         selection = self.selection()
         self.env.write_bytes(b'SECRET=changed-by-admin\n')
