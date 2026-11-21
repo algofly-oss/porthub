@@ -455,6 +455,53 @@ class ReleaseSelection(unittest.TestCase):
             self.selection()
         self.assertEqual(self.calls, [])
         self.assertEqual(self.env.read_bytes(), self.original)
+    def hotfix(self):
+        self.current['core']['Config'] = {'Labels': {
+            'org.opencontainers.image.revision': 'b'*40,
+            'org.opencontainers.image.version': '1.11.0',
+        }}
+        return upgrade.ReleaseSelection(self.root, {'core':self.current['core']}, {'core':self.images['core']},
+            self.config, 'a'*40, '1.11.0', hotfix_from='b'*40)
+
+    def test_hotfix_preserves_canonical_version_alias_and_other_roles(self):
+        canonical = 'porthub:core-1.11.0'
+        self.tags[canonical] = self.current['core']['Image']
+        self.hotfix().apply(self.root, lambda: None)
+        self.assertEqual(self.tags[canonical], self.current['core']['Image'])
+        self.assertEqual(self.tags[canonical+'-'+'a'*40], self.images['core']['Id'])
+        self.assertEqual(self.tags['porthub:core'], self.images['core']['Id'])
+        self.assertEqual(self.tags['porthub:edge'], self.current['edge']['Image'])
+
+    def test_hotfix_refuses_missing_or_wrong_predecessor_and_revision_alias_collision(self):
+        canonical = 'porthub:core-1.11.0'
+        with self.assertRaisesRegex(ValueError, 'canonical image'):
+            self.hotfix()
+        self.tags[canonical] = 'sha256:'+'c'*64
+        with self.assertRaisesRegex(ValueError, 'canonical image'):
+            self.hotfix()
+        self.tags[canonical] = self.current['core']['Image']
+        self.tags[canonical+'-'+'a'*40] = 'sha256:'+'e'*64
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            self.hotfix()
+        self.assertEqual(self.calls, [])
+
+    def test_hotfix_rechecks_canonical_alias_and_rolls_back_its_own_tags(self):
+        canonical = 'porthub:core-1.11.0'
+        self.tags[canonical] = self.current['core']['Image']
+        original = dict(self.tags)
+        selection = self.hotfix()
+        self.tags[canonical] = 'sha256:'+'e'*64
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            selection.apply(self.root, lambda: None)
+        self.assertEqual(self.calls, [])
+        self.tags[canonical] = original[canonical]
+        def fail():
+            raise ValueError('probe failed')
+        with self.assertRaisesRegex(ValueError, 'probe failed'):
+            selection.apply(self.root, fail)
+        self.assertEqual(self.tags, original)
+        self.assertEqual(self.env.read_bytes(), self.original)
+
     def test_changed_environment_is_rejected_without_overwriting_it(self):
         selection = self.selection()
         self.env.write_bytes(b'SECRET=changed-by-admin\n')

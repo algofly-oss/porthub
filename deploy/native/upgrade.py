@@ -280,7 +280,7 @@ def replace_private(path, payload, metadata):
 
 class ReleaseSelection:
     """Preflight and transaction for the ordinary Compose restart configuration."""
-    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub", depot=None):
+    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub", depot=None, hotfix_from=None):
         self.path = root / '.env'
         self.metadata = self.path.lstat()
         if not stat.S_ISREG(self.metadata.st_mode) or self.metadata.st_mode & 0o077:
@@ -288,12 +288,23 @@ class ReleaseSelection:
         self.original = self.path.read_bytes()
         self.images = images
         self.aliases = {}
+        self.canonical_aliases = {}
+        if hotfix_from is not None and (not re.fullmatch(r'[a-f0-9]{40}', hotfix_from) or hotfix_from == revision):
+            raise ValueError('A same-version hotfix requires a different full predecessor revision')
         for role, image in images.items():
             stable = namespace + ':' + role
             if configuration['services'][role]['image'] != stable:
                 raise ValueError('Release persistence requires the standard PortHub image names')
             immutable = stable + '-' + version
             previous = current[role]['Image']
+            if hotfix_from is not None:
+                labels = current[role]['Config']['Labels']
+                if (labels.get('org.opencontainers.image.revision') != hotfix_from
+                        or labels.get('org.opencontainers.image.version') != version
+                        or image_reference(immutable) != previous):
+                    raise ValueError('The running role must match the canonical image and expected hotfix predecessor')
+                self.canonical_aliases[immutable] = previous
+                immutable += '-' + revision
             rollback = namespace + ':rollback-' + role + '-' + previous.removeprefix('sha256:')[:12]
             for reference, expected in ((immutable, image['Id']), (rollback, previous)):
                 existing = image_reference(reference)
@@ -322,8 +333,14 @@ class ReleaseSelection:
             self.updated += '\n'
         self.updated = (self.updated + ''.join(key + '=' + value + '\n' for key, value in changes.items())).encode()
 
+    def verify_canonical_aliases(self):
+        for reference, expected in self.canonical_aliases.items():
+            if image_reference(reference) != expected:
+                raise ValueError('The canonical hotfix predecessor changed during the upgrade')
+
     def apply(self, record, verify):
         from migrate import private_file
+        self.verify_canonical_aliases()
         fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
         current = self.path.lstat()
         if any(getattr(current, key) != getattr(self.metadata, key) for key in fields) or self.path.read_bytes() != self.original:
@@ -337,6 +354,7 @@ class ReleaseSelection:
                     run(['docker', 'image', 'tag', wanted, reference])
             replace_private(self.path, self.updated, self.metadata)
             verify()
+            self.verify_canonical_aliases()
         except BaseException as original:
             failures = []
             try:
@@ -432,7 +450,8 @@ def perform_candidate(args, root, roles, current, images, base, depot):
                              if value.startswith('PORTHUB_VERSION=')), None)
     if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
-    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project, depot=depot)
+    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project,
+                                 depot=depot, hotfix_from=getattr(args, 'hotfix_from_revision', None))
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
@@ -519,6 +538,8 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--project', default='porthub')
     parser.add_argument('--roles', nargs='+', choices=ROLES, default=list(ROLES), help='Replace only these roles; omitted roles must keep running unchanged')
+    parser.add_argument('--hotfix-from-revision', metavar='PREDECESSOR_SHA',
+                        help='Use a revision-qualified immutable alias for a same-version hotfix of the running canonical image')
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--native-build-depot', type=Path, help='First-time opt-in: existing dedicated read-only artifact depot; later upgrades preserve it automatically')
     parser.add_argument('--native-build-depot-owner-uid', type=int, help='First-time opt-in: trusted artifact publisher UID')

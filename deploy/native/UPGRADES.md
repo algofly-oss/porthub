@@ -25,6 +25,11 @@ must have its own recoverable previous Compose configuration. This supports a st
 firewall deployed from an older release directory. The default selects all three
 roles; a firewall-only upgrade can use `--roles firewall`.
 
+For a same-version repair, pass `--hotfix-from-revision PREDECESSOR_SHA` together
+with the candidate revision. Each selected running role must match the predecessor
+and its canonical version alias. The repair records the candidate under
+`porthub:ROLE-VERSION-FULL_SOURCE_SHA` and preserves the canonical version alias.
+
 Add `--apply` to replace the selected roles individually with immutable image
 IDs, `--no-deps`, no build/pull and a health wait. A private per-project lock
 serializes upgrades across staging directories. The script records candidate
