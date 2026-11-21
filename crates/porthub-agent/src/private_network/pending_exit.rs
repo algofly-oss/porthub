@@ -72,10 +72,7 @@ pub(super) fn same_identity(a: &PeerInfo, b: &PeerInfo) -> bool {
     a.id == b.id && a.ip == b.ip && a.fingerprint == b.fingerprint && a.instance == b.instance
 }
 pub(super) fn same_peer(a: &PeerInfo, b: &PeerInfo) -> bool {
-    same_identity(a, b)
-        && a.relay_origin
-            .as_ref()
-            .is_none_or(|stamp| b.relay_origin.as_ref() == Some(stamp))
+    b.matches_packet_origin(a)
 }
 pub(super) struct Entry {
     pub(super) bytes: Bytes,

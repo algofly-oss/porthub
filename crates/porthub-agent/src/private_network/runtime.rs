@@ -1034,6 +1034,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                     continue;
                 }
+                // A restarted peer can send a SYN-ACK before our pair lease has
+                // caught up. Admitting it under the old identity opens the local
+                // socket, only to reset it when the replacement lease arrives.
+                if sparse_handle.enabled() && origin.as_ref().is_some_and(|source| {
+                    policy.pair_peer(&peer).is_none_or(|current| !current.matches_packet_origin(source))
+                }) {
+                    sparse_handle.request_peer_once(&peer);
+                    continue;
+                }
                 if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                 mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {

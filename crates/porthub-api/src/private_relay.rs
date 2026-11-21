@@ -176,6 +176,28 @@ struct QueuedPacket {
     // Released on dequeue/drop, including connection teardown and cancellation.
     _budget: OwnedSemaphorePermit,
 }
+
+impl QueuedPacket {
+    fn needs_origin(&self, negotiated: bool) -> bool {
+        negotiated && self.origin.is_some() && relay_needs_origin(&self.bytes)
+    }
+}
+
+/// Input is the routed record (one peer-name length, peer name, IPv4 packet).
+/// Ordinary TCP data keeps the compact relay encoding.
+fn relay_needs_origin(record: &[u8]) -> bool {
+    let Some((&length, body)) = record.split_first() else { return false };
+    let Some(ip) = body.get(usize::from(length)..) else { return false };
+    match ip.get(9) {
+        Some(&porthub_mesh::control_packet::EXIT) => true,
+        Some(&6) if ip[0] >> 4 == 4 => {
+            let header = usize::from(ip[0] & 15) * 4;
+            header >= 20 && ip.get(header + 13).is_some_and(|flags| flags & 2 != 0)
+        }
+        _ => false,
+    }
+}
+
 impl std::ops::Deref for QueuedPacket {
     type Target = [u8];
     fn deref(&self) -> &[u8] { &self.bytes }
@@ -925,6 +947,7 @@ async fn serve(
     let mut lease_check = tokio::time::interval(Duration::from_secs(5));
     let mut drop_report = tokio::time::interval(Duration::from_secs(10));
     drop_report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut deferred = None;
     loop {
         tokio::select! {
             _=reading.cancelled()=>break,
@@ -934,9 +957,10 @@ async fn serve(
                 if dropped>0 {tracing::warn!(dropped_packets=dropped,"private relay gateway queue overflowed");}
             },
             Some(bytes)=pong_rx.recv()=>{if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Pong(bytes))).await,Ok(Ok(()))){break;}},
-            packet=packets.recv()=>{
+            packet=async { if let Some(packet)=deferred.take() {Some(packet)} else {packets.recv().await} }=>{
                 let Some(packet)=packet else{break;};
                 if !app.private_relay.authorized(&id,&hash,&instance){break;}
+                let stamped = packet.needs_origin(origins);
                 let QueuedPacket{bytes:mut output,receipt,_budget,origin}=packet;
                 let mut origin_records=vec![origin];
                 let mut budgets=vec![_budget];
@@ -946,6 +970,12 @@ async fn serve(
                     let mut records=vec![output];
                     while records.len()<if origins{24}else{32} {
                         match packets.try_recv(){Ok(packet)=>{
+                            // Keep ordering and check the deferred packet's receipt
+                            // again when its batch is written.
+                            if packet.needs_origin(origins) != stamped {
+                                deferred = Some(packet);
+                                break;
+                            }
                             let QueuedPacket{bytes,receipt,_budget,origin}=packet;
                             if let Some(receipt)=receipt {
                                 // A batch often consists of one peer pair at one exact
@@ -961,13 +991,13 @@ async fn serve(
                             budgets.push(_budget);records.push(bytes);origin_records.push(origin);
                         },Err(_)=>break}
                     }
-                    let encoded=if origins && origin_records.iter().all(Option::is_some) && records.iter().any(|bytes|bytes.get(1+usize::from(bytes[0])+9)==Some(&porthub_mesh::control_packet::EXIT)) {
+                    let encoded=if stamped {
                         let records:Vec<_>=records.into_iter().zip(origin_records).map(|(bytes,origin)|{let n=usize::from(bytes[0]);(origin.unwrap(),Bytes::copy_from_slice(&bytes[1+n..]))}).collect();
                         porthub_mesh::relay_origin::encode(&records).map(|b|b.to_vec())
                     }else{porthub_mesh::batch::encode(&records,prefixes)};
                     let Ok(encoded)=encoded else {break;};
                     output=encoded;
-                }else if origins && output.get(1+usize::from(output[0])+9)==Some(&porthub_mesh::control_packet::EXIT) {
+                }else if stamped {
                     if let Some(origin)=origin_records.pop().flatten(){let n=usize::from(output[0]);let Ok(encoded)=porthub_mesh::relay_origin::encode(&[(origin,Bytes::copy_from_slice(&output[1+n..]))]) else{break;};output=encoded.to_vec();}
                 }
                 let sent=app.private_relay.while_authorized(&receipts,tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(output.into())))).await;
@@ -1012,6 +1042,34 @@ fn relay_queue_capacity(active_connections: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relay_marks_handshakes_and_exit_traffic_for_origin_encoding() {
+        fn frame(protocol: u8, ip_header_words: u8, flags: u8) -> Vec<u8> {
+            let mut record = vec![1, b'a'];
+            let h = usize::from(ip_header_words) * 4;
+            let mut ip = vec![0; h + 20];
+            ip[0] = 0x40 | ip_header_words;
+            ip[9] = protocol;
+            ip[h + 13] = flags;
+            record.extend(ip);
+            record
+        }
+        for h in [5, 6, 15] {
+            assert!(relay_needs_origin(&frame(6, h, 0x02)));
+            assert!(relay_needs_origin(&frame(6, h, 0x12)));
+            for flags in [0x10, 0x18, 0x11, 0x04] {
+                assert!(!relay_needs_origin(&frame(6, h, flags)));
+            }
+        }
+        assert!(relay_needs_origin(&frame(porthub_mesh::control_packet::EXIT, 5, 0)));
+        assert!(!relay_needs_origin(&frame(17, 5, 2)));
+        assert!(!relay_needs_origin(&frame(6, 4, 2)));
+        let syn = frame(6, 5, 2);
+        for prefix in 0..(2 + 20 + 14) {
+            assert!(!relay_needs_origin(&syn[..prefix]));
+        }
+    }
+
 
     #[test]
     fn sparse_4097_online_identities_allocate_no_transport_seats_and_only_exact_pair_authority() {
