@@ -25,7 +25,7 @@ struct StateData {
 }
 struct Export {
     id: String,
-    socket: TcpListener,
+    socket: RwLock<Option<TcpListener>>,
     stop: watch::Sender<bool>,
 }
 
@@ -69,8 +69,7 @@ async fn import(
     }
     let service = format!("porthub_import_{id}_{index}");
     let open = state.server.read().await.open_import(&service);
-    let stream = open.await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let stream = open.await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     upgraded(request, stream)
 }
 async fn listen(
@@ -95,7 +94,14 @@ async fn listen(
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
     let (stop, _) = watch::channel(false);
-    exports.insert(port, Arc::new(Export { id, socket, stop }));
+    exports.insert(
+        port,
+        Arc::new(Export {
+            id,
+            socket: RwLock::new(Some(socket)),
+            stop,
+        }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 async fn accept(
@@ -112,9 +118,14 @@ async fn accept(
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)?;
     let mut stop = export.stop.subscribe();
+    let guard = export.socket.read().await;
+    let listener = guard.as_ref().ok_or(StatusCode::GONE)?;
+    if *stop.borrow() {
+        return Err(StatusCode::GONE);
+    }
     let (stream, _) = tokio::select! {
         _=stop.changed()=>return Err(StatusCode::GONE),
-        value=tokio::time::timeout(Duration::from_secs(12),export.socket.accept())=>value.map_err(|_|StatusCode::NO_CONTENT)?.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?,
+        value=tokio::time::timeout(Duration::from_secs(12),listener.accept())=>value.map_err(|_|StatusCode::NO_CONTENT)?.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?,
     };
     let _ = stream.set_nodelay(true);
     upgraded(request, stream)
@@ -126,13 +137,18 @@ async fn remove(
     if !valid(&id) {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let mut retired = Vec::new();
     state.exports.lock().await.retain(|_, export| {
         if export.id != id {
             return true;
         }
         export.stop.send_replace(true);
+        retired.push(export.clone());
         false
     });
+    for export in retired {
+        export.socket.write().await.take();
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 async fn inventory(State(state): State<StateData>) -> axum::Json<Vec<(String, u16)>> {

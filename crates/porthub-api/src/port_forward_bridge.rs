@@ -393,11 +393,10 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
         .map(|m| number(m, "gatewayPort"))
         .collect::<Result<_>>()?;
     let grant = app.forward_registry.get(&id.to_hex());
-    let attached = grant
+    let ready = grant
         .as_ref()
         .is_some_and(|g| ports.iter().all(|p| g.is_listening(*p)));
-    let ready = attached;
-    let reason = if !attached {
+    let reason = if !ready {
         Some("Waiting for the saved SSH command to connect")
     } else {
         None
@@ -594,5 +593,73 @@ pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
     }
     for (_, stop) in app.forward_bridge.workers.lock().await.drain() {
         stop.cancel();
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use tokio::net::{TcpListener, UnixListener};
+    #[tokio::test]
+    #[ignore = "needs isolated MongoDB"]
+    async fn public_edge_rebinds_and_quarantines_incomplete_reservations() -> Result<()> {
+        let client =
+            mongodb::Client::with_uri_str(std::env::var("PORTHUB_TEST_MONGO_URI")?).await?;
+        let db = client.database(&format!(
+            "porthub_forward_recovery_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("edge.sock");
+        let socket = UnixListener::bind(&path)?;
+        let server = porthub_tunnel::EmbeddedServer::new(porthub_tunnel::gateway_config(
+            "[server.services]",
+        )?)
+        .await?;
+        let router = porthub_edge::apply::router(
+            Arc::new(tokio::sync::RwLock::new(server)),
+            temp.path().join("edge.toml"),
+        );
+        let server = tokio::spawn(async move { axum::serve(socket, router).await });
+        let app = Arc::new(App::new(
+            crate::config::Config {
+                edge_socket: Some(path),
+                ..Default::default()
+            },
+            db.clone(),
+        ));
+        let result=async{
+            ensure_indexes(&app).await?;
+            let (id,owner,orphan,stale)=(ObjectId::new(),ObjectId::new(),ObjectId::new(),ObjectId::new());
+            let original=TcpListener::bind("127.0.0.1:0").await?;
+            let port=original.local_addr()?.port();drop(original);
+            app.collection("users").insert_one(doc!{"_id":owner}).await?;
+            app.collection(COLLECTION).insert_one(doc!{"_id":id,"workspace_id":owner,"public":true,"state":"active","mappings":[{"direction":"remote","gatewayPort":i32::from(port),"clientPort":22}]}).await?;
+            app.collection("connections").insert_one(doc!{"forward_owner":owner,"forward_reservation":id,"external_port":i32::from(port),"enabled":false}).await?;
+            let list=||async{edge(&app).await?.get(format!("{BASE}/public")).send().await?.json::<Vec<(String,u16)>>().await.map_err(anyhow::Error::from)};
+            recover_public(&app).await?;assert_eq!(list().await?,vec![(id.to_hex(),port)]);
+            // A restarted edge has an empty in-memory listener registry. Its
+            // live core worker must recreate the listener for exactly this id.
+            let http=edge(&app).await?;
+            http.delete(format!("{BASE}/public/{id}")).send().await?.error_for_status()?;
+            assert!(list().await?.is_empty());
+            recover_public(&app).await?;assert_eq!(list().await?,vec![(id.to_hex(),port)]);
+            app.collection(COLLECTION).insert_one(doc!{"_id":stale,"workspace_id":owner,"state":"provisioning","public":false,"created_at":DateTime::from_millis(0)}).await?;
+            for (n,entry) in [(31003,orphan),(31004,stale)] {
+                app.collection("connections").insert_one(doc!{"forward_owner":owner,"forward_reservation":entry,"external_port":n,"enabled":false}).await?;
+            }
+            reap(&app).await?;
+            assert!(app.collection(COLLECTION).find_one(doc!{"_id":stale}).await?.is_none());
+            assert_eq!(app.collection("connections").count_documents(doc!{"forward_owner":owner}).await?,1);
+            app.collection(COLLECTION).update_one(doc!{"_id":id},doc!{"$set":{"state":"deleting"}}).await?;
+            reap(&app).await?;assert!(list().await?.is_empty());
+            assert!(TcpListener::bind(("0.0.0.0",port)).await.is_ok());
+            assert!(app.forward_bridge.workers.lock().await.is_empty());
+            assert_eq!(app.collection("connections").count_documents(doc!{"forward_owner":owner}).await?,0);
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        server.abort();
+        db.drop().await?;
+        result
     }
 }
