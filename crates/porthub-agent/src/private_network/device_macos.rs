@@ -334,3 +334,7 @@ impl Drop for Tun {
         }
     }
 }
+
+#[cfg(all(test, feature = "private-sparse"))]
+#[path = "macos_rearm_field.rs"]
+mod rearm_field;

@@ -47,6 +47,9 @@ impl OwnedPacketLoop {
     fn generation(&self) -> u64 {
         self.generation
     }
+    #[cfg(all(test, target_os = "macos", feature = "private-sparse"))]
+    pub(super) fn test_generation(&self) -> u64 { self.generation() }
+
     pub(super) fn retire(&self) {
         self.active.store(false, Ordering::SeqCst);
     }
