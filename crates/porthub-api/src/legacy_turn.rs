@@ -1,10 +1,11 @@
 //! Standard TURN over the existing WebSocket endpoint for enrolled legacy
 //! peers. All allocations are virtual memory channels; no UDP sockets or
 //! arbitrary loopback/Internet destinations are reachable through this relay.
-use crate::App;
+use crate::{relay_write_progress::WriteProgress, App};
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
@@ -45,6 +46,7 @@ impl Default for Network {
         }
     }
 }
+
 #[derive(Default)]
 struct Authentication {
     peer: Mutex<Option<String>>,
@@ -343,7 +345,56 @@ impl Framing {
         Ok(Some(self.bytes.drain(..size).collect()))
     }
 }
-pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
+const MAX_READY_WRITES: usize = 8;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn write_ready_packets<S: futures_util::Sink<Message> + Unpin>(
+    socket: &mut S,
+    first: Vec<u8>,
+    pending: &mut mpsc::Receiver<Vec<u8>>,
+    progress: &WriteProgress,
+) -> Result<()>
+where
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    use futures_util::FutureExt;
+    use tokio::time::Instant;
+
+    let count = (1 + pending.len()).min(MAX_READY_WRITES);
+    let write = async {
+        socket.feed(Message::Binary(first.into())).await?;
+        for _ in 1..count {
+            let Ok(packet) = pending.try_recv() else { break };
+            socket.feed(Message::Binary(packet.into())).await?;
+        }
+        socket.flush().await
+    };
+    tokio::pin!(write);
+    let limit = Instant::now() + WRITE_TIMEOUT * count as u32;
+    if let Some(result) = write.as_mut().now_or_never() {
+        return result.map_err(anyhow::Error::new);
+    }
+    // A socket can wake its writer when inbound data arrives. Only bytes
+    // accepted by the underlying write side can renew the idle deadline.
+    let observed = progress.observe();
+    let started = Instant::now();
+    let mut deadline = (started + WRITE_TIMEOUT).min(limit);
+    loop {
+        tokio::select! {
+            result = &mut write => return result.map_err(anyhow::Error::new),
+            _ = tokio::time::sleep_until(deadline) => {
+                deadline = (started.max(*observed.borrow()) + WRITE_TIMEOUT).min(limit);
+                ensure!(Instant::now() < deadline, "TURN WebSocket write timed out");
+            }
+        }
+    }
+}
+
+pub async fn serve(app: Arc<App>, socket: WebSocket) {
+    serve_with_progress(app, socket, None).await;
+}
+
+pub(crate) async fn serve_with_progress(app: Arc<App>, socket: WebSocket, progress: Option<WriteProgress>) {
     let Ok(_permit) = app.legacy_turn.connections.clone().try_acquire_owned() else {
         return;
     };
@@ -378,19 +429,46 @@ pub async fn serve(app: Arc<App>, mut socket: WebSocket) {
     let started = std::time::Instant::now();
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut framing = Framing::default();
-    let outcome:Result<()>=async {loop {tokio::select! {
-        _=interval.tick()=>{
-            let peer=authentication.peer.lock().unwrap_or_else(|p|p.into_inner()).clone();
-            if authentication.proved.load(Ordering::Acquire) {if !peer.is_some_and(|peer|app.private_relay.peer_alive(&peer)){break;}}
-            else if started.elapsed()>Duration::from_secs(10){break;}
-        },
-        packet=output_rx.recv()=>{let Some(packet)=packet else{break;};tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Binary(packet.into()))).await??;},
-        frame=socket.recv()=>match frame {
-            Some(Ok(Message::Binary(bytes)))=>{framing.push(&bytes)?;while let Some(packet)=framing.packet()? {tokio::time::timeout(Duration::from_secs(5),input.send(packet)).await??;}},
-            Some(Ok(Message::Ping(bytes)))=>{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Pong(bytes))).await??;},
-            Some(Ok(Message::Pong(_)))=>{},_=>break,
+    let outcome: Result<()> = async {
+        let (mut sink, mut incoming) = socket.split();
+        let writer = async {
+            while let Some(first) = output_rx.recv().await {
+                if let Some(progress) = &progress {
+                    write_ready_packets(&mut sink, first, &mut output_rx, progress).await?;
+                } else {
+                    tokio::time::timeout(WRITE_TIMEOUT, sink.send(Message::Binary(first.into()))).await??;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::pin!(writer);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let peer = authentication.peer.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    if authentication.proved.load(Ordering::Acquire) {
+                        if !peer.is_some_and(|peer| app.private_relay.peer_alive(&peer)) { break; }
+                    } else if started.elapsed() > Duration::from_secs(10) {
+                        break;
+                    }
+                }
+                result = &mut writer => return result,
+                frame = incoming.next() => match frame {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        framing.push(&bytes)?;
+                        while let Some(packet) = framing.packet()? {
+                            tokio::time::timeout(WRITE_TIMEOUT, input.send(packet)).await??;
+                        }
+                    }
+                    // Tungstenite queues the matching Pong on read and flushes
+                    // it on the next read or write, even under backpressure.
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    _ => break,
+                }
+            }
         }
-    }}Ok(())}.await;
+        Ok(())
+    }.await;
     let _ = outcome;
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(3), server.close()).await;
@@ -504,4 +582,115 @@ pub async fn speedtest(
         StatusCode::METHOD_NOT_ALLOWED,
         "Method not allowed",
     ))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn ready_writes_flush_single_packets_and_preserve_order_across_bursts() {
+    for count in [1, MAX_READY_WRITES + 3] {
+        let (tx, mut pending) = mpsc::channel(count);
+        for index in 0..count {
+            tx.try_send(vec![index as u8]).unwrap();
+        }
+        // Keep tx alive: an idle open connection must flush without waiting
+        // for another input. The unfold sink delivers its final item on flush.
+        let (observed, mut rx) = mpsc::unbounded_channel();
+        let mut socket = Box::pin(futures_util::sink::unfold(observed, |tx, frame| async move {
+            tx.send(frame).unwrap();
+            Ok::<_, std::convert::Infallible>(tx)
+        }));
+        let mut sent = 0;
+        while let Ok(first) = pending.try_recv() {
+            tokio::time::timeout(Duration::from_secs(1), write_ready_packets(&mut socket, first, &mut pending, &WriteProgress::default()))
+                .await.unwrap().unwrap();
+            let end = (sent + MAX_READY_WRITES).min(count);
+            for index in sent..end {
+                let Message::Binary(frame) = rx.try_recv().unwrap() else { panic!("expected TURN binary frame") };
+                assert_eq!(frame.as_ref(), &[index as u8]);
+            }
+            assert!(rx.try_recv().is_err());
+            sent = end;
+        }
+        assert_eq!(sent, count);
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn slow_turn_reader_finishes_a_burst_and_stalled_reader_times_out() {
+    use tokio::{io::AsyncReadExt, time::Instant};
+    use tokio_tungstenite::{
+        tungstenite::{protocol::{Role, WebSocketConfig}, Message as WireMessage},
+        WebSocketStream,
+    };
+    for stalled in [false, true] {
+        let (carrier, peer) = tokio::io::duplex(1024);
+        let (mut reader, peer_tx) = tokio::io::split(peer);
+        let config = WebSocketConfig::default().write_buffer_size(8192).max_write_buffer_size(131072);
+        let progress = WriteProgress::default();
+        let carrier = crate::relay_write_progress::MeasuredIo::new(carrier, progress.clone());
+        let ws = WebSocketStream::from_raw_socket(carrier, Role::Server, Some(config)).await;
+        let (sink, mut incoming) = ws.split();
+        let mut writer = Box::pin(sink.with(|message| async {
+            let Message::Binary(data) = message else { panic!("expected a binary TURN frame") };
+            Ok::<_, tokio_tungstenite::tungstenite::Error>(WireMessage::Binary(data))
+        }));
+        let drain = tokio::spawn(async move {
+            if stalled { tokio::time::sleep(WRITE_TIMEOUT * 2).await; }
+            let mut received = Vec::new();
+            let mut buf = [0; 200];
+            loop {
+                let n = reader.read(&mut buf).await.unwrap();
+                if n == 0 { return received; }
+                received.extend_from_slice(&buf[..n]);
+                tokio::time::sleep(Duration::from_millis(145)).await;
+            }
+        });
+        let sender = tokio::spawn(async move {
+            let carrier = tokio::io::join(tokio::io::empty(), peer_tx);
+            let mut client = WebSocketStream::from_raw_socket(carrier, Role::Client, None).await;
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if client.send(WireMessage::Binary(vec![1].into())).await.is_err() { break; }
+            }
+        });
+        let (tx, mut pending) = mpsc::channel(MAX_READY_WRITES);
+        for index in 0..MAX_READY_WRITES { tx.try_send(vec![index as u8; 1280]).unwrap(); }
+        let first = pending.recv().await.unwrap();
+        let started = Instant::now();
+        let mut reads = 0;
+        let result = {
+            let write = write_ready_packets(&mut writer, first, &mut pending, &progress);
+            tokio::pin!(write);
+            // Continued incoming traffic can wake the enclosing select loop.
+            // Only sink readiness should buy the blocked writer more time.
+            loop {
+                tokio::select! {
+                    result = &mut write => break result,
+                    message = incoming.next() => {
+                        assert!(matches!(message, Some(Ok(WireMessage::Binary(_)))));
+                        reads += 1;
+                    }
+                }
+            }
+        };
+        let elapsed = started.elapsed();
+        assert!(reads >= 49, "inbound frames must remain readable during backpressure");
+        sender.abort();
+        drop(incoming);
+        drop(writer);
+        let received = drain.await.unwrap();
+        if stalled {
+            assert!(result.is_err());
+            assert!(elapsed >= WRITE_TIMEOUT && elapsed < WRITE_TIMEOUT + Duration::from_millis(10));
+        } else {
+            result.unwrap();
+            assert!(elapsed > WRITE_TIMEOUT);
+            assert_eq!(received.len(), MAX_READY_WRITES * 1284);
+            for (index, frame) in received.chunks_exact(1284).enumerate() {
+                assert_eq!(&frame[..4], &[0x82, 126, 5, 0]);
+                assert!(frame[4..].iter().all(|b| *b == index as u8));
+            }
+        }
+    }
 }

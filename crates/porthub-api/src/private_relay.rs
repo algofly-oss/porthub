@@ -760,6 +760,8 @@ fn relay_lane_header(headers: &HeaderMap, key: &str, default: u8) -> ApiResult<u
 async fn upgrade(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
+    version: axum::http::Version,
+    transport: Option<axum::Extension<axum::extract::ConnectInfo<crate::relay_write_progress::WriteProgress>>>,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     if !headers.contains_key("x-porthub-peer") {
@@ -769,13 +771,17 @@ async fn upgrade(
                 "Private relay unavailable",
             ));
         }
+        // HTTP/1 upgrades own the whole transport. A multiplexed connection's
+        // other streams cannot establish progress for this WebSocket.
+        let progress = transport.filter(|_| version == axum::http::Version::HTTP_11)
+            .map(|axum::Extension(axum::extract::ConnectInfo(progress))| progress);
         return Ok(ws
             .read_buffer_size(8192)
             .write_buffer_size(8192)
             .max_write_buffer_size(131072)
             .max_message_size(65536)
             .max_frame_size(65536)
-            .on_upgrade(move |socket| crate::legacy_turn::serve(app, socket)));
+            .on_upgrade(move |socket| crate::legacy_turn::serve_with_progress(app, socket, progress)));
     }
     let id = header(&headers, "x-porthub-peer")?;
     let instance = header(&headers, "x-porthub-instance")?;
