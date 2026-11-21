@@ -86,22 +86,44 @@ def immutable_digest(relative):
     return match.group(1) if match else None
 
 
+_MIN_MUTABLE_STAGE = 16 * 1024 * 1024
+
+
+def hash_stopped_source(path, expected):
+    digest = hashlib.sha256()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as file:
+        if identity(os.fstat(file.fileno())) != expected:
+            raise ChangedSource('PortHub backup source changed during open')
+        for chunk in iter(lambda: file.read(1024 * 1024), b''):
+            digest.update(chunk)
+        if identity(os.fstat(file.fileno())) != expected or identity(path.lstat()) != expected:
+            raise ChangedSource('PortHub backup source changed during verification')
+    return digest.hexdigest()
+
+
 def prepare_snapshot(source, destination):
-    """Prepare independently copied immutable objects while the core is online."""
+    """Stage immutable objects and large files eligible for cold revalidation."""
     paths = tree(source)  # Reject unsafe entries before any service is stopped.
     destination.mkdir(mode=0o700)
     staged = {}
     for path in paths:
         relative = path.relative_to(source)
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
         expected = immutable_digest(relative)
-        if expected is None or not path.is_file():
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if expected is None and metadata.st_size < _MIN_MUTABLE_STAGE:
             continue
         copied = destination / relative
         copied.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             receipt = copy_verified(path, copied)
-            if receipt['sha256'] == expected:
-                staged[str(relative)] = receipt
+            if expected is None or receipt['sha256'] == expected:
+                staged[str(relative)] = {**receipt, 'cold_revalidate': expected is None}
             else:
                 # An unverified cache object is backed up as ordinary cold data.
                 copied.unlink()
@@ -112,7 +134,7 @@ def prepare_snapshot(source, destination):
 
 
 def finish_snapshot(prepared):
-    """Capture one exact stopped-core tree, reusing only unchanged staged blobs."""
+    """Capture the stopped-core tree and verify staged mutable bytes against it."""
     source, destination, staged = (prepared[key] for key in ('source', 'destination', 'staged'))
     paths = tree(source)
     relative_paths = {str(path.relative_to(source)) for path in paths}
@@ -145,6 +167,9 @@ def finish_snapshot(prepared):
                 reusable = identity(copied.lstat()) == receipt['copy']
             except FileNotFoundError:
                 reusable = False
+        if reusable and receipt.get('cold_revalidate', False):
+            # The hot copy is an I/O optimization, never the consistency boundary.
+            reusable = hash_stopped_source(path, receipt['source']) == receipt['sha256']
         if reusable:
             checksums[str(relative)] = receipt['sha256']
             staged_bytes += metadata.st_size
