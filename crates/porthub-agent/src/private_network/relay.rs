@@ -47,6 +47,7 @@ impl Queued {
 #[derive(Clone)]
 pub struct Sender {
     output: Arc<[mpsc::Sender<Queued>; RELAY_LANES]>,
+    recovery_until: Option<Instant>,
     authority:Arc<std::sync::Mutex<Option<(super::authority_event::Authority<()>,super::sparse::Handle)>>>,
     ready: Arc<[AtomicBool; RELAY_LANES]>,
     dropped_packets: Arc<AtomicU64>,
@@ -200,6 +201,13 @@ impl Sender {
     }
 }
 pub fn channel() -> (Sender, [mpsc::Receiver<Queued>; RELAY_LANES]) {
+    channel_after_tcp_recovery(None)
+}
+
+pub(super) fn channel_after_tcp_recovery(
+    last_witnessed_retry: Option<Instant>,
+) -> (Sender, [mpsc::Receiver<Queued>; RELAY_LANES]) {
+    let recovery_until = last_witnessed_retry.map(|at| at + Duration::from_secs(35));
     // Keep the combined relay queue budget unchanged while spreading traffic
     // over independent TCP congestion windows.
     let mut outputs = Vec::with_capacity(RELAY_LANES);
@@ -218,6 +226,7 @@ pub fn channel() -> (Sender, [mpsc::Receiver<Queued>; RELAY_LANES]) {
     (
         Sender {
             output: Arc::new(output),
+            recovery_until,
             authority:Default::default(),
             ready: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
             dropped_packets: Default::default(),
@@ -448,7 +457,10 @@ pub async fn run_bound(
                 return Ok(());
             }
         }
-        tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep(retry)=>{}}
+        let delay = if sender.recovery_until.is_some_and(|end| end > Instant::now()) {
+            retry.min(Duration::from_secs(2))
+        } else { retry };
+        tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep(delay)=>{}}
         retry = (retry * 2).min(Duration::from_secs(15));
     }
 }
@@ -612,13 +624,23 @@ struct LaneProbe {
     nonce: [u8; 16],
     sequence: u64,
     pending: Option<Bytes>,
+    recovery_until: Option<Instant>,
 }
 
 impl LaneProbe {
     fn new() -> Result<Self> {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("relay heartbeat nonce unavailable"))?;
-        Ok(Self { nonce, sequence: 0, pending: None })
+        Ok(Self { nonce, sequence: 0, pending: None, recovery_until: None })
+    }
+
+    // A second link failure soon after a witnessed TCP recovery can outlast the
+    // local kernel's retransmission budget before the ordinary heartbeat fires.
+    // Probe only the first lane. Any failed lane reopens the whole carrier.
+    fn delay(&self, normal: Duration, now: Instant) -> Duration {
+        if self.recovery_until.is_some_and(|end| end > now) {
+            normal.min(Duration::from_secs(3))
+        } else { normal }
     }
 
     fn challenge(&mut self) -> Result<Bytes> {
@@ -660,8 +682,9 @@ async fn serve_lanes_with_heartbeat<F, Fut>(
     let mut writers = futures_util::stream::FuturesUnordered::new();
     let lane_count = connections.len();
     let probes=connections.iter().map(|_|LaneProbe::new()).collect::<Result<Vec<_>>>()?;
-    for ((connection, input),probe) in connections.into_iter().zip(packets.iter_mut()).zip(probes) {
+    for ((connection, input),mut probe) in connections.into_iter().zip(packets.iter_mut()).zip(probes) {
         let lane = connection.lane;
+        if lane == 0 { probe.recovery_until = sender.recovery_until; }
         let (writer, mut incoming) = connection.socket.split();
         let (control, control_rx) = mpsc::channel::<Message>(4);
         sender.set_ready(lane, true);
@@ -748,7 +771,7 @@ where
     F: Fn(Duration) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let mut timer = Box::pin(wait(first_ping));
+    let mut timer = Box::pin(wait(probe.delay(first_ping, Instant::now())));
     loop {
         // A Pong queued before resume cannot renew an already expired challenge.
         // The inner select gives ordinary traffic and peer control frames a fair turn.
@@ -765,13 +788,13 @@ where
         let (message, authority) = match input {
             Some(LaneInput::Heartbeat) => {
                 let bytes = probe.challenge()?;
-                timer.set(wait(timing.response));
+                timer.set(wait(probe.delay(timing.response, Instant::now())));
                 (Message::Ping(bytes), Bytes::new().into())
             }
             Some(LaneInput::Control(Message::Ping(bytes))) => (Message::Pong(bytes), Bytes::new().into()),
             Some(LaneInput::Control(Message::Pong(bytes))) => {
                 if probe.acknowledge(&bytes) {
-                    timer.set(wait(timing.ping));
+                    timer.set(wait(probe.delay(timing.ping, Instant::now())));
                 }
                 continue;
             }
@@ -856,6 +879,20 @@ mod tests {
         assert!(connect_lane(&url, Some(&"00".repeat(32)), None, "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_none());
         assert!(connect_lane(&url, Some(&pin), None, "fixture", "peer", "instance", 0, 1, &[], &stop).await?.is_some());
         tokio::time::timeout(Duration::from_secs(4), server).await???;
+        Ok(())
+    }
+
+    #[test]
+    fn accelerated_relay_checks_expire_at_the_original_witnessed_deadline() -> Result<()> {
+        let seen = Instant::now();
+        let (recovering, _) = channel_after_tcp_recovery(Some(seen));
+        let (ordinary, _) = channel();
+        let mut probe = LaneProbe::new()?;
+        assert_eq!(ordinary.recovery_until, None);
+        assert_eq!(probe.delay(HEARTBEAT.ping, seen), HEARTBEAT.ping);
+        probe.recovery_until = recovering.recovery_until;
+        assert_eq!(probe.delay(HEARTBEAT.response, seen), Duration::from_secs(3));
+        assert_eq!(probe.delay(HEARTBEAT.ping, seen + Duration::from_secs(35)), HEARTBEAT.ping);
         Ok(())
     }
 

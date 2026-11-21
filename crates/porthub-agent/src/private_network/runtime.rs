@@ -526,7 +526,7 @@ async fn run_authorized_worker(
         tasks.spawn(super::virtual_hosts::manage(profile.clone(),interfaces.clone(),receive,work.clone()));
         send
     };
-    let (relay_sender, relay_input) = super::relay::channel();
+    let (relay_sender, relay_input) = super::relay::channel_after_tcp_recovery(continuity.last_fast_retry);
     #[cfg(feature = "private-stream")]
     let (stream_output, stream_input) = mpsc::channel(256);
     #[cfg(feature = "private-stream")]
