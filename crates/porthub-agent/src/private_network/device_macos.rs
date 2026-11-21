@@ -29,9 +29,9 @@ pub struct Tun {
 /// exposed during recovery, after the kernel proves all old datagrams are gone.
 pub(super) struct RetrySource(std::sync::Arc<Tun>);
 pub(super) struct RetryReader(std::sync::Arc<Tun>);
-fn drain_previous_datagrams(fd:std::os::fd::RawFd)->Result<()> {
+fn drain_previous_datagrams(fd:std::os::fd::RawFd,limit:usize)->Result<()> {
     let mut discarded=[0u8;porthub_mesh::MAX_PACKET+16];
-    for _ in 0..=64 {
+    for _ in 0..=limit {
         let n=unsafe{libc::recv(fd,discarded.as_mut_ptr().cast(),discarded.len(),libc::MSG_DONTWAIT)};
         if n>0 {continue;}
         if n<0 {
@@ -50,7 +50,7 @@ impl RetrySource {
         let name=CString::new(self.0.name.as_str())?;
         ensure!(unsafe{libc::if_nametoindex(name.as_ptr())}==self.0.index && self.0.has_source_lease()?,
             "retired utun source ownership changed");
-        drain_previous_datagrams(self.0.device.as_raw_fd())?;
+        drain_previous_datagrams(self.0.device.as_raw_fd(),64)?;
         Ok(RetryReader(self.0))
     }
 }
@@ -267,15 +267,12 @@ mod tests {
         use std::os::{fd::AsRawFd,unix::net::UnixDatagram};
         let (producer,consumer)=UnixDatagram::pair().unwrap();
         producer.send(b"previous-worker").unwrap();
-        super::drain_previous_datagrams(consumer.as_raw_fd()).unwrap();
+        super::drain_previous_datagrams(consumer.as_raw_fd(),1).unwrap();
         producer.send(b"current-worker").unwrap();
         let mut out=[0;32];
         let n=consumer.recv(&mut out).unwrap();assert_eq!(&out[..n],b"current-worker");
-        producer.set_nonblocking(true).unwrap();
-        let mut sent=0;
-        while sent<66 && producer.send(b"x").is_ok(){sent+=1;}
-        // macOS may impose a smaller datagram high-water mark.
-        if sent>=65 {assert!(super::drain_previous_datagrams(consumer.as_raw_fd()).is_err());}
+        producer.send(b"first").unwrap();producer.send(b"second").unwrap();
+        assert!(super::drain_previous_datagrams(consumer.as_raw_fd(),1).is_err());
     }
     #[test]
     fn route_preflight_detects_only_overlapping_ipv4_networks() {
