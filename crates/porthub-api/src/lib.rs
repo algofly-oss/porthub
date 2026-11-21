@@ -1,4 +1,7 @@
 pub mod private_changes;
+mod private_continuity;
+pub use private_continuity::fleet_command;
+mod private_continuity_recovery;
 pub mod private_migration_mode;
 pub mod private_retired_sources;
 #[cfg(feature = "private-sparse")]
@@ -71,6 +74,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    policy_writer:Option<private_continuity_recovery::Writer>,
+    policy_witness_cache:std::sync::Mutex<std::collections::HashMap<mongodb::bson::oid::ObjectId,(uuid::Uuid,std::time::Instant)>>,
     pub private_changes: private_changes::Changes,
     pub keyboard: keyboard::Hub,
     pub usb: usb::Hub,
@@ -119,6 +124,14 @@ pub struct App {
 }
 
 impl App {
+    pub async fn connect(config:Config)->anyhow::Result<Self>{
+        let db=bootstrap::database(&config).await?;
+        let mut app=Self::new(config,db);
+        if app.config.fences_private_writes() {
+            app.policy_writer=private_continuity_recovery::Writer::start(private_continuity_recovery::directory(),private_continuity::process());
+        }
+        Ok(app)
+    }
     pub fn new(config: Config, db: Database) -> Self {
         let native_build_depot=config.native_build_depot_root.as_ref().map(|root|Arc::new(native_build_depot::Depot::new(root,config.native_build_depot_owner_uid).expect("validated protected native build depot")));
         let ui = if config.ui_upstream.is_empty() {
@@ -139,6 +152,8 @@ impl App {
             )
         };
         Self {
+            policy_writer:None,
+            policy_witness_cache:Default::default(),
             private_changes: Default::default(),
             keyboard: Default::default(),
             usb: Default::default(),

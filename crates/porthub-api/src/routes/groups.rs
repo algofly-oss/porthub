@@ -62,22 +62,24 @@ async fn add(
 ) -> ApiResult<Json<Value>> {
     let values = fields(raw, &["name"])?;
     let user = auth::current_user(&app, &headers).await?;
-    let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    let name = values[0].trim();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("Group name is required"));
-    }
-    let count = app
-        .collection("machine_groups")
-        .count_documents(doc! {"user_id":owner})
-        .await?;
-    let now = DateTime::now();
-    let mut record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":name,"sort_order":count as i64,"created_at":now,"updated_at":now};
-    let inserted = app.collection("machine_groups").insert_one(&record).await?;
-    record.insert("_id", inserted.inserted_id);
-    Ok(Json(
-        json!({"msg":"Group created successfully","data":serialize(&record)}),
-    ))
+    crate::private_continuity::write(&app, None, async {
+        let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
+        let name = values[0].trim();
+        if name.is_empty() {
+            return Err(ApiError::bad_request("Group name is required"));
+        }
+        let count = app
+            .collection("machine_groups")
+            .count_documents(doc! {"user_id":owner})
+            .await?;
+        let now = DateTime::now();
+        let mut record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":name,"sort_order":count as i64,"created_at":now,"updated_at":now};
+        let inserted = app.collection("machine_groups").insert_one(&record).await?;
+        record.insert("_id", inserted.inserted_id);
+        Ok(Json(
+            json!({"msg":"Group created successfully","data":serialize(&record)}),
+        ))
+    }).await
 }
 
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
@@ -102,24 +104,26 @@ async fn update(
 ) -> ApiResult<Json<Value>> {
     let values = fields(raw, &["data_id", "name"])?;
     let user = auth::current_user(&app, &headers).await?;
-    let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    let name = values[1].trim();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("Group name is required"));
-    }
-    let (id, mut record) = owned_group(&app, owner, &values[0]).await?;
-    let now = DateTime::now();
-    app.collection("machine_groups")
-        .update_one(
-            doc! {"_id":id,"user_id":owner},
-            doc! {"$set":{"name":name,"updated_at":now}},
-        )
-        .await?;
-    record.insert("name", name);
-    record.insert("updated_at", now);
-    Ok(Json(
-        json!({"msg":"Group updated successfully","data":serialize(&record)}),
-    ))
+    crate::private_continuity::write(&app, None, async {
+        let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
+        let name = values[1].trim();
+        if name.is_empty() {
+            return Err(ApiError::bad_request("Group name is required"));
+        }
+        let (id, mut record) = owned_group(&app, owner, &values[0]).await?;
+        let now = DateTime::now();
+        app.collection("machine_groups")
+            .update_one(
+                doc! {"_id":id,"user_id":owner},
+                doc! {"$set":{"name":name,"updated_at":now}},
+            )
+            .await?;
+        record.insert("name", name);
+        record.insert("updated_at", now);
+        Ok(Json(
+            json!({"msg":"Group updated successfully","data":serialize(&record)}),
+        ))
+    }).await
 }
 
 async fn delete(
@@ -129,35 +133,37 @@ async fn delete(
 ) -> ApiResult<Json<Value>> {
     let values = fields(raw, &["data_id"])?;
     let user = auth::current_user(&app, &headers).await?;
-    let _guard = app.connection_lock.lock().await;
-    let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    let (id, group) = owned_group(&app, owner, &values[0]).await?;
-    let mut proposed: Vec<Document> = app.collection("machines").find(doc! {"user_id":owner}).projection(doc! {"group_id":1,"group_ids":1}).await?.try_collect().await?;
-    for machine in &mut proposed {
-        let mut groups = crate::domain::inventory::group_ids(machine);
-        groups.retain(|group| *group != id);
-        machine.insert("group_ids", groups);
-        machine.remove("group_id");
-    }
-    super::exit_nodes::validate_machine_changes(&app, owner, &proposed).await?;
-    let now = DateTime::now();
-    app.collection("machines")
-        .update_many(
-            doc! {"user_id":owner,"group_ids":id},
-            doc! {"$pull":{"group_ids":id},"$set":{"updated_at":now}},
-        )
-        .await?;
-    app.collection("machines")
-        .update_many(
-            doc! {"user_id":owner,"group_id":id},
-            doc! {"$unset":{"group_id":""},"$set":{"updated_at":now}},
-        )
-        .await?;
-    app.collection("machine_groups")
-        .delete_one(doc! {"_id":id,"user_id":owner})
-        .await?;
-    if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
-    Ok(Json(
-        json!({"msg":"Group deleted successfully","data":serialize(&group)}),
-    ))
+    crate::private_continuity::write(&app, None, async {
+        let _guard = app.connection_lock.lock().await;
+        let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
+        let (id, group) = owned_group(&app, owner, &values[0]).await?;
+        let mut proposed: Vec<Document> = app.collection("machines").find(doc! {"user_id":owner}).projection(doc! {"group_id":1,"group_ids":1}).await?.try_collect().await?;
+        for machine in &mut proposed {
+            let mut groups = crate::domain::inventory::group_ids(machine);
+            groups.retain(|group| *group != id);
+            machine.insert("group_ids", groups);
+            machine.remove("group_id");
+        }
+        super::exit_nodes::validate_machine_changes(&app, owner, &proposed).await?;
+        let now = DateTime::now();
+        app.collection("machines")
+            .update_many(
+                doc! {"user_id":owner,"group_ids":id},
+                doc! {"$pull":{"group_ids":id},"$set":{"updated_at":now}},
+            )
+            .await?;
+        app.collection("machines")
+            .update_many(
+                doc! {"user_id":owner,"group_id":id},
+                doc! {"$unset":{"group_id":""},"$set":{"updated_at":now}},
+            )
+            .await?;
+        app.collection("machine_groups")
+            .delete_one(doc! {"_id":id,"user_id":owner})
+            .await?;
+        if let Some(owner)=owner.as_object_id(){app.private_changes.changed(owner);}
+        Ok(Json(
+            json!({"msg":"Group deleted successfully","data":serialize(&group)}),
+        ))
+    }).await
 }

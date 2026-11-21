@@ -92,117 +92,119 @@ async fn create(
     ApiBody(body): ApiBody,
 ) -> ApiResult<Json<Value>> {
     let (_, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
-    let id = object_id(&parent, "Invalid provider")?;
-    let name = enrollment::parse_hostname(json!({"hostname":body["name"]}))?
-        .ok_or_else(|| ApiError::bad_request("Private hostname required"))?;
-    let target: Ipv4Addr = body["target_ip"]
-        .as_str()
-        .and_then(|v| v.parse().ok())
-        .filter(Ipv4Addr::is_private)
-        .ok_or_else(|| ApiError::bad_request("A private LAN IPv4 address is required"))?;
-    let _connection = app.connection_lock.lock().await;
-    let _allocation = app.private_network_lock.lock().await;
-    #[cfg(feature = "private-sparse")]
-    let _stable = crate::private_renumber::fence::stable_with_allocation(&app, owner).await?;
-    let parent = provider(&app, owner, id).await?;
-    let parent_peer=app.collection("private_peers").find_one(doc!{"_id":format!("{owner}:{id}"),"enabled":true,"credential_hash":{"$type":"string"}}).await?.ok_or_else(||conflict("Enroll the provider in private networking first"))?;
-    if parent.get_bool("enabled") == Ok(false)
-        || parent.get_bool("private_owner_revoked") == Ok(true)
-    {
-        return Err(conflict("The provider is disabled"));
-    }
-    let prefs = private_networks::ensure_locked(&app, &owner.to_hex()).await?;
-    if private_networks::pools(&prefs)?
-        .iter()
-        .any(|pool| pool.contains(target))
-    {
-        return Err(ApiError::bad_request(
-            "The target must be outside the PortHub address pools",
-        ));
-    }
-    let (_, suffix) = preferences(&prefs)?;
-    enrollment::initialize(&app).await?;
-    let machine = ObjectId::new();
-    let via = doc! {"id":id.to_hex(),"name":store::string(&parent,"name")};
-    let peers = app.collection("private_peers");
-    let existing = peers
-        .find_one(doc! {"workspace_id":owner,"virtual_parent":id,"hostname":&name})
-        .await?;
-    if let Some(ref p) = existing {
-        if p.get_bool("virtual_deleting") == Ok(true) {
+    crate::private_continuity::write(&app, Some(owner), async {
+        let id = object_id(&parent, "Invalid provider")?;
+        let name = enrollment::parse_hostname(json!({"hostname":body["name"]}))?
+            .ok_or_else(|| ApiError::bad_request("Private hostname required"))?;
+        let target: Ipv4Addr = body["target_ip"]
+            .as_str()
+            .and_then(|v| v.parse().ok())
+            .filter(Ipv4Addr::is_private)
+            .ok_or_else(|| ApiError::bad_request("A private LAN IPv4 address is required"))?;
+        let _connection = app.connection_lock.lock().await;
+        let _allocation = app.private_network_lock.lock().await;
+        #[cfg(feature = "private-sparse")]
+        let _stable = crate::private_renumber::fence::stable_with_allocation(&app, owner).await?;
+        let parent = provider(&app, owner, id).await?;
+        let parent_peer=app.collection("private_peers").find_one(doc!{"_id":format!("{owner}:{id}"),"enabled":true,"credential_hash":{"$type":"string"}}).await?.ok_or_else(||conflict("Enroll the provider in private networking first"))?;
+        if parent.get_bool("enabled") == Ok(false)
+            || parent.get_bool("private_owner_revoked") == Ok(true)
+        {
+            return Err(conflict("The provider is disabled"));
+        }
+        let prefs = private_networks::ensure_locked(&app, &owner.to_hex()).await?;
+        if private_networks::pools(&prefs)?
+            .iter()
+            .any(|pool| pool.contains(target))
+        {
+            return Err(ApiError::bad_request(
+                "The target must be outside the PortHub address pools",
+            ));
+        }
+        let (_, suffix) = preferences(&prefs)?;
+        enrollment::initialize(&app).await?;
+        let machine = ObjectId::new();
+        let via = doc! {"id":id.to_hex(),"name":store::string(&parent,"name")};
+        let peers = app.collection("private_peers");
+        let existing = peers
+            .find_one(doc! {"workspace_id":owner,"virtual_parent":id,"hostname":&name})
+            .await?;
+        if let Some(ref p) = existing {
+            if p.get_bool("virtual_deleting") == Ok(true) {
+                return Err(conflict("Virtual host removal is in progress"));
+            }
+            if store::string(p, "target_ip") != target.to_string() {
+                return Err(conflict("Name is already used for a different target"));
+            }
+            if p.get_bool("virtual_published") == Ok(true) {
+                return Ok(Json(json!({"virtual_host":view(p,&parent,&suffix)})));
+            }
+        }
+        let child = if let Some(peer) = existing {
+            peer
+        } else {
+            let rows: Vec<Document> = peers
+                .find(doc! {"workspace_id":owner,"virtual_parent":id})
+                .projection(doc! {"virtual_slot":1})
+                .limit(LIMIT)
+                .await?
+                .try_collect()
+                .await?;
+            let slot = (0..LIMIT)
+                .find(|slot| {
+                    rows.iter()
+                        .all(|row| row.get_i64("virtual_slot") != Ok(*slot))
+                })
+                .ok_or_else(|| conflict("Virtual host capacity reached"))?;
+            enrollment::check_name(&app, owner, &Bson::ObjectId(machine), &name).await?;
+            let (_, assigned) = enrollment::names(&app, owner).await?;
+            let ip = private_networks::allocate_locked(
+                &app,
+                &owner.to_hex(),
+                &machine.to_hex(),
+                &enrollment::occupied(&assigned),
+            )
+            .await?;
+            let mut peer = doc! {"_id":format!("{owner}:{machine}"),"workspace_id":owner,"owner_id":owner,"machine_id":machine,"hostname":&name,"ip":ip,"virtual_slot":slot,"via":&via,"kind":"virtual_host","enabled":true,"virtual_parent":id,"virtual_published":false,"target_ip":target.to_string(),"enrollment_generation":enrollment::token()?,"parent_generation":parent_peer.get("enrollment_generation"),"revision":0_i64,"created_at":DateTime::now()};
+            #[cfg(feature = "private-sparse")]
+            peer.insert(
+                "address_generation",
+                crate::private_renumber::native_repair::published_generation(&app, owner, &prefs)
+                    .await?,
+            );
+            peers.insert_one(&peer).await.map_err(|e| {
+                if store::duplicate(&e) {
+                    conflict("Concurrent private allocation; retry creation")
+                } else {
+                    e.into()
+                }
+            })?;
+            peer
+        };
+        let mid = child.get_object_id("machine_id").map_err(|_| missing())?;
+        let machine = doc! {"user_id":owner,"name":&name,"kind":"virtual_host","virtual_parent":id,"via":via,"target_ip":target.to_string(),"enabled":true,"created_at":DateTime::now()};
+        app.collection("machines")
+            .update_one(
+                doc! {"_id":mid,"kind":"virtual_host","virtual_parent":id},
+                doc! {"$setOnInsert":machine},
+            )
+            .upsert(true)
+            .await?;
+        let published = peers
+            .update_one(
+                doc! {"_id":child.get("_id"),"virtual_parent":id,"virtual_deleting":{"$ne":true},"enabled":true},
+                doc! {"$set":{"virtual_published":true}},
+            )
+            .await?;
+        if published.matched_count == 0 {
+            app.collection("machines")
+                .delete_one(doc! {"_id":mid,"kind":"virtual_host","virtual_parent":id,"user_id":owner})
+                .await?;
             return Err(conflict("Virtual host removal is in progress"));
         }
-        if store::string(p, "target_ip") != target.to_string() {
-            return Err(conflict("Name is already used for a different target"));
-        }
-        if p.get_bool("virtual_published") == Ok(true) {
-            return Ok(Json(json!({"virtual_host":view(p,&parent,&suffix)})));
-        }
-    }
-    let child = if let Some(peer) = existing {
-        peer
-    } else {
-        let rows: Vec<Document> = peers
-            .find(doc! {"workspace_id":owner,"virtual_parent":id})
-            .projection(doc! {"virtual_slot":1})
-            .limit(LIMIT)
-            .await?
-            .try_collect()
-            .await?;
-        let slot = (0..LIMIT)
-            .find(|slot| {
-                rows.iter()
-                    .all(|row| row.get_i64("virtual_slot") != Ok(*slot))
-            })
-            .ok_or_else(|| conflict("Virtual host capacity reached"))?;
-        enrollment::check_name(&app, owner, &Bson::ObjectId(machine), &name).await?;
-        let (_, assigned) = enrollment::names(&app, owner).await?;
-        let ip = private_networks::allocate_locked(
-            &app,
-            &owner.to_hex(),
-            &machine.to_hex(),
-            &enrollment::occupied(&assigned),
-        )
-        .await?;
-        let mut peer = doc! {"_id":format!("{owner}:{machine}"),"workspace_id":owner,"owner_id":owner,"machine_id":machine,"hostname":&name,"ip":ip,"virtual_slot":slot,"via":&via,"kind":"virtual_host","enabled":true,"virtual_parent":id,"virtual_published":false,"target_ip":target.to_string(),"enrollment_generation":enrollment::token()?,"parent_generation":parent_peer.get("enrollment_generation"),"revision":0_i64,"created_at":DateTime::now()};
-        #[cfg(feature = "private-sparse")]
-        peer.insert(
-            "address_generation",
-            crate::private_renumber::native_repair::published_generation(&app, owner, &prefs)
-                .await?,
-        );
-        peers.insert_one(&peer).await.map_err(|e| {
-            if store::duplicate(&e) {
-                conflict("Concurrent private allocation; retry creation")
-            } else {
-                e.into()
-            }
-        })?;
-        peer
-    };
-    let mid = child.get_object_id("machine_id").map_err(|_| missing())?;
-    let machine = doc! {"user_id":owner,"name":&name,"kind":"virtual_host","virtual_parent":id,"via":via,"target_ip":target.to_string(),"enabled":true,"created_at":DateTime::now()};
-    app.collection("machines")
-        .update_one(
-            doc! {"_id":mid,"kind":"virtual_host","virtual_parent":id},
-            doc! {"$setOnInsert":machine},
-        )
-        .upsert(true)
-        .await?;
-    let published = peers
-        .update_one(
-            doc! {"_id":child.get("_id"),"virtual_parent":id,"virtual_deleting":{"$ne":true},"enabled":true},
-            doc! {"$set":{"virtual_published":true}},
-        )
-        .await?;
-    if published.matched_count == 0 {
-        app.collection("machines")
-            .delete_one(doc! {"_id":mid,"kind":"virtual_host","virtual_parent":id,"user_id":owner})
-            .await?;
-        return Err(conflict("Virtual host removal is in progress"));
-    }
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"virtual_host":view(&child,&parent,&suffix)})))
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"virtual_host":view(&child,&parent,&suffix)})))
+    }).await
 }
 async fn remove(
     State(app): State<Arc<App>>,
@@ -211,15 +213,17 @@ async fn remove(
     Path((parent, child)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let (_, owner, _) = browser(&app, &headers, &Method::DELETE, &query.workspace, true).await?;
-    let parent = object_id(&parent, "Invalid provider")?;
-    let child = object_id(&child, "Invalid virtual host")?;
-    let _connection = app.connection_lock.lock().await;
-    let _allocation = app.private_network_lock.lock().await;
-    #[cfg(feature = "private-sparse")]
-    let _stable = crate::private_renumber::fence::revocation(&app, owner).await?;
-    delete_child(&app, owner, parent, child).await?;
-    app.private_changes.changed(owner);
-    Ok(Json(json!({"removed":true})))
+    crate::private_continuity::write(&app, Some(owner), async {
+        let parent = object_id(&parent, "Invalid provider")?;
+        let child = object_id(&child, "Invalid virtual host")?;
+        let _connection = app.connection_lock.lock().await;
+        let _allocation = app.private_network_lock.lock().await;
+        #[cfg(feature = "private-sparse")]
+        let _stable = crate::private_renumber::fence::revocation(&app, owner).await?;
+        delete_child(&app, owner, parent, child).await?;
+        app.private_changes.changed(owner);
+        Ok(Json(json!({"removed":true})))
+    }).await
 }
 
 async fn delete_child(
@@ -358,7 +362,7 @@ pub(crate) async fn assignments(
             "parent_generation":child.get("parent_generation")};
             let binding = doc! {"credential_hash":hash,"parent_hash":parent.get("credential_hash"),
             "parent_generation":parent.get("enrollment_generation")};
-            let updated = peers.update_one(previous, doc! {"$set":binding}).await?;
+            let updated = crate::private_continuity::write(app, Some(owner), async {Ok(peers.update_one(previous, doc! {"$set":binding}).await?)}).await?;
             if updated.matched_count != 1 {
                 continue;
             }

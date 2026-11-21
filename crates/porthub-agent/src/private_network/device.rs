@@ -134,6 +134,21 @@ impl Drop for Tun {
     }
 }
 
+/// Only a detached native link reference crosses the worker boundary. Its TUN
+/// queue cannot contain traffic. Each recovering worker obtains a new queue
+/// which this wrapper exposes exclusively for local packet reads.
+pub(super) struct RetrySource { anchor:File, name:String, index:u32 }
+pub(super) struct RetryReader(AsyncFd<File>);
+impl RetrySource {
+    pub(super) fn open(self)->Result<RetryReader>{
+        Ok(RetryReader(AsyncFd::new(queue::resume(&self.anchor,&self.name,self.index)?)?))
+    }
+}
+impl RetryReader {
+    pub(super) async fn read(&self,buffer:&mut [u8])->Result<usize>{
+        loop{let mut ready=self.0.readable().await?;match ready.try_io(|fd|fd.get_ref().read(buffer)){Ok(result)=>return Ok(result?),Err(_)=>continue}}
+    }
+}
 impl RetainedLink {
     pub(super) fn matches(&self, binding: &str, pin: Option<&super::native_owner::source::Pin>, own: Ipv4Addr) -> bool {
         self.state.binding == binding && self.state.own == own
@@ -157,6 +172,9 @@ impl RetainedLink {
 }
 
 impl Tun {
+    pub(super) fn retry_source(&self)->Option<RetrySource>{
+        Some(RetrySource{anchor:self.anchor.as_ref()?.try_clone().ok()?,name:self.name.clone(),index:self.index})
+    }
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
     pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
     pub(super) fn has_source_lease(&self)->Result<bool>{self._source_lease.held()}

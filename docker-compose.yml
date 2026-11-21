@@ -51,6 +51,7 @@ services:
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_DB_INITIALIZE: "true"
+      PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS: ${PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS:-off}
       MONGO_DATABASE_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@127.0.0.1:47017/${MONGO_DATABASE_NAME}?authSource=admin
       FIREWALL_SOCKET: /run/porthub-firewall/api.sock
       PORTHUB_GATEWAY_CONFIG_PATH: /run/porthub-config/gateway.toml

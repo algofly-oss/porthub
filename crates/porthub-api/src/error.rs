@@ -6,6 +6,7 @@ use axum::{
 use serde_json::{json, Value};
 
 pub struct ApiError {
+    pub(crate) storage_uncertain: bool,
     pub status: StatusCode,
     pub detail: Value,
     pub headers: Option<Box<axum::http::HeaderMap>>,
@@ -18,6 +19,7 @@ impl ApiError {
 
     pub fn validation(items: Vec<Value>) -> Self {
         Self {
+            storage_uncertain: false,
             headers: None,
             status: StatusCode::UNPROCESSABLE_ENTITY,
             detail: Value::Array(items),
@@ -25,6 +27,7 @@ impl ApiError {
     }
     pub fn new(status: StatusCode, detail: &str) -> Self {
         Self {
+            storage_uncertain: false,
             headers: None,
             status,
             detail: json!(detail),
@@ -54,7 +57,7 @@ impl IntoResponse for ApiError {
 impl From<mongodb::error::Error> for ApiError {
     fn from(error: mongodb::error::Error) -> Self {
         tracing::error!(%error, "database operation failed");
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+        {let mut result=Self::new(StatusCode::INTERNAL_SERVER_ERROR,"Internal Server Error");result.storage_uncertain=true;result}
     }
 }
 

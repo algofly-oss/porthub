@@ -72,49 +72,51 @@ async fn rows(app: &App, collection: &str, filter: Document) -> ApiResult<Vec<Do
 /// revoked before publishing the closed ingress snapshot. No rollback can
 /// accidentally restore an account after its clients received revocation.
 pub async fn delete_locked(app: &App, id: ObjectId) -> ApiResult<()> {
-    let mut user = app
-        .collection("users")
-        .find_one(doc! {"_id":id})
-        .await?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Account not found"))?;
-    if !user.contains_key("account_deletion") {
-        if store::string(&user, "role") == "admin"
-            && app
-                .collection("users")
-                .count_documents(doc! {"role":"admin","account_deletion":{"$exists":false}})
-                .await?
-                <= 1
-        {
+    crate::private_continuity::write(&app, None, async {
+        let mut user = app
+            .collection("users")
+            .find_one(doc! {"_id":id})
+            .await?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Account not found"))?;
+        if !user.contains_key("account_deletion") {
+            if store::string(&user, "role") == "admin"
+                && app
+                    .collection("users")
+                    .count_documents(doc! {"role":"admin","account_deletion":{"$exists":false}})
+                    .await?
+                    <= 1
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "The last administrator account cannot be deleted",
+                ));
+            }
+            let owners = values(id);
+            let machines = rows(app, "machines", doc! {"user_id":{"$in":&owners}}).await?;
+            let mids = expanded(&machines);
+            let peers=rows(app,"private_peers",doc!{"$or":[{"owner_id":{"$in":&owners}},{"workspace_id":{"$in":&owners}},{"machine_id":{"$in":&mids}}]}).await?;
+            let groups = rows(app, "machine_groups", doc! {"user_id":{"$in":&owners}}).await?;
+            let routes = rows(app, "traffic_routes", doc! {"user_id":{"$in":&owners}}).await?;
+            let job = doc! {"requested_at":DateTime::now(),"next_attempt_at":DateTime::now(),
+            "machine_ids":mids,"peer_ids":expanded(&peers),"group_ids":expanded(&groups),"route_ids":expanded(&routes)};
+            app.collection("users")
+                .update_one(doc! {"_id":id}, doc! {"$set":{"account_deletion":&job}})
+                .await?;
+            user.insert("account_deletion", job);
+        }
+        app.deletion_changes.notify_one();
+        if let Err(error) = resume(app, &user).await {
+            app.collection("users").update_one(doc!{"_id":id,"account_deletion":{"$exists":true}},
+                doc!{"$set":{"account_deletion.next_attempt_at":DateTime::from_millis(DateTime::now().timestamp_millis()+5000)}}).await?;
+            app.deletion_changes.notify_one();
+            tracing::warn!(detail=%error.detail,"account access revoked; cleanup will retry");
             return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "The last administrator account cannot be deleted",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Account access is revoked. Cleanup is pending and will retry automatically.",
             ));
         }
-        let owners = values(id);
-        let machines = rows(app, "machines", doc! {"user_id":{"$in":&owners}}).await?;
-        let mids = expanded(&machines);
-        let peers=rows(app,"private_peers",doc!{"$or":[{"owner_id":{"$in":&owners}},{"workspace_id":{"$in":&owners}},{"machine_id":{"$in":&mids}}]}).await?;
-        let groups = rows(app, "machine_groups", doc! {"user_id":{"$in":&owners}}).await?;
-        let routes = rows(app, "traffic_routes", doc! {"user_id":{"$in":&owners}}).await?;
-        let job = doc! {"requested_at":DateTime::now(),"next_attempt_at":DateTime::now(),
-        "machine_ids":mids,"peer_ids":expanded(&peers),"group_ids":expanded(&groups),"route_ids":expanded(&routes)};
-        app.collection("users")
-            .update_one(doc! {"_id":id}, doc! {"$set":{"account_deletion":&job}})
-            .await?;
-        user.insert("account_deletion", job);
-    }
-    app.deletion_changes.notify_one();
-    if let Err(error) = resume(app, &user).await {
-        app.collection("users").update_one(doc!{"_id":id,"account_deletion":{"$exists":true}},
-            doc!{"$set":{"account_deletion.next_attempt_at":DateTime::from_millis(DateTime::now().timestamp_millis()+5000)}}).await?;
-        app.deletion_changes.notify_one();
-        tracing::warn!(detail=%error.detail,"account access revoked; cleanup will retry");
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Account access is revoked. Cleanup is pending and will retry automatically.",
-        ));
-    }
-    Ok(())
+        Ok(())
+    }).await
 }
 
 async fn resume(app: &App, user: &Document) -> ApiResult<()> {
