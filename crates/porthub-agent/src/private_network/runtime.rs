@@ -801,7 +801,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let next=Some(crate::private_dns_setup::LookupTarget {
                             hostname: own.hostname.clone(),
                             address: own.ip,
-                            link: (!isolated).then(||crate::private_dns_setup::LinkDns { index:tun.index,port,suffixes:suffixes.clone() }),
+                            link: (!isolated).then(||crate::private_dns_setup::LinkDns { interface:tun.name.clone(),index:tun.index,port,suffixes:suffixes.clone() }),
                         });
                         if *previous==next {false} else {*previous=next;true}
                     });}

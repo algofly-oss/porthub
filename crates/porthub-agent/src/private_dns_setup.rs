@@ -279,7 +279,12 @@ mod tests {
     #[test]
     fn peer_rename_wakes_the_probe_without_changing_its_resolver_link() {
         let address = std::net::Ipv4Addr::new(10, 203, 11, 3);
-        let link = LinkDns { index: 3, port: 5353, suffixes: vec!["phub".into()] };
+        let link = LinkDns {
+            interface: "phtest0".into(),
+            index: 3,
+            port: 5353,
+            suffixes: vec!["phub".into()],
+        };
         let (target, mut updates) = tokio::sync::watch::channel(Some(LookupTarget {
             hostname: "old.phub".into(),
             address,
@@ -299,6 +304,44 @@ mod tests {
         }
         update_probe_hostname(&target, "new.phub");
         assert!(!updates.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable network namespace with a private systemd-resolved and vpn-test-other"]
+    async fn skips_repair_on_a_reused_interface_index() -> Result<()> {
+        anyhow::ensure!(
+            std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
+                && Path::new("/.dockerenv").is_file(),
+            "owned namespace required"
+        );
+        let index = std::fs::read_to_string("/sys/class/net/vpn-test-other/ifindex")?
+            .trim()
+            .parse()?;
+        let foreign = LinkDns {
+            interface: "vpn-test-other".into(),
+            index,
+            port: 53,
+            suffixes: vec!["other-vpn.invalid".into()],
+        };
+        let dns_server = "192.0.2.9".parse()?;
+        assert!(foreign.matches(dns_server).await?);
+        let lock = tokio::sync::Mutex::new(());
+        for (interface, address) in [("phtest0", "192.0.2.7"), ("vpn-test-other", "10.219.94.2")] {
+            let stale = LookupTarget {
+                hostname: "fixture.phub".into(),
+                address: address.parse()?,
+                link: Some(LinkDns {
+                    interface: interface.into(),
+                    index,
+                    port: 5353,
+                    suffixes: vec!["phub".into()],
+                }),
+            };
+            let (_sender, target) = tokio::sync::watch::channel(Some(stale.clone()));
+            assert!(!stale.repair_if_stale(&target, &lock).await?);
+            assert!(foreign.matches(dns_server).await?);
+        }
+        Ok(())
     }
 
     #[test]
@@ -393,6 +436,7 @@ pub(crate) struct LookupTarget {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct LinkDns {
+    pub interface: String,
     pub index: u32,
     pub port: u16,
     pub suffixes: Vec<String>,
@@ -457,12 +501,22 @@ impl LookupTarget {
         let Some(link) = &self.link else {
             return Ok(false);
         };
-        // A failed lookup may originate in NSS or on another VPN link.
+        // Read the owned link before changing anything. NSS can resolve the
+        // agent hostname even when a different private suffix has disappeared.
         if link.matches(self.address).await? {
             return Ok(false);
         }
         let _guard = registration.lock().await;
         if target.has_changed()? {
+            return Ok(false);
+        }
+        // A retired device's numeric index can be reused by another VPN.
+        let owns_address = getifaddrs::getifaddrs()?.any(|interface| {
+            interface.index == Some(link.index)
+                && interface.name == link.interface
+                && interface.address.ip_addr() == Some(std::net::IpAddr::V4(self.address))
+        });
+        if !owns_address {
             return Ok(false);
         }
         crate::private_network::dns::configure_linux_link(
@@ -477,52 +531,152 @@ impl LookupTarget {
     }
 }
 
-/// Verify the same libc lookup used by SSH, outside packet forwarding. A
-/// resolver registration alone must not make an installation appear DNS-ready.
+/// resolved atomically updates or removes its per-link state file. Directory
+/// notifications are wakeups only. D-Bus remains the source of truth.
+fn watch_resolved_link(
+    index: u32,
+    changed: tokio::sync::mpsc::Sender<()>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    let directory = Path::new("/run/systemd/resolve/netif");
+    let state = directory.join(index.to_string());
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let relevant = match event {
+            Ok(event) => {
+                event.need_rescan()
+                    || matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) && event
+                        .paths
+                        .iter()
+                        .any(|path| path == &state || path == directory)
+            }
+            Err(_) => true,
+        };
+        if relevant {
+            let _ = changed.try_send(());
+        }
+    })?;
+    watcher.watch(directory, RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
+async fn monitor_link_registration(
+    mut target: tokio::sync::watch::Receiver<Option<LookupTarget>>,
+    registration: std::sync::Arc<tokio::sync::Mutex<()>>,
+    mut lookup_failures: tokio::sync::mpsc::Receiver<()>,
+    repaired: &tokio::sync::Notify,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let (changed, mut changes) = tokio::sync::mpsc::channel(1);
+    let mut watcher = None;
+    let mut next_failed_probe_check = tokio::time::Instant::now();
+    loop {
+        let selected = target.borrow_and_update().clone();
+        let index = selected
+            .as_ref()
+            .and_then(|probe| probe.link.as_ref())
+            .map(|link| link.index);
+        if watcher.as_ref().map(|(index, _)| *index) != index {
+            watcher = index.and_then(|index| {
+                watch_resolved_link(index, changed.clone())
+                    .ok()
+                    .map(|w| (index, w))
+            });
+        }
+        if let Some(probe) = selected.as_ref().filter(|probe| probe.link.is_some()) {
+            if matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    probe.repair_if_stale(&target, &registration)
+                )
+                .await,
+                Ok(Ok(true))
+            ) {
+                tracing::debug!("restored private DNS on the tunnel interface");
+                repaired.notify_one();
+            }
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            changed = target.changed() => {
+                if changed.is_err() { return Ok(()); }
+                next_failed_probe_check = tokio::time::Instant::now();
+            }
+            _ = changes.recv(), if watcher.is_some() => {
+                // Coalesce one resolved transaction and reattach if the daemon
+                // replaced the directory. Only D-Bus readback can trigger a write.
+                watcher = None;
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+            }
+            failure = lookup_failures.recv(), if index.is_some() && tokio::time::Instant::now() >= next_failed_probe_check => {
+                if failure.is_none() { return Ok(()); }
+                next_failed_probe_check = tokio::time::Instant::now() + Duration::from_secs(30);
+            }
+            // Older resolvers may never create the notification directory.
+            _ = tokio::time::sleep(Duration::from_secs(30)), if index.is_some() => {}
+        }
+    }
+}
+
+/// Verify the same libc lookup used by SSH, outside packet forwarding. Native
+/// resolver repair must keep running even when another NSS provider is slow.
 pub(crate) async fn monitor(
     mut target: tokio::sync::watch::Receiver<Option<LookupTarget>>,
     result: tokio::sync::watch::Sender<Option<bool>>,
     registration: std::sync::Arc<tokio::sync::Mutex<()>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let mut next_repair = tokio::time::Instant::now();
-    loop {
-        let selected = target.borrow_and_update().clone();
-        if let Some(ref selected) = selected {
-            let expected = selected.address;
-            let lookup_args = vec!["ahostsv4".into(), selected.hostname.clone()];
-            let lookup = command("/usr/bin/getent", &lookup_args);
-            let ready = tokio::select! {
-                _=cancel.cancelled()=>return Ok(()),
-                answer=lookup=>answer.is_ok_and(|answer|answer.lines().filter_map(|line|line.split_whitespace().next()).any(|address|address.parse::<std::net::Ipv4Addr>()==Ok(expected))),
-            };
-            match target.has_changed() {
-                Ok(true) => continue,
-                Err(_) => return Ok(()),
-                Ok(false) => {}
-            }
-            result.send_replace(Some(ready));
-            if !ready && tokio::time::Instant::now() >= next_repair {
-                next_repair = tokio::time::Instant::now() + Duration::from_secs(30);
-                if matches!(
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        selected.repair_if_stale(&target, &registration)
-                    )
-                    .await,
-                    Ok(Ok(true))
-                ) {
-                    tracing::debug!("restored private DNS on the tunnel interface");
-                    continue;
+    let (failed, failures) = tokio::sync::mpsc::channel(1);
+    let repaired = tokio::sync::Notify::new();
+    let native =
+        monitor_link_registration(target.clone(), registration, failures, &repaired, &cancel);
+    let lookups = async {
+        loop {
+            let selected = target.borrow_and_update().clone();
+            if let Some(selected) = selected {
+                let expected = selected.address;
+                let lookup_args = vec!["ahostsv4".into(), selected.hostname];
+                let ready = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = repaired.notified() => continue,
+                    changed = target.changed() => {
+                        if changed.is_err() { return Ok(()); }
+                        result.send_replace(None);
+                        continue;
+                    }
+                    answer = command("/usr/bin/getent", &lookup_args) => answer.is_ok_and(|answer|
+                        answer.lines().filter_map(|line| line.split_whitespace().next())
+                            .any(|address| address.parse::<std::net::Ipv4Addr>() == Ok(expected))),
+                };
+                match target.has_changed() {
+                    Ok(true) => continue,
+                    Err(_) => return Ok(()),
+                    Ok(false) => {}
                 }
+                result.send_replace(Some(ready));
+                if !ready && selected.link.is_some() {
+                    let _ = failed.try_send(());
+                }
+            } else {
+                result.send_replace(None);
             }
-        } else {
-            result.send_replace(None);
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                changed = target.changed() => {
+                    if changed.is_err() { return Ok(()); }
+                    result.send_replace(None);
+                }
+                _ = repaired.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            }
         }
-        tokio::select! {
-            _=cancel.cancelled()=>return Ok(()),
-            changed=target.changed()=>{if changed.is_err(){return Ok(());}next_repair=tokio::time::Instant::now();result.send_replace(None);},
-            _=tokio::time::sleep(Duration::from_secs(10))=>{},
-        }
-    }
+    };
+    tokio::try_join!(native, lookups)?;
+    Ok(())
 }

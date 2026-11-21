@@ -1094,22 +1094,39 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
         .parse()?;
     let own: Ipv4Addr = "10.219.94.2".parse()?;
     let hostname = "fixture-recovery.phub";
+    let secondary = "remote-service.phstudy";
+    async fn resolves(name: &str, expected: Ipv4Addr) -> Result<bool> {
+        let answer = tokio::process::Command::new("getent")
+            .args(["ahostsv4", name])
+            .output()
+            .await?;
+        Ok(answer.status.success()
+            && String::from_utf8(answer.stdout)?.lines().any(|line| {
+                line.split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<Ipv4Addr>().ok())
+                    == Some(expected)
+            }))
+    }
     let server = Server::bind(own).await?;
     let port = server.port()?;
     {
         let mut zone = server.zone.write().await;
         zone.suffixes.insert("phub.".into());
         zone.records.insert(format!("{hostname}."), own);
+        zone.suffixes.insert("phstudy.".into());
+        zone.records.insert(format!("{secondary}."), own);
     }
     let cancel = CancellationToken::new();
     let zone = server.zone.clone();
     let server_task = tokio::spawn(server.serve(cancel.clone()));
-    let suffixes = vec!["phub".to_owned()];
+    let suffixes = vec!["phub".to_owned(), "phstudy".to_owned()];
     let registration = register(index, own, port, &suffixes).await?;
     let target = LookupTarget {
         hostname: hostname.into(),
         address: own,
         link: Some(LinkDns {
+            interface: "phtest0".into(),
             index,
             port,
             suffixes,
@@ -1117,10 +1134,11 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
     };
     let (probe, input) = watch::channel(Some(target));
     let (report, mut health) = watch::channel(None);
+    let registration_lock = Arc::new(Mutex::new(()));
     let task = tokio::spawn(monitor(
         input,
         report,
-        Arc::new(Mutex::new(())),
+        registration_lock.clone(),
         cancel.clone(),
     ));
     let result = async {
@@ -1129,6 +1147,7 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
             health.wait_for(|v| *v == Some(true)),
         )
         .await??;
+        let guard = registration_lock.lock().await;
         ensure!(tokio::process::Command::new("resolvectl")
             .args(["revert", "phtest0"])
             .status()
@@ -1139,24 +1158,47 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
             .output()
             .await?;
         ensure!(!broken.status.success(), "fixture did not lose system DNS");
-        // Observe the failed libc probe, then a positive readback from the repaired link.
-        tokio::time::timeout(
-            Duration::from_secs(25),
-            health.wait_for(|v| *v == Some(false)),
-        )
+        drop(guard);
+        // The native change may recover before the next periodic libc probe.
+        // Verify that the original hostname really resolves again.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !resolves(hostname, own).await? {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
         .await??;
         tokio::time::timeout(
             Duration::from_secs(15),
             health.wait_for(|v| *v == Some(true)),
         )
         .await??;
-        let answer = tokio::process::Command::new("getent")
-            .args(["ahostsv4", hostname])
-            .output()
-            .await?;
+        ensure!(resolves(secondary, own).await?);
+        ensure!(tokio::process::Command::new("resolvectl")
+            .args(["domain", "phtest0", "~phub"])
+            .status()
+            .await?
+            .success());
         ensure!(
-            answer.status.success() && String::from_utf8(answer.stdout)?.contains(&own.to_string())
+            resolves(hostname, own).await?,
+            "primary hostname must still resolve"
         );
+        ensure!(
+            !resolves(secondary, own).await?,
+            "secondary suffix was still available"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !resolves(secondary, own).await? {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "secondary suffix stayed unavailable while the primary hostname resolved"
+            )
+        })??;
         let renamed = "renamed-recovery.phub";
         {
             let mut zone = zone.write().await;
@@ -1168,10 +1210,72 @@ async fn restores_lost_link_registration_after_libc_lookup_fails() -> Result<()>
             .status()
             .await?
             .success());
-        tokio::time::timeout(Duration::from_secs(15), health.wait_for(|v| *v == Some(false))).await??;
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            health.wait_for(|v| *v == Some(false)),
+        )
+        .await??;
         update_probe_hostname(&probe, renamed);
         // The name change wakes the monitor before its normal ten-second interval.
-        tokio::time::timeout(Duration::from_secs(5), health.wait_for(|v| *v == Some(true))).await??;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            health.wait_for(|v| *v == Some(true)),
+        )
+        .await??;
+        // The libc probe itself can be stuck on a stale DNS server. Confirm that
+        // it actually sent a query there before asking the monitor to repair.
+        let slow_name = "slow-probe.phub";
+        for args in [
+            vec!["link", "add", "phslowfixture", "type", "dummy"],
+            vec!["addr", "add", "10.219.95.2/32", "dev", "phslowfixture"],
+            vec!["link", "set", "phslowfixture", "up"],
+        ] {
+            ensure!(tokio::process::Command::new("ip")
+                .args(args)
+                .status()
+                .await?
+                .success());
+        }
+        let silent = tokio::net::UdpSocket::bind(("10.219.95.2", 0)).await?;
+        let other_server = format!("10.219.95.2:{}", silent.local_addr()?.port());
+        for args in [
+            ["dns", "phslowfixture", &other_server],
+            ["domain", "phslowfixture", "~slow-probe.phub"],
+            ["default-route", "phslowfixture", "no"],
+        ] {
+            ensure!(tokio::process::Command::new("resolvectl")
+                .args(args)
+                .status()
+                .await?
+                .success());
+        }
+        update_probe_hostname(&probe, slow_name);
+        let mut packet = [0; 512];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (n, _) = silent.recv_from(&mut packet).await?;
+                if packet[..n]
+                    .windows(b"slow-probe".len())
+                    .any(|w| w == b"slow-probe")
+                {
+                    return Ok::<(), anyhow::Error>(());
+                }
+            }
+        })
+        .await??;
+        ensure!(tokio::process::Command::new("resolvectl")
+            .args(["domain", "phtest0", "~phub"])
+            .status()
+            .await?
+            .success());
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while !resolves(secondary, own).await? {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("registration repair waited for the blocked libc probe"))??;
         Ok::<(), anyhow::Error>(())
     }
     .await;
