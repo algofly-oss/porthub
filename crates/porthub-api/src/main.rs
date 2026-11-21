@@ -8,6 +8,17 @@ async fn main() -> Result<()> {
     let check = match arguments.next() {
         None => false,
         Some(argument) if argument == "--check-config" => true,
+        Some(argument) if argument == "--private-continuity" => {
+            let action=arguments.next().and_then(|v|v.into_string().ok()).unwrap_or_default();
+            anyhow::ensure!(matches!(action.as_str(),"status"|"enable"|"disable") && arguments.next().is_none(),
+                "Usage: porthub-api --private-continuity status|enable|disable");
+            let config=Config::load()?;
+            let client=mongodb::Client::with_uri_str(&config.mongo_uri).await?;
+            let database=client.database(&config.mongo_database);
+            let status=porthub_api::fleet_command(&App::new(config,database),&action).await?;
+            println!("{}",serde_json::to_string(&status)?);
+            return Ok(());
+        }
         Some(argument) if argument == "--check-artifacts" => {
             let root = arguments
                 .next()
@@ -33,7 +44,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(argument) if argument == "--help" || argument == "-h" => {
-            println!("Usage: porthub-api [--check-config | --check-artifacts DIRECTORY VERSION]\n\n--check-config  Validate current database configuration without starting or modifying services\n--check-artifacts  Validate the complete image release without database or network access");
+            println!("Usage: porthub-api [--check-config | --check-artifacts DIRECTORY VERSION | --private-continuity status|enable|disable]\n\n--check-config  Validate current database configuration without starting or modifying services\n--check-artifacts  Validate the complete image release without database or network access\n--private-continuity  Read or rotate the private TCP continuity fleet epoch");
             return Ok(());
         }
         _ => anyhow::bail!("Usage: porthub-api [--check-config]"),

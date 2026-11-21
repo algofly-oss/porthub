@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 pub struct Config {
     /// Operator attestation that every writer sharing this instance of Mongo uses the policy write fence.
     pub private_continuity_fenced_writers: bool,
+    pub private_continuity_fence_only: bool,
     pub terminal: crate::terminal::Settings,
     pub private_transport: crate::private_transport::Settings,
     pub listen: String,
@@ -50,6 +51,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             private_continuity_fenced_writers: false,
+            private_continuity_fence_only: false,
             terminal: Default::default(),
             private_transport: Default::default(),
             listen: "127.0.0.1:47080".into(),
@@ -113,6 +115,10 @@ pub fn docs_enabled(env_default: bool, admin_override: Option<bool>) -> bool {
 }
 
 impl Config {
+    pub(crate) fn fences_private_writes(&self)->bool {
+        self.private_continuity_fence_only || self.private_continuity_fenced_writers
+    }
+
     pub fn load() -> Result<Self> {
         let native_build_depot_root=std::env::var_os("PORTHUB_NATIVE_BUILD_DEPOT_ROOT").filter(|v|!v.is_empty()).map(std::path::PathBuf::from);
         let native_build_depot_owner_uid=env("PORTHUB_NATIVE_BUILD_DEPOT_OWNER_UID","0").parse::<u32>().context("invalid native build depot owner UID")?;
@@ -336,6 +342,7 @@ impl Config {
             ui_root,
             native_build_depot_root,
             native_build_depot_owner_uid,
+            private_continuity_fence_only: std::env::var("PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS").as_deref()==Ok("staged-v1"),
             private_continuity_fenced_writers: std::env::var("PORTHUB_PRIVATE_CONTINUITY_FENCED_WRITERS").as_deref()==Ok("all-v1"),
             mongo_uri: std::env::var("MONGO_DATABASE_URI")
                 .context("MONGO_DATABASE_URI required")?,

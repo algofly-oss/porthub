@@ -6,7 +6,7 @@ use mongodb::{bson::doc, Client, Database};
 
 async fn gateway_client(config:&Config)->Result<Client>{
     let mut opts=mongodb::options::ClientOptions::parse(&config.mongo_uri).await?;
-    if config.private_continuity_fenced_writers {opts.app_name=Some(crate::private_continuity::app_name(crate::private_continuity::process()));}
+    if config.fences_private_writes() {opts.app_name=Some(crate::private_continuity::app_name(crate::private_continuity::process()));}
     Ok(Client::with_options(opts)?)
 }
 pub async fn database(config: &Config) -> Result<Database> {

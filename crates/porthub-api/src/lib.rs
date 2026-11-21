@@ -1,5 +1,6 @@
 pub mod private_changes;
 mod private_continuity;
+pub use private_continuity::fleet_command;
 mod private_continuity_recovery;
 pub mod private_migration_mode;
 pub mod private_retired_sources;
@@ -126,7 +127,7 @@ impl App {
     pub async fn connect(config:Config)->anyhow::Result<Self>{
         let db=bootstrap::database(&config).await?;
         let mut app=Self::new(config,db);
-        if app.config.private_continuity_fenced_writers {
+        if app.config.fences_private_writes() {
             app.policy_writer=private_continuity_recovery::Writer::start(private_continuity_recovery::directory(),private_continuity::process());
         }
         Ok(app)

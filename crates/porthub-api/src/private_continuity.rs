@@ -16,6 +16,41 @@ use uuid::Uuid;
 
 static PROCESS: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
 const GLOBAL: &str = "cross-workspace-v1";
+const FLEET: &str = "fleet-activation-v1";
+/// Operates on the current deployment's durable activation epoch. It never
+/// clears outstanding writers or changes an ACL, machine, route or enrollment.
+pub async fn fleet_command(app: &App, action: &str) -> anyhow::Result<serde_json::Value> {
+    let c = collection(app);
+    let mode = if app.config.private_continuity_fenced_writers {
+        "all-v1"
+    } else if app.config.fences_private_writes() {
+        "staged-v1"
+    } else {
+        "off"
+    };
+    match action {
+        "status" => {}
+        "enable" | "disable" => {
+            anyhow::ensure!(
+                action != "enable" || mode == "all-v1",
+                "enable requires all-v1 writer attestation"
+            );
+            c.update_one(doc!{"_id":FLEET},doc!{"$set":{"enabled":action=="enable","generation":Uuid::new_v4().to_string(),"updated_at":DateTime::now()}})
+                .upsert(true).await?;
+        }
+        _ => anyhow::bail!("Expected status, enable, or disable"),
+    }
+    let row = c.find_one(doc! {"_id":FLEET}).await?;
+    let generation = row
+        .as_ref()
+        .and_then(|r| r.get_str("generation").ok())
+        .and_then(|s| s.parse::<Uuid>().ok());
+    let enabled = generation.is_some() && row.is_some_and(|r| r.get_bool("enabled") == Ok(true));
+    Ok(
+        serde_json::json!({"process_mode":mode,"fleet_enabled":enabled,"generation":generation,
+        "issues_witnesses":mode=="all-v1" && enabled}),
+    )
+}
 pub(super) fn process() -> &'static str {
     PROCESS.as_str()
 }
@@ -88,12 +123,20 @@ pub(crate) async fn witness(app: &App, workspace: ObjectId) -> Option<Uuid> {
 async fn read(app: &App, workspace: ObjectId) -> Option<Uuid> {
     let key = workspace.to_hex();
     let mut rows = collection(app)
-        .find(doc! {"_id":{"$in":[GLOBAL,&key]}})
-        .limit(2)
+        .find(doc! {"_id":{"$in":[FLEET,GLOBAL,&key]}})
+        .limit(3)
         .await
         .ok()?;
     let mut combined = 0u128;
+    let mut fleet = None;
     while let Some(row) = rows.try_next().await.ok()? {
+        if row.get_str("_id").ok()? == FLEET {
+            if row.get_bool("enabled").ok()? != true {
+                return None;
+            }
+            fleet = Some(row.get_str("generation").ok()?.parse::<Uuid>().ok()?);
+            continue;
+        }
         if let Some(stable) = stable(&row) {
             combined ^= stable.as_u128();
         } else {
@@ -103,7 +146,7 @@ async fn read(app: &App, workspace: ObjectId) -> Option<Uuid> {
             return None;
         }
     }
-    Some(Uuid::from_u128(combined))
+    Some(Uuid::from_u128(combined ^ fleet?.as_u128()))
 }
 /// Publish dirtiness before dispatch. Only the owner of this exact write can
 /// clear it. Concurrent requests cannot accidentally clear each other's markers.
@@ -112,7 +155,7 @@ pub(crate) async fn write<T>(
     scope: Option<ObjectId>,
     operation: impl Future<Output = ApiResult<T>>,
 ) -> ApiResult<T> {
-    if !app.config.private_continuity_fenced_writers {
+    if !app.config.fences_private_writes() {
         return operation.await;
     }
     let key = scope.map(|w| w.to_hex()).unwrap_or_else(|| GLOBAL.into());
@@ -186,7 +229,24 @@ mod tests {
         let directory = tempfile::TempDir::new()?;
         reader.policy_writer = Writer::start(directory.path().into(), process());
         ensure!(reader.policy_writer.is_some());
-        let original = witness(&reader, host).await.context("initial witness")?;
+        ensure!(witness(&reader, host).await.is_none());
+        ensure!(fleet_command(&reader, "status").await?["fleet_enabled"] == false);
+        let mut staged = app(&uri, &name).await?;
+        staged.config.private_continuity_fenced_writers = false;
+        staged.config.private_continuity_fence_only = true;
+        ensure!(fleet_command(&staged, "enable").await.is_err());
+        ensure!(write(&staged, Some(host), async { Ok(()) }).await.is_ok());
+        ensure!(witness(&staged, host).await.is_none());
+        ensure!(fleet_command(&reader, "enable").await?["issues_witnesses"] == true);
+        let first = witness(&reader, host).await.context("first activation")?;
+        ensure!(fleet_command(&staged, "disable").await?["fleet_enabled"] == false);
+        ensure!(witness(&reader, host).await.is_none());
+        ensure!(fleet_command(&reader, "enable").await?["issues_witnesses"] == true);
+        let original = witness(&reader, host)
+            .await
+            .context("reactivation witness")?;
+        ensure!(original != first);
+        let other_before = witness(&reader, other).await.context("other workspace")?;
         let opened = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let active = tokio::spawn({
@@ -209,7 +269,7 @@ mod tests {
         // The earlier cached observation cannot by itself certify a grant.
         ensure!(before(&reader, host).await == Some(original));
         ensure!(witness(&reader, host).await.is_none());
-        ensure!(witness(&reader, other).await == Some(original));
+        ensure!(witness(&reader, other).await == Some(other_before));
         ensure!(write(&writer, Some(host), async { Ok(()) }).await.is_ok());
         ensure!(witness(&reader, host).await.is_none());
         release.notify_one();
