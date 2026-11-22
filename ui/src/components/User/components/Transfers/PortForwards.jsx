@@ -324,6 +324,19 @@ function Builder({ machines, onCreated, onCancel }) {
   }
   return (
     <form onSubmit={submit} className="max-w-2xl space-y-4">
+      <label className={label}>
+        Profile name{" "}
+        <span className="font-normal text-muted-foreground">
+          (optional)
+        </span>
+        <input
+          maxLength={80}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          className={field}
+          placeholder="e.g. Condor notebook"
+        />
+      </label>
       {!advanced &&
         mappings.length === 1 &&
         mappings[0].direction === "remote" && (
@@ -366,19 +379,6 @@ function Builder({ machines, onCreated, onCancel }) {
           id="advanced-port-mappings"
           className="space-y-4 border-t border-border pt-3"
         >
-          <label className={label}>
-            Forward name{" "}
-            <span className="font-normal text-muted-foreground">
-              (optional)
-            </span>
-            <input
-              maxLength={80}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              className={field}
-              placeholder="e.g. Support laptop"
-            />
-          </label>
           {mappings.map((mapping, index) => (
             <fieldset key={index} className="border-t border-border pt-3">
               <legend className="pr-2 text-sm font-semibold">

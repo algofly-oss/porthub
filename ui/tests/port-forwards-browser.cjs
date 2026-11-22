@@ -205,6 +205,7 @@ async function choose(page, label, option) {
         0,
       );
       assert.equal(await page.getByRole("checkbox").count(), 0);
+      await page.getByLabel("Profile name", { exact: false }).fill("Condor notebook");
       await shot("default");
       // A single click generates the default isolated command.
       await page
@@ -281,7 +282,7 @@ async function choose(page, label, option) {
         .getByRole("button", { name: "Save access", exact: true })
         .click();
       await page
-        .getByRole("form", { name: "Edit access for Port 22", exact: true })
+        .getByRole("form", { name: "Edit access for Condor notebook", exact: true })
         .waitFor({ state: "hidden" });
       await page.getByText("gateway.example:24000", { exact: true }).waitFor();
       assert.equal(await command.textContent(), cleanCommand);
@@ -346,7 +347,7 @@ async function choose(page, label, option) {
         .getByRole("button", { name: "Save access", exact: true })
         .click();
       await page
-        .getByRole("form", { name: "Edit access for Port 22", exact: true })
+        .getByRole("form", { name: "Edit access for Condor notebook", exact: true })
         .waitFor({ state: "hidden" });
       await page.getByText("test.phub:24000", { exact: true }).waitFor();
       assert.deepEqual(entry.machineIds, [secondMachine]);
@@ -365,14 +366,14 @@ async function choose(page, label, option) {
         0,
       );
       await page
-        .getByRole("form", { name: "Edit access for Port 22", exact: true })
+        .getByRole("form", { name: "Edit access for Condor notebook", exact: true })
         .waitFor({ state: "hidden" });
       assert.equal(creates, 1);
       assert.equal(reveals, 1);
       assert.equal(updates, 4);
       assert.equal(await command.textContent(), cleanCommand);
       await page
-        .getByRole("button", { name: "Delete Port 22", exact: true })
+        .getByRole("button", { name: "Delete Condor notebook", exact: true })
         .click();
       await page
         .getByRole("button", { name: "Delete forward", exact: true })
@@ -385,7 +386,7 @@ async function choose(page, label, option) {
         .getByText("Advanced ports and direction", { exact: true })
         .click();
       await page
-        .getByLabel("Forward name", { exact: false })
+        .getByLabel("Profile name", { exact: false })
         .fill("Support laptop");
       await page
         .getByRole("textbox", { name: "Port on this computer", exact: true })
