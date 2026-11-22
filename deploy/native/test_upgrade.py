@@ -337,6 +337,166 @@ class ColdBackup(unittest.TestCase):
         with patch.object(upgrade,'run',side_effect=stop):upgrade.backup_core(self.container,backup)
         self.assertEqual(copied.read_bytes(),component.read_bytes())
         self.assertTrue((backup/'verified.json').is_file())
+    def previous_backup(self):
+        import backup_retention
+        record = self.root / 'old/deploy/native/upgrade-records' / ('b'*40+'-previous')
+        record.mkdir(mode=0o700, parents=True)
+        with patch.object(upgrade, 'run'):
+            upgrade.backup_core(self.container, record/'core-backup')
+        backup_retention.complete(record, 'porthub', self.data, 'b'*40)
+        return record
+
+    def test_prior_prefill_uses_stopped_bytes_and_metadata_with_independent_files(self):
+        record = self.previous_backup()
+        relative = self.file.relative_to(self.data)
+        older = record/'core-backup/data'/relative
+        original = older.read_bytes()
+        self.file.chmod(0o640)
+        os.utime(self.file, ns=(10000000000000, 20000000000000))
+        os.setxattr(self.file, 'user.porthub-test', b'stopped metadata')
+        backup = self.root/'new'
+        # Guard every ordinary Python open of the live DB file during staging.
+        original_open = os.open
+        def guard(path, flags, *args, **kwargs):
+            if path == self.file and not flags & os.O_PATH:
+                raise AssertionError('live database opened during staging')
+            return original_open(path, flags, *args, **kwargs)
+        from io import open as open_file
+        def guard_stream(path, *args, **kwargs):
+            if path == self.file:
+                raise AssertionError('live database stream opened during staging')
+            return open_file(path, *args, **kwargs)
+        with patch.object(os, 'open', side_effect=guard), patch('io.open', side_effect=guard_stream):
+            prepared = upgrade.prepare_core_backup(self.container, backup, prior_record=record, project='porthub')
+        copied = backup/'data'/relative
+        self.assertEqual(len({self.file.stat().st_ino, older.stat().st_ino, copied.stat().st_ino}), 3)
+        with patch.object(upgrade, 'run'):
+            upgrade.backup_core(self.container, backup, prepared=prepared)
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(manifest['verified_prior_bytes'],len(original))
+        self.assertEqual(manifest['cold_copied_bytes'],0)
+        self.assertEqual(copied.read_bytes(),original)
+        self.assertEqual(os.getxattr(copied,'user.porthub-test'),b'stopped metadata')
+        a,b=self.file.stat(),copied.stat()
+        self.assertEqual((a.st_uid,a.st_gid,a.st_mode,a.st_mtime_ns),(b.st_uid,b.st_gid,b.st_mode,b.st_mtime_ns))
+        self.assertEqual(older.read_bytes(),original)
+
+    def test_prior_prefill_recopies_new_stopped_content_with_same_size_and_mtime(self):
+        record = self.previous_backup()
+        before = self.file.stat()
+        new = b'X'*before.st_size
+        backup = self.root/'new'
+        prepared = upgrade.prepare_core_backup(self.container, backup, prior_record=record, project='porthub')
+        def stop(_args):
+            self.file.write_bytes(new)
+            os.utime(self.file, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with patch.object(upgrade, 'run', side_effect=stop):
+            upgrade.backup_core(self.container, backup, prepared=prepared)
+        self.assertEqual((backup/'data/mongo/WiredTiger.fixture').read_bytes(),new)
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual((manifest['verified_prior_bytes'],manifest['cold_copied_bytes']),(0,len(new)))
+
+    def test_prior_prefill_checks_stopped_digest_even_when_live_metadata_stays_unchanged(self):
+        record = self.previous_backup()
+        before = self.file.stat()
+        fresh = b'X' * before.st_size
+        self.file.write_bytes(fresh)
+        os.utime(self.file, ns=(before.st_atime_ns, before.st_mtime_ns))
+        backup = self.root/'new'
+        prepared = upgrade.prepare_core_backup(self.container, backup, prior_record=record, project='porthub')
+        staged = backup/'data/mongo/WiredTiger.fixture'
+        self.assertNotEqual(staged.read_bytes(), fresh)
+        with patch.object(upgrade, 'run'):
+            upgrade.backup_core(self.container, backup, prepared=prepared)
+        self.assertEqual(staged.read_bytes(), fresh)
+        self.assertEqual(json.loads((backup/'verified.json').read_text())['verified_prior_bytes'], 0)
+
+    def test_renamed_live_file_during_prefill_falls_back_to_the_stopped_tree(self):
+        record = self.previous_backup()
+        backup = self.root/'new'
+        original_open = os.open
+        def rename(path, flags, *args):
+            if path == self.file and flags & os.O_PATH:
+                self.file.rename(self.file.with_name('moved-during-staging'))
+            return original_open(path, flags, *args)
+        with patch.object(os, 'open', side_effect=rename):
+            prepared = upgrade.prepare_core_backup(self.container, backup, prior_record=record, project='porthub')
+        self.file.write_bytes(b'new stopped content')
+        with patch.object(upgrade, 'run'):
+            upgrade.backup_core(self.container, backup, prepared=prepared)
+        copied = backup/'data/mongo'
+        self.assertEqual((copied/'WiredTiger.fixture').read_bytes(), b'new stopped content')
+        self.assertEqual((copied/'moved-during-staging').read_bytes(), b'owned database state')
+
+    def test_prior_prefill_preserves_metadata_changed_at_shutdown_and_drops_removed_xattrs(self):
+        sibling = self.file.parent/'sibling'
+        sibling.write_bytes(b'stable second file')
+        os.setxattr(sibling, 'user.no-longer-present', b'old')
+        record = self.previous_backup()
+        backup = self.root/'new'
+        prepared = upgrade.prepare_core_backup(self.container, backup, prior_record=record, project='porthub')
+        self.file.chmod(0o640)
+        os.utime(self.file, ns=(8000000000,9000000000))
+        os.setxattr(self.file, 'user.cold', b'current')
+        os.removexattr(sibling, 'user.no-longer-present')
+        with patch.object(upgrade, 'run'):
+            upgrade.backup_core(self.container, backup, prepared=prepared)
+        copied = backup/'data/mongo/WiredTiger.fixture'
+        self.assertEqual(copied.stat().st_mode, self.file.stat().st_mode)
+        self.assertEqual(copied.stat().st_mtime_ns, self.file.stat().st_mtime_ns)
+        self.assertEqual(os.getxattr(copied, 'user.cold'), b'current')
+        self.assertNotIn('user.no-longer-present', os.listxattr(backup/'data/mongo/sibling'))
+        receipt=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(receipt['verified_prior_bytes'], self.file.stat().st_size)
+        self.assertEqual(receipt['cold_copied_bytes'], sibling.stat().st_size)
+
+    def test_prior_prefill_rejects_a_hardlink_to_the_live_file_before_stopping(self):
+        record = self.previous_backup()
+        older = record/'core-backup/data/mongo/WiredTiger.fixture'
+        older.unlink()
+        os.link(self.file, older)
+        with patch.object(upgrade, 'run') as run, self.assertRaisesRegex(ValueError, 'independent'):
+            upgrade.prepare_core_backup(self.container, self.root/'bad', prior_record=record, project='porthub')
+        run.assert_not_called()
+        self.assertFalse((self.root/'bad/verified.json').exists())
+
+    def test_prior_prefill_rejects_damaged_manifests_before_stopping_and_repairs_bad_bytes(self):
+        record=self.previous_backup()
+        old=record/'core-backup/data/mongo/WiredTiger.fixture'
+        old.write_bytes(b'X'*old.stat().st_size)
+        backup=self.root/'new'
+        prepared=upgrade.prepare_core_backup(self.container,backup,prior_record=record,project='porthub')
+        self.assertFalse((backup/'data/mongo/WiredTiger.fixture').exists())
+        with patch.object(upgrade,'run'):upgrade.backup_core(self.container,backup,prepared=prepared)
+        self.assertEqual((backup/'data/mongo/WiredTiger.fixture').read_bytes(),self.file.read_bytes())
+        (record/'core-backup/verified.json').write_text('{}')
+        with patch.object(upgrade,'run') as run, self.assertRaises(ValueError):
+            upgrade.prepare_core_backup(self.container,self.root/'other',prior_record=record,project='porthub')
+        run.assert_not_called()
+
+    def test_prior_prefill_keeps_cold_directory_replacements_and_deletions(self):
+        sibling=self.file.parent/'removed'
+        sibling.write_bytes(b'remove this')
+        nested=self.file.parent/'nested'
+        nested.mkdir();(nested/'child').write_bytes(b'old child')
+        record=self.previous_backup();backup=self.root/'new'
+        prepared=upgrade.prepare_core_backup(self.container,backup,prior_record=record,project='porthub')
+        self.file.unlink();self.file.mkdir();(self.file/'new').write_bytes(b'new child')
+        sibling.unlink();(nested/'child').unlink();nested.rmdir();nested.write_bytes(b'now a file')
+        with patch.object(upgrade,'run'):upgrade.backup_core(self.container,backup,prepared=prepared)
+        out=backup/'data/mongo'
+        self.assertFalse((out/'removed').exists())
+        self.assertEqual((out/'WiredTiger.fixture/new').read_bytes(),b'new child')
+        self.assertEqual((out/'nested').read_bytes(),b'now a file')
+
+    def test_tampered_prefill_is_recopied_from_the_stopped_source(self):
+        record=self.previous_backup();backup=self.root/'new'
+        prepared=upgrade.prepare_core_backup(self.container,backup,prior_record=record,project='porthub')
+        saved=backup/'data/mongo/WiredTiger.fixture'
+        saved.write_bytes(b'X'*saved.stat().st_size)
+        with patch.object(upgrade,'run'):upgrade.backup_core(self.container,backup,prepared=prepared)
+        self.assertEqual(saved.read_bytes(),self.file.read_bytes())
+
     def test_added_and_removed_files_match_the_cold_boundary(self):
         component=self.component();relative=str(component.relative_to(self.data));backup=self.root/'backup'
         def stop(_arguments):

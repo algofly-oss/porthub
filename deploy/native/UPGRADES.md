@@ -32,6 +32,15 @@ and previous immutable image references under `deploy/native/upgrade-records`
 in the staging directory. Keep that directory with the release: Compose records
 its override path for subsequent upgrades. It does not retag shared images.
 
+For an opt-in core backup experiment, pass `--prefill-from-record /absolute/prior/deploy/native/upgrade-records/REVISION-RECORD`.
+The record must be a completed, retained native backup of this project and state
+directory. During staging, matching sizes select candidate files for independent
+copy from the verified backup. During downtime, a SHA256 check of the stopped
+source authorizes each reuse. Changed files are copied from the stopped core.
+Both snapshots retain their data and ownership independently. The resulting
+`core-backup/verified.json` reports the bytes staged and reused from the prior
+backup, the bytes copied cold, the core stop time, and the snapshot time.
+
 A failed replacement, health check, SIGHUP, SIGTERM or Ctrl+C triggers restoration
 of the attempted roles using each role’s previous Compose files. Roles not yet
 attempted remain running. Further catchable

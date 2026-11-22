@@ -213,12 +213,12 @@ def backup_deadline(seconds):
             signal.alarm(max(1,remaining-int(time.monotonic()-started)))
 
 
-def prepare_core_backup(container, destination, deadline=900):
+def prepare_core_backup(container, destination, deadline=900, prior_record=None, project=None):
     from native_backup import prepare_snapshot
     source, destination = backup_paths(container,destination)
     with backup_deadline(deadline):
         destination.mkdir(mode=0o700)
-        prepared = prepare_snapshot(source,destination/'data')
+        prepared = prepare_snapshot(source,destination/'data',prior_record,project)
         prepared['root'] = destination
     return prepared
 
@@ -236,12 +236,20 @@ def backup_core(container, destination, deadline=90, prepared=None):
     with backup_deadline(deadline):
         started = time.monotonic()
         run(['docker','stop','--time','20',container['Id']])
+        stopped = time.monotonic()
         receipt = finish_snapshot(prepared)
+        finished = time.monotonic()
         ownership, files = receipt['ownership'], receipt['sha256']
         # Every file was already read back and compared to its streamed source
         # digest. Persist those hashes instead of rereading the entire cold copy.
-        private_file(destination/'verified.json',json.dumps({'source':str(source),'container':container['Id'],'ownership':ownership,'sha256':files,
-            'online_staged_bytes':receipt['staged_bytes'],'cold_copied_bytes':receipt['cold_bytes'],'cold_seconds':time.monotonic()-started},sort_keys=True).encode())
+        manifest = {
+            'source': str(source), 'container': container['Id'], 'ownership': ownership, 'sha256': files,
+            'online_staged_bytes': receipt['staged_bytes'], 'prior_staged_bytes': receipt['prior_staged_bytes'],
+            'verified_prior_bytes': receipt['prior_verified_bytes'], 'cold_copied_bytes': receipt['cold_bytes'],
+            'core_stop_seconds': stopped - started, 'snapshot_seconds': finished - stopped,
+            'cold_seconds': finished - started,
+        }
+        private_file(destination/'verified.json', json.dumps(manifest, sort_keys=True).encode())
         for directory in (destination,destination.parent):
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
             try:os.fsync(fd)
@@ -406,6 +414,8 @@ def activate(compose, previous_compose, ensure_others, verify_routes=lambda: Non
 def perform(args):
     root = args.root.resolve()
     roles = tuple(role for role in ROLES if role in args.roles)
+    if getattr(args, 'prefill_from_record', None) is not None and 'core' not in roles:
+        raise ValueError('Backup prefill requires a selected core upgrade')
     current = {role: inspect('container', args.project+'-'+role) for role in roles}
     images = {role: inspect('image', 'porthub-ci:'+role+'-'+args.revision) for role in roles}
     depot = native_build_depot(current, root, getattr(args,'native_build_depot',None), getattr(args,'native_build_depot_owner_uid',None))
@@ -435,6 +445,9 @@ def perform_candidate(args, root, roles, current, images, base, depot):
     selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project, depot=depot)
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
+    if getattr(args, 'prefill_from_record', None) is not None:
+        from backup_retention import snapshot
+        snapshot(args.prefill_from_record, args.project, core_data(current['core']))
     if not args.apply:
         return
     if 'core' in roles:
@@ -466,7 +479,8 @@ def perform_candidate(args, root, roles, current, images, base, depot):
         previous[role] = command
     # Slow immutable artifact preparation happens while the old core is healthy,
     # before rollback accounting begins. A staging error must not restart it.
-    prepared_backup = prepare_core_backup(current['core'],record/'core-backup') if 'core' in roles else None
+    prepared_backup = prepare_core_backup(current['core'], record/'core-backup',
+        prior_record=getattr(args, 'prefill_from_record', None), project=args.project) if 'core' in roles else None
     def before_role(role):
         if role=='core':
             backup_core(current['core'],record/'core-backup',prepared=prepared_backup)
@@ -522,6 +536,8 @@ def main():
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--native-build-depot', type=Path, help='First-time opt-in: existing dedicated read-only artifact depot; later upgrades preserve it automatically')
     parser.add_argument('--native-build-depot-owner-uid', type=int, help='First-time opt-in: trusted artifact publisher UID')
+    parser.add_argument('--prefill-from-record', type=Path,
+                        help='Stage data from a verified prior core backup; recheck file contents against the stopped core')
     parser.add_argument('--keep-core-backups', type=int, choices=range(2, 17), default=2, help='Automatically retain this many verified completed-upgrade core snapshots (default: 2)')
     parser.add_argument('--backup-retention-root', type=Path, action='append', default=[], help='Additional exact previous deployment root with marked completed-upgrade snapshots; remembered across later release directories')
     parser.add_argument('--apply', action='store_true')
