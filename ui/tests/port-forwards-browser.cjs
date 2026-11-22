@@ -192,20 +192,21 @@ async function choose(page, label, option) {
       await pair.focus();
       await pair.press("ArrowRight");
       assert.equal(await tab.getAttribute("aria-selected"), "true");
-      await page
-        .getByRole("button", { name: "Generate command", exact: true })
-        .waitFor();
+      const newForward = page.getByRole("button", { name: "New forward", exact: true });
+      const createDialog = page.getByRole("dialog", { name: "New port forward" });
+      await page.getByText("No saved forwards", { exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Generate command" }).count(), 0);
+      for (const dismissal of ["Cancel", "Escape"]) {
+        await newForward.click();
+        await createDialog.waitFor();
+        if (dismissal === "Cancel") await createDialog.getByRole("button", { name: "Cancel" }).click();
+        else await page.keyboard.press("Escape");
+        await createDialog.waitFor({ state: "hidden" });
+        await page.waitForFunction(() => document.activeElement?.textContent.trim() === "New forward");
+      }
+      await newForward.click();
+      await createDialog.getByRole("button", { name: "Generate command" }).waitFor();
       assert.equal(await page.getByLabel("Port on this computer", { exact: true }).count(), 0);
-      assert.equal(
-        await page
-          .getByRole("button", { name: "New forward", exact: true })
-          .count(),
-        0,
-      );
-      assert.equal(
-        await page.getByRole("button", { name: "Cancel", exact: true }).count(),
-        0,
-      );
       assert.equal(
         await page.locator("select").count(),
         0,
@@ -299,7 +300,10 @@ async function choose(page, label, option) {
       });
       assert.deepEqual(layout, { fullWidth: true, footerAtBottom: true, footerWidth: true });
       await shot("inventory");
-      await page.getByRole("button", { name: "Configure Condor notebook" }).click();
+      const row = page.getByRole("row", { name: "Configure Condor notebook" });
+      assert.equal(await row.getByRole("button").count(), 0);
+      if (width === 402) await row.click();
+      else { await row.focus(); await row.press("Enter"); }
       await settingsSection("Public ports");
       await page.getByLabel("Port on this computer").fill("8888");
       await page.getByRole("button", { name: "Publish port", exact: true }).click();
@@ -395,6 +399,7 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Delete forward", exact: true })
         .click();
+      await newForward.click();
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .waitFor();
@@ -483,6 +488,10 @@ async function choose(page, label, option) {
         .waitFor();
       assert.equal(reveals, 2);
       assert.equal(await command.count(), 0);
+      await newForward.click();
+      await createDialog.getByRole("button", { name: "Cancel" }).click();
+      await createDialog.waitFor({ state: "hidden" });
+      await page.waitForFunction(() => document.activeElement?.textContent.trim() === "New forward");
       extraEntries = Array.from({ length: 10 }, (_, index) => ({
         ...entry, id: String(index), name: `Lab device ${index + 1}`,
       }));

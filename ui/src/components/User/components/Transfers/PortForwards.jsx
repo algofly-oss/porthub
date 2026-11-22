@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconChevronDown, IconCopy, IconPlus, IconServer, IconPlugConnected, IconAdjustmentsHorizontal, IconTerminal2, IconTrash } from "@tabler/icons-react";
+import { IconChevronDown, IconCopy, IconPlus, IconServer, IconPlugConnected, IconTerminal2, IconTrash } from "@tabler/icons-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
@@ -220,7 +220,7 @@ function Commands({ credentials, profileName }) {
   );
 }
 
-function MappingAddress({ entry, mapping, machines }) {
+function MappingAddress({ entry, mapping, machines, copyable = true }) {
   const local = mapping.direction === "local";
   const wholeHost = mapping.direction === "host";
   const published =
@@ -251,7 +251,7 @@ function MappingAddress({ entry, mapping, machines }) {
       ) : address ? (
         <>
           <code className="min-w-0 max-w-full break-all font-mono text-xs text-foreground">{address}</code>
-          <Button
+          {copyable && <Button
             size="sm"
             variant="ghost"
             className="h-8 px-1.5 md:h-8"
@@ -267,7 +267,7 @@ function MappingAddress({ entry, mapping, machines }) {
             }}
           >
             <IconCopy size={14} />
-          </Button>
+          </Button>}
           {wholeHost && <p className="basis-full text-xs text-muted-foreground">{published
             ? <>Append the service port, e.g. <code>:8888</code>.</>
             : "Choose machines or groups in Access to use this hostname."}</p>}
@@ -279,13 +279,12 @@ function MappingAddress({ entry, mapping, machines }) {
   );
 }
 
-function Builder({ machines, onCreated, onCancel }) {
+function Builder({ machines, onCreated, onCancel, saving, setSaving }) {
   const [name, setName] = useState("");
   const [mappings, setMappings] = useState([emptyMapping()]);
   const [kind, setKind] = useState("host");
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
   const update = (index, key, value) =>
     setMappings((rows) =>
       rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)),
@@ -330,7 +329,7 @@ function Builder({ machines, onCreated, onCancel }) {
     }
   }
   return (
-    <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
+    <form onSubmit={submit} className="space-y-4">
       <div className="grid gap-3">
       <label className={label}>
         Profile name{" "}
@@ -338,6 +337,7 @@ function Builder({ machines, onCreated, onCancel }) {
           (optional)
         </span>
         <input
+          data-autofocus
           maxLength={80}
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -779,12 +779,20 @@ function SavedForwards() {
     [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [section, setSection] = useState("Profile");
+  const [creating, setCreating] = useState(false);
+  const createButton = useRef(null);
+  function closeBuilder() {
+    if (creating) return;
+    setBuilding(false);
+    requestAnimationFrame(() => createButton.current?.focus());
+  }
   const selected = data?.entries.find(entry => entry.id === selectedId);
   function closeProfile() {
     sequence.current++;
     setSelectedId(null);
     setShown(null);
     setBusy(false);
+    requestAnimationFrame(() => (document.getElementById("forward-row-" + selectedId) ?? createButton.current)?.focus());
   }
   function openProfile(id, sectionName = "Profile") {
     setSelectedId(id);
@@ -864,25 +872,16 @@ function SavedForwards() {
     }
   }
   return (
-    <div className={data?.entries.length && !building ? "flex min-h-0 w-full flex-1 flex-col" : "w-full p-4 sm:p-5"}>
-      {building || !data?.entries.length ? (
-        <header className="mb-5">
-          <h2 className="text-base font-semibold">New port forward</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Run the generated command on the computer you want to connect.</p>
-        </header>
-      ) : (
-        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-3 sm:px-4">
-          <h2 className="text-base font-semibold">Saved forwards</h2>
-          <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-            <input type="search" aria-label="Search forwards" placeholder="Search forwards…" value={search}
-              onChange={event => { setSearch(event.target.value); setPage(1); }}
-              className="h-9 w-full min-w-20 max-w-64 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-primary" />
-            <Button size="sm" className="shrink-0" disabled={busy} onClick={() => {
-              setBuilding(true); closeProfile();
-            }}><IconPlus size={16} />New forward</Button>
-          </div>
-        </header>
-      )}
+    <div className="flex min-h-0 w-full flex-1 flex-col">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-3 sm:px-4">
+        <h2 className="text-base font-semibold">Saved forwards</h2>
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+          {!!data?.entries.length && <input type="search" aria-label="Search forwards" placeholder="Search forwards…" value={search}
+            onChange={event => { setSearch(event.target.value); setPage(1); }}
+            className="h-9 w-full min-w-20 max-w-64 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-primary" />}
+          <Button ref={createButton} size="sm" className="shrink-0" disabled={!data || busy} onClick={() => setBuilding(true)}><IconPlus size={16} />New forward</Button>
+        </div>
+      </header>
       {error && (
         <div
           role="alert"
@@ -904,41 +903,39 @@ function SavedForwards() {
         </p>
       )}
       {data &&
-        (building || !data.entries.length ? (
-          <Builder
-            machines={data.machines}
-            groups={data.groups}
-            onCancel={
-              data.entries.length ? () => setBuilding(false) : undefined
-            }
-            onCreated={(id) => {
-              setBuilding(false);
-              setSearch("");
-              setPage(1);
-              setRevision((r) => r + 1);
-              openProfile(id, "SSH command");
-            }}
-          />
+        (!data.entries.length ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-5 py-10 text-center">
+            <IconPlugConnected size={24} className="text-muted-foreground" aria-hidden="true" />
+            <h3 className="text-sm font-semibold">No saved forwards</h3>
+            <p className="max-w-sm text-sm text-muted-foreground">Create a forward to connect a computer with an SSH command.</p>
+          </div>
         ) : (
           <div className="flex min-h-0 w-full flex-1 flex-col">
             <div className="data-scroll">
             <table aria-label="Saved port forwards" className="block w-full text-left text-sm lg:table">
               <thead className="hidden border-y border-border text-xs text-muted-foreground lg:table-header-group">
-                <tr>{["Profile", "Connection", "Address", "Actions"].map(heading =>
-                  <th key={heading} scope="col" className={heading === "Actions" ? "px-3 py-2 text-right font-medium" : "px-3 py-2 font-medium"}>{heading}</th>)}</tr>
+                <tr>{["Profile", "Connection", "Address"].map(heading =>
+                  <th key={heading} scope="col" className="px-3 py-2 font-medium">{heading}</th>)}</tr>
               </thead>
               <tbody className="block lg:table-row-group">
-              {!matches.length && <tr><td colSpan={4} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
+              {!matches.length && <tr><td colSpan={3} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
               {matches.slice((current - 1) * pageSize, current * pageSize).map(entry => {
                 const connected = entry.status?.connected ?? (entry.status?.ready ? true : null);
-                return <tr key={entry.id} className="block border-t border-border hover:bg-accent/20 lg:table-row">
+                return <tr key={entry.id} id={`forward-row-${entry.id}`} tabIndex={0} aria-haspopup="dialog" aria-label={`Configure ${entry.name}`}
+                  onClick={() => openProfile(entry.id)} onKeyDown={event => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openProfile(entry.id);
+                    }
+                  }}
+                  className="block cursor-pointer border-t border-border hover:bg-accent/20 focus-visible:bg-accent/30 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary lg:table-row">
                   <td className="block px-3 pt-3 align-middle lg:table-cell lg:py-3">
                     <div className="flex items-center gap-2.5">
                       <span className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground lg:flex" aria-hidden="true">
                         {entry.mappings.some(m => m.direction === "host") ? <IconServer size={17} /> : <IconPlugConnected size={17} />}
                       </span>
                       <div className="min-w-0">
-                        <h3 className="break-words font-semibold"><button type="button" className="text-left hover:underline focus-visible:outline-primary" onClick={() => openProfile(entry.id)}>{entry.name}</button></h3>
+                        <h3 className="break-words font-semibold">{entry.name}</h3>
                         <p className="mt-0.5 text-xs text-muted-foreground">{entry.mappings.some(m => m.direction === "host") ? "Private host" : "Port mapping"}</p>
                       </div>
                     </div>
@@ -952,12 +949,8 @@ function SavedForwards() {
                   </td>
                   <td className="block px-3 py-1.5 align-middle lg:table-cell lg:py-2">
                     <ul className="space-y-1 text-xs">{entry.mappings.map((mapping, index) =>
-                      <MappingAddress key={index} entry={entry} mapping={mapping} machines={data.machines} />)}</ul>
+                      <MappingAddress key={index} entry={entry} mapping={mapping} machines={data.machines} copyable={false} />)}</ul>
                   </td>
-                  <td className="block px-3 py-2 align-middle lg:table-cell"><div className="flex flex-wrap gap-1 lg:justify-end">
-                    <Button variant="ghost" size="icon" aria-label={`Show command for ${entry.name}`} title="Show SSH command" onClick={() => openProfile(entry.id, "SSH command")}><IconTerminal2 size={17} /></Button>
-                    <Button variant="outline" size="sm" onClick={() => openProfile(entry.id)} aria-label={`Configure ${entry.name}`}><IconAdjustmentsHorizontal size={15} />Configure</Button>
-                  </div></td>
                 </tr>;
               })}
               </tbody>
@@ -967,6 +960,17 @@ function SavedForwards() {
               onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
           </div>
         ))}
+      {building && data && <Dialog opened onClose={closeBuilder} size="md" title="New port forward"
+        closeButtonProps={{ "aria-label": "Close new forward" }} withCloseButton={!creating} closeOnClickOutside={!creating} closeOnEscape={!creating}>
+        <Builder machines={data.machines} onCancel={closeBuilder} saving={creating} setSaving={setCreating}
+          onCreated={id => {
+            setBuilding(false);
+            setSearch("");
+            setPage(1);
+            setRevision(r => r + 1);
+            openProfile(id, "SSH command");
+          }} />
+      </Dialog>}
       {selected && <Dialog opened onClose={closeProfile} size="lg" title={selected.name} closeButtonProps={{ "aria-label": "Close forward settings" }}>
         <div className="mb-4 flex flex-wrap gap-1 border-b border-border pb-2" role="group" aria-label="Forward settings sections">
           {["Profile", ...(selected.mappings.some(m => m.direction !== "local") ? ["Access"] : []), ...(selected.mappings.some(m => m.direction === "host") ? ["Public ports"] : []), "SSH command"].map(title =>
