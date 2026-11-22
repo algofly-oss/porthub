@@ -1,6 +1,6 @@
 [package]
 name = "porthub-agent"
-version = "1.11.80"
+version = "1.11.81"
 edition.workspace = true
 publish.workspace = true
 
