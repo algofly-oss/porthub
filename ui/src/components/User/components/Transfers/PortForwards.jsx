@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconChevronDown, IconCopy, IconPlus, IconServer, IconPlugConnected, IconTerminal2, IconTrash } from "@tabler/icons-react";
+import { IconCopy, IconPlus, IconServer, IconPlugConnected, IconTerminal2, IconTrash } from "@tabler/icons-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
@@ -321,7 +321,6 @@ function Builder({ machines, onCreated, onCancel, saving, setSaving }) {
   const [name, setName] = useState("");
   const [mappings, setMappings] = useState([emptyMapping()]);
   const [kind, setKind] = useState("host");
-  const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState("");
   const update = (index, key, value) =>
     setMappings((rows) =>
@@ -384,30 +383,6 @@ function Builder({ machines, onCreated, onCancel, saving, setSaving }) {
         />
       </label>
       </div>
-      {kind === "host" && (
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          The profile name supplies the private hostname. For example, <code>devbox.forwards.phub:8888</code> reaches port 8888 on this computer from an allowed machine.
-        </p>
-      )}
-      {!advanced && kind === "ports" && (
-        <p className="text-sm">{mappings.length} configured port mapping{mappings.length === 1 ? "" : "s"}. Open advanced settings to review them.</p>
-      )}
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        aria-expanded={advanced}
-        aria-controls="advanced-port-mappings"
-        onClick={() => setAdvanced((open) => !open)}
-      >
-        <IconChevronDown size={16} aria-hidden="true" className={advanced ? "rotate-180" : ""} />
-        Advanced ports and direction
-      </Button>
-      {advanced && (
-        <div
-          id="advanced-port-mappings"
-          className="space-y-4 border-t border-border pt-3"
-        >
           <label className={label}>
             Forwarding mode
             <SearchDropdown aria-label="Forwarding mode" className={field} value={kind} onChange={event => setKind(event.target.value)}>
@@ -415,7 +390,12 @@ function Builder({ machines, onCreated, onCancel, saving, setSaving }) {
               <option value="ports">Specific ports</option>
             </SearchDropdown>
           </label>
-          {kind === "ports" && <>
+      {kind === "host" && (
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          The profile name supplies the private hostname. For example, <code>devbox.forwards.phub:8888</code> reaches port 8888 on this computer from an allowed machine. For Windows OpenSSH 8.1, choose Specific ports.
+        </p>
+      )}
+      {kind === "ports" && <div className="space-y-4">
           {mappings.map((mapping, index) => (
             <fieldset key={index} className="border-t border-border pt-3">
               <legend className="pr-2 text-sm font-semibold">
@@ -529,9 +509,7 @@ function Builder({ machines, onCreated, onCancel, saving, setSaving }) {
             <IconPlus size={16} />
             Add mapping
           </Button>
-          </>}
-        </div>
-      )}
+      </div>}
       {error && (
         <p className="text-sm text-red-600 dark:text-red-400" role="alert">
           {error}

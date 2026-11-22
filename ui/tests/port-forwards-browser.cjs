@@ -423,10 +423,6 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .waitFor();
-      // Retain existing advanced mixed remote/local direction behavior.
-      await page
-        .getByText("Advanced ports and direction", { exact: true })
-        .click();
       await choose(page, "Forwarding mode", "Specific ports");
       await page
         .getByLabel("Profile name", { exact: false })
@@ -443,23 +439,6 @@ async function choose(page, label, option) {
         .getByRole("option", { name: "Access a PortHub machine", exact: true })
         .click();
       await choose(page, "Destination machine", "Condor");
-      await page
-        .getByRole("button", {
-          name: "Advanced ports and direction",
-          exact: true,
-        })
-        .click();
-      await page
-        .getByText(
-          "2 configured port mappings. Open advanced settings to review them.",
-          { exact: true },
-        )
-        .waitFor();
-      assert.equal(
-        await page.getByLabel("Direction", { exact: true }).count(),
-        0,
-        "Collapsed advanced fields are unmounted",
-      );
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .click();
