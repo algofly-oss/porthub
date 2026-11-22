@@ -201,10 +201,13 @@ pub(super) fn recover(profile: &Path) {
         }
     }
 }
-fn restore(device: &Device) {
-    let Some(current) = inventory()
+fn selected_physical_device(device: &Device) -> Option<Device> {
+    inventory_scan(Path::new("/sys"), false, Some(&device.busid), None)
         .into_iter()
-        .find(|d| d.busid == device.busid && d.same_device(device))
+        .find(|current| current.same_device(device))
+}
+fn restore(device: &Device) {
+    let Some(current) = selected_physical_device(device)
     else {
         return;
     };
@@ -401,9 +404,7 @@ pub(super) fn handoff(
         port: None,
     };
     if source {
-        let current = inventory()
-            .into_iter()
-            .find(|d| d.same_device(device))
+        let current = selected_physical_device(device)
             .context("The selected USB device is unplugged or has changed identity")?;
         ensure!(
             current.blocked.is_none(),
@@ -518,6 +519,32 @@ mod tests {
             assert!(imported_busid(&invalid,1,&device).is_err(),"Unsafe status accepted: {invalid}");
         }
     }
+    #[test]
+    fn selected_physical_bus_preserves_mounted_disk_guard() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let sys = dir.path();
+        let devices = sys.join("bus/usb/devices");
+        for (busid, devnum) in [("1-1", "1"), ("1-2", "2")] {
+            let path = devices.join(busid);
+            std::fs::create_dir_all(&path)?;
+            for (name, value) in [("speed", "480"), ("busnum", "1"), ("devnum", devnum),
+                ("idVendor", "0781"), ("idProduct", "5583"), ("serial", "duplicate")] {
+                std::fs::write(path.join(name), value)?;
+            }
+        }
+        let block = devices.join("1-2/block/sdz");
+        std::fs::create_dir_all(&block)?;
+        std::fs::write(block.join("dev"), "8:96")?;
+        std::fs::create_dir_all(sys.join("class/block"))?;
+        std::os::unix::fs::symlink(block, sys.join("class/block/sdz"))?;
+        let selected = inventory_scan(sys, false, Some("1-2"),
+            Some("42 1 8:96 / /mnt/test rw - ext4 /dev/sdz rw"));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].busid, "1-2");
+        assert_eq!(selected[0].blocked.as_deref(), Some("Mounted storage device"));
+        Ok(())
+    }
+
     #[test]
     fn targeted_virtual_inventory_retains_storage_and_network_safety_guards() -> Result<()> {
         use std::os::unix::fs::symlink;
