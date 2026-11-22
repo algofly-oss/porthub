@@ -5,6 +5,7 @@ Suitable for a user timer. Reads GitHub metadata only; no workflow dispatch,
 publication, fleet setup, or long-lived polling process.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import shutil
 from contextlib import contextmanager
@@ -96,6 +97,34 @@ def validation_config(config):
 def load_controller():
     spec=importlib.util.spec_from_file_location('hybrid_native',Path(__file__).with_name('hybrid-native-build.py'))
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+
+def build_cohort(controller, checkout, source, config, output, servers=False):
+    if not servers or not config.get('server_builders'):
+        return controller.control(checkout, source, config, output)
+    # Share the same manifest publisher lock and the enclosing controller lock.
+    output.mkdir(parents=True, exist_ok=True)
+    manifest = output/'manifest.json'
+    if not manifest.exists():
+        manifest.write_text(json.dumps({'schema_version': 1, 'source_revision': source, 'targets': {}}))
+    spec = importlib.util.spec_from_file_location('hybrid_server', Path(__file__).with_name('hybrid-server-build.py'))
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        clients = pool.submit(controller.control, checkout, source, config, output)
+        server = pool.submit(worker.control, checkout, source, config, output, controller)
+        report = clients.result()
+        server_report = server.result()
+    report['servers'] = server_report['targets']
+    if server_report.get('manifest_unavailable'):
+        report['manifest_unavailable'] = True
+    return report
+
+
+def cohort_complete(row, config):
+    targets = config.get('server_builders', [])
+    return row.get('complete') and all(row.get('servers', {}).get(item['target'], {}).get('status') in
+        ('local_verified', 'local_verified_reused') for item in targets)
 
 
 @contextmanager
@@ -243,7 +272,7 @@ def run_once(root,repository,branch,config_path,state):
         current=json.loads(checkpoint.read_text()) if checkpoint.exists() else {'schema_version':1,'sources':{}}
         if current.get('schema_version')!=1 or not isinstance(current.get('sources'),dict):
             raise ValueError('Invalid controller checkpoint')
-        complete_runs={row.get('run_id') for row in current['sources'].values() if row.get('complete')}
+        complete_runs={row.get('run_id') for row in current['sources'].values() if cohort_complete(row,config)}
         for artifact,run in requests(repository,branch,complete_runs):
             request=read_request(repository,artifact,run);source=request['source_revision']
             purpose=request.get('purpose','release_build')
@@ -252,7 +281,7 @@ def run_once(root,repository,branch,config_path,state):
             if purpose=='core_only_validation' and not active_config['builders']: continue
             previous=current['sources'].get(key,{})
             retry_delay = previous.get('retry_delay_seconds', 60) if previous.get('run_id') == run['id'] else 0
-            if previous.get('complete') or time.time()-previous.get('attempted_at',0)<retry_delay:continue
+            if cohort_complete(previous,active_config) or time.time()-previous.get('attempted_at',0)<retry_delay:continue
             # Never execute a request from a fork/PR/arbitrary workflow ref. The
             # prepared commit must actually belong to the operator's main branch.
             origin=git(root,'remote','get-url','origin')
@@ -279,15 +308,15 @@ def run_once(root,repository,branch,config_path,state):
             checkout=owned/'repo'
             if not checkout.exists():git(root,'worktree','add','--detach',str(checkout),source)
             controller=load_controller()
-            report=controller.control(checkout,source,active_config,owned/('core-validation-outputs' if purpose=='core_only_validation' else 'outputs'))
+            report=build_cohort(controller,checkout,source,active_config,owned/('core-validation-outputs' if purpose=='core_only_validation' else 'outputs'),servers=purpose=='release_build' and run['path'].endswith('continuous-release.yml'))
             unchanged = previous.get('run_id') == run['id'] and previous.get('targets') == report['targets']
             next_delay = min(300, retry_delay * 2) if unchanged else 60
             current['sources'][key]={'attempted_at':int(time.time()),'run_id':run['id'],
                 'retry_delay_seconds':next_delay,
-                'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
+                'servers':report.get('servers',{}),'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values()) and all(report.get('servers',{}).get(item['target'],{}).get('status') in ('local_verified','local_verified_reused') for item in (active_config.get('server_builders',[]) if purpose=='release_build' else []))}
             current['sources']=dict(list(current['sources'].items())[-32:])
             pending=state/'checkpoint.pending.json';pending.write_text(json.dumps(current,sort_keys=True));pending.replace(checkpoint)
-            return {'status':'processed','source_revision':source,'run_id':run['id'],'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values())}
+            return {'status':'processed','source_revision':source,'run_id':run['id'],'servers':report.get('servers',{}),'targets':report['targets'],'complete':not report.get('manifest_unavailable') and len(report['targets'])==len(active_config['builders']) and all(row['status'] in ('local_verified','local_verified_reused') for row in report['targets'].values()) and all(report.get('servers',{}).get(item['target'],{}).get('status') in ('local_verified','local_verified_reused') for item in (active_config.get('server_builders',[]) if purpose=='release_build' else []))}
         return {'status':'no_eligible_prepared_release'}
 
 

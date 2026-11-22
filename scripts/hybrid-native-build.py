@@ -246,19 +246,12 @@ def control(root, source, config, output):
     with ThreadPoolExecutor(max_workers=3) as executor:
         list(executor.map(attempt, config['builders']))
     manifest_path = output/'manifest.json'
-    final_bytes=json.dumps(manifest, sort_keys=True)
-    acknowledgement=output/'manifest-uploaded.sha256'
-    unchanged=acknowledgement.exists() and acknowledgement.read_text()==hashlib.sha256(final_bytes.encode()).hexdigest()
-    pending_manifest=output/'manifest.pending.json'
-    pending_manifest.write_text(final_bytes)
-    pending_manifest.replace(manifest_path)
     report_path = output/'controller-receipt.json'
     report_path.write_text(json.dumps(report, sort_keys=True))
     # Upload last, so readers only discover verified, completed immutable ZIPs.
     # The source-keyed pointer is untrusted until HTTPS/source/input verification.
     try:
-        if not unchanged:
-            publish_manifest(depot,source,output,manifest)
+        publish_manifest(depot,source,output,manifest)
         report['manifest_url'] = depot['base_url'].rstrip('/')+'/'+source+'/manifest.json'
         report['manifest_sha256'] = sha(manifest_path)
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -267,15 +260,38 @@ def control(root, source, config, output):
     return report
 
 
-def publish_manifest(depot, source, output, manifest):
-    path = output/'manifest.json'
-    pending = output/'manifest.pending.json'
-    pending.write_text(json.dumps(manifest, sort_keys=True))
-    pending.replace(path)
-    command(depot['upload'], {'file': str(path), 'key': source+'/manifest.json'}, 30)
-    acknowledgement=output/'manifest-uploaded.pending.sha256'
-    acknowledgement.write_text(sha(path))
-    acknowledgement.replace(output/'manifest-uploaded.sha256')
+_manifest_lock = threading.RLock()
+
+
+def publish_manifest(depot, source, output, manifest, group='targets'):
+    """Replace this producer's map while preserving the disjoint producer map.
+
+    The release controller holds its process lock; this lock serializes its
+    client/server threads through atomic local replacement AND remote upload.
+    """
+    if group not in ('targets', 'servers'):
+        raise ValueError('Unknown native manifest producer')
+    with _manifest_lock:
+        path = output/'manifest.json'
+        previous = json.loads(path.read_text()) if path.exists() else {}
+        for candidate in (previous, manifest):
+            if candidate and (candidate.get('schema_version') != 1 or candidate.get('source_revision') != source):
+                raise ValueError('Native manifest source mismatch')
+        merged = {'schema_version': 1, 'source_revision': source}
+        other = 'servers' if group == 'targets' else 'targets'
+        if other in previous:
+            merged[other] = previous[other]
+        merged[group] = manifest.get(group, {})
+        pending = output/'manifest.pending.json'
+        pending.write_text(json.dumps(merged, sort_keys=True))
+        pending.replace(path)
+        acknowledgement = output/'manifest-uploaded.sha256'
+        value = sha(path)
+        if not acknowledgement.exists() or acknowledgement.read_text() != value:
+            command(depot['upload'], {'file': str(path), 'key': source+'/manifest.json'}, 30)
+            pending_ack = output/'manifest-uploaded.pending.sha256'
+            pending_ack.write_text(value)
+            pending_ack.replace(acknowledgement)
 
 
 class SecureRedirect(urllib.request.HTTPRedirectHandler):

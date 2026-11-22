@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Verify the exact portable native build and stage its isolated, static FFI probe."""
-import hashlib, json, pathlib, re, shutil, subprocess, sys
+import hashlib, json, os, pathlib, re, shutil, subprocess, sys
 root = pathlib.Path(__file__).resolve().parents[1]
 target = sys.argv[1] if len(sys.argv)>1 else 'aarch64-unknown-linux-musl'
 assert target in ('aarch64-unknown-linux-musl','x86_64-unknown-linux-musl')
 arch = 'arm64' if target.startswith('aarch64-') else 'x86_64'
-release = root / 'target' / target / 'release'
+target_root = pathlib.Path(os.environ.get('PORTHUB_SERVER_TARGET_CACHE', str(root / 'target'))).resolve()
+release = target_root / target / 'release'
 rows = [json.loads(line) for line in (release / 'speech-probe-build.jsonl').read_text().splitlines() if line.startswith('{')]
 def local(path):
     value = pathlib.Path(path)
     assert str(value).startswith('/src/target/' + target + '/release/'), 'unexpected cargo output path'
-    value = root / str(value).removeprefix('/src/')
+    value = target_root / str(value).removeprefix('/src/target/')
     assert value.resolve().is_relative_to(release.resolve()), 'escaped release directory'
     return value
 artifacts = [r for r in rows if r.get('reason') == 'compiler-artifact' and r.get('target', {}).get('name') == 'speech_portability' and r.get('profile', {}).get('test') and r.get('executable')]
@@ -52,7 +53,7 @@ baseline_emulation = False
 if arch == 'x86_64':
     # qemu64 exposes the baseline SSE2 CPU, without AVX/AVX2/AVX512. This is
     # additional emulated-CPU coverage, distinct from native runner execution.
-    emulated = subprocess.run(['qemu-x86_64','-cpu','qemu64',str(exe),'--ignored','--exact','speech_backend_devices_enumerate_without_model_or_application','--nocapture'],capture_output=True,timeout=30)
+    emulated = subprocess.run([os.environ.get('PORTHUB_QEMU_X86_64','qemu-x86_64'),'-cpu','qemu64',str(exe),'--ignored','--exact','speech_backend_devices_enumerate_without_model_or_application','--nocapture'],capture_output=True,timeout=30)
     assert len(emulated.stdout)+len(emulated.stderr)<16384
     assert emulated.returncode==0 and b'SPEECH_NATIVE_DEVICE_PROBE cpu_present=true' in emulated.stdout, 'baseline emulated enumeration failed'
     baseline_emulation = True

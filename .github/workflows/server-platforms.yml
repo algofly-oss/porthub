@@ -283,11 +283,62 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
+  server-plan:
+    name: Verify exact-source local server artifacts or select hosted fallback
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      hosted: ${{ steps.resolve.outputs.hosted }}
+      hosted_count: ${{ steps.resolve.outputs.hosted_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Resolve trusted native server cohort
+        id: resolve
+        env:
+          PORTHUB_NATIVE_BUILD_DEPOT_URL: ${{ vars.PORTHUB_TRUSTED_NATIVE_DEPOT }}
+          SOURCE: ${{ inputs.revision || github.sha }}
+          PLATFORM: ${{ inputs.platform }}
+        run: >-
+          python3 scripts/hybrid-server-build.py resolve --root "$GITHUB_WORKSPACE"
+          --source-revision "$SOURCE" --platform "$PLATFORM" --output local-servers
+          --depot "$PORTHUB_NATIVE_BUILD_DEPOT_URL"
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('local-servers/arm64/server-artifacts/SHA256SUMS') != ''
+        with:
+          name: porthub-server-arm64
+          path: local-servers/arm64/server-artifacts/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('local-servers/arm64/server-speech-probe/SHA256SUMS') != ''
+        with:
+          name: porthub-server-speech-probe-arm64
+          path: local-servers/arm64/server-speech-probe/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('local-servers/x86_64/server-artifacts/SHA256SUMS') != ''
+        with:
+          name: porthub-server-x86_64
+          path: local-servers/x86_64/server-artifacts/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('local-servers/x86_64/server-speech-probe/SHA256SUMS') != ''
+        with:
+          name: porthub-server-speech-probe-x86_64
+          path: local-servers/x86_64/server-speech-probe/
+          if-no-files-found: error
+          retention-days: 3
   server:
+    needs: [server-plan]
+    if: needs.server-plan.outputs.hosted_count != '0'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platform == 'all' && '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'x86_64' && '[{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]') }}
+        include: ${{ fromJSON(needs.server-plan.outputs.hosted) }}
     runs-on: ${{ matrix.os }}
     env:
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
@@ -341,11 +392,16 @@ jobs:
           retention-days: 3
   package:
     name: Package server runtime images
-    needs: [server, ui, terminal-measurements]
+    needs: [server-plan, server, ui, terminal-measurements]
+    if: >-
+      always() && !cancelled() && needs.server-plan.result == 'success' &&
+      needs.ui.result == 'success' && needs.terminal-measurements.result == 'success' &&
+      (needs.server.result == 'success' ||
+       (needs.server.result == 'skipped' && needs.server-plan.outputs.hosted_count == '0'))
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platform == 'all' && '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'x86_64' && '[{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]') }}
+        include: ${{ fromJSON(needs.server-plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
