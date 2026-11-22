@@ -449,13 +449,20 @@ def resolve(root, source, platform_name, depot, output, hybrid, initial_wait=90)
                 hybrid.download(depot.rstrip('/')+'/'+source+'/manifest.json', manifest_path, 65536,
                                 min(deadline, time.monotonic()+15))
                 manifest = json.loads(manifest_path.read_text())
-            if manifest.get('schema_version') != 1 or manifest.get('source_revision') != source:
+            if not isinstance(manifest, dict) or manifest.get('schema_version') != 1 or manifest.get('source_revision') != source:
                 raise ValueError('Native server pointer has stale source')
             rows = manifest.get('servers', {})
             if not isinstance(rows, dict) or len(rows) > 2 or any(t not in TARGETS for t in rows):
                 raise ValueError('Invalid server target pointer set')
             for target in sorted(remaining):
                 row = rows.get(target, {})
+                if not isinstance(row, dict):
+                    raise ValueError('Invalid server target row')
+                if not row and time.monotonic()-started < initial_wait:
+                    # The client producer can publish this exact source first.
+                    # Absence is not an explicit server failure during pickup.
+                    pending.add(target)
+                    continue
                 if row.get('status') == 'ready':
                     try:
                         restore(root, source, target, depot, row, output/TARGETS[target]['arch'], hybrid)

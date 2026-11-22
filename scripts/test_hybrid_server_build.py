@@ -144,6 +144,47 @@ class ServerTests(unittest.TestCase):
             s.restore(Path('/unused'), SOURCE, ARM, 'https://trusted.example/builds', row, Path('/unused'), h)
         download.assert_not_called()
 
+    def test_client_only_manifest_gets_discovery_grace_until_building_and_ready(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rows = [{}, {ARM:{'status':'building','deadline_unix':1000}},
+                    {ARM:{'status':'ready'}}]
+            clock = [0]
+            downloads = []
+            def download(url, path, maximum, deadline):
+                downloads.append(url)
+                path.write_text(json.dumps({'schema_version':1,'source_revision':SOURCE,'targets':{},'servers':rows.pop(0)}))
+            def sleep(seconds): clock[0] += seconds
+            with patch.object(h,'download',side_effect=download), patch.object(s,'restore') as restore, \
+                    patch.object(s.time,'monotonic',side_effect=lambda:clock[0]), \
+                    patch.object(s.time,'time',return_value=100), patch.object(s.time,'sleep',side_effect=sleep):
+                result = s.resolve(root,SOURCE,'arm64','https://trusted.example/builds',root/'out',h)
+            self.assertEqual(len(downloads),3)
+            self.assertEqual(result['hosted'],[])
+            self.assertEqual(result['local_arches'],['arm64'])
+            restore.assert_called_once()
+
+    def test_explicit_server_unavailable_is_immediate_even_within_grace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            def download(url,path,maximum,deadline):
+                path.write_text(json.dumps({'schema_version':1,'source_revision':SOURCE,'servers':{ARM:{'status':'unavailable'}}}))
+            with patch.object(h,'download',side_effect=download), patch.object(s.time,'sleep') as sleep:
+                result = s.resolve(root,SOURCE,'arm64','https://trusted.example/builds',root/'out',h)
+            self.assertEqual(len(result['hosted']),1)
+            sleep.assert_not_called()
+
+    def test_missing_server_announcement_expires_to_hosted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); clock = [0]
+            def download(url,path,maximum,deadline):
+                path.write_text(json.dumps({'schema_version':1,'source_revision':SOURCE,'targets':{}}))
+            def sleep(seconds): clock[0] += seconds
+            with patch.object(h,'download',side_effect=download), patch.object(s.time,'monotonic',side_effect=lambda:clock[0]), patch.object(s.time,'sleep',side_effect=sleep):
+                result = s.resolve(root,SOURCE,'arm64','https://trusted.example/builds',root/'out',h,initial_wait=30)
+            self.assertEqual(clock[0],30)
+            self.assertEqual(len(result['hosted']),1)
+
     def test_workflow_reuses_configured_depot_and_keeps_all_final_gates(self):
         text = Path(__file__).parents[1].joinpath('.github/workflows/server-platforms.yml').read_text()
         self.assertIn('vars.PORTHUB_TRUSTED_NATIVE_DEPOT', text)
