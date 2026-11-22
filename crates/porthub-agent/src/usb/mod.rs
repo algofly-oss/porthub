@@ -3,6 +3,7 @@
 pub(crate) mod media_transport;
 pub(crate) mod cli;
 mod relay;
+mod diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod direct;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -86,58 +87,201 @@ fn capabilities()->[bool;2] {
     #[cfg(not(any(target_os="linux",target_os="macos",windows)))] { [false,false] }
 }
 
-// Windows storage enumeration can block inside a driver indefinitely. Keep
-// one probe off the async runtime and keep publishing control reports while
-// it is stuck. An incomplete probe must never advertise devices for export.
-#[cfg(any(windows, test))]
+// Native USB enumeration can block in a driver or ownership check. Keep one
+// probe off the async runtime and publish control reports while it is stuck.
+// An incomplete or stale probe must never advertise devices for export.
+#[cfg(any(target_os = "linux", windows, test))]
+type InventorySnapshot = (
+    [bool; 2],
+    Vec<porthub_components::usb::Device>,
+    Vec<relay::Import>,
+);
+
+#[cfg(any(target_os = "linux", windows, test))]
 #[derive(Default)]
-struct WindowsInventory {
-    pending: Option<tokio::sync::oneshot::Receiver<([bool; 2], Vec<porthub_components::usb::Device>)>>,
+struct NativeInventory {
+    pending: Option<tokio::sync::oneshot::Receiver<InventorySnapshot>>,
+    discard_pending: bool,
 }
 
-#[cfg(any(windows, test))]
-impl WindowsInventory {
-    async fn snapshot(&mut self, path: &Path, enabled: bool) -> ([bool; 2], Vec<porthub_components::usb::Device>) {
-        if self.pending.is_none() {
-            let (send, receive) = tokio::sync::oneshot::channel();
-            let path = path.to_owned();
-            let worker = std::thread::Builder::new().name("porthub-usb-inventory".into()).spawn(move || {
-                let roles = capabilities();
-                let devices = if enabled { inventory_for(&path) } else { Vec::new() };
-                let _ = send.send((roles, devices));
-            });
-            if let Err(error) = worker {
-                tracing::warn!(%error, "Cannot start Windows USB inventory");
-                return Default::default();
-            }
-            self.pending = Some(receive);
+#[cfg(any(target_os = "linux", windows, test))]
+impl NativeInventory {
+    fn invalidate(&mut self) {
+        if self.pending.is_some() {
+            self.discard_pending = true;
         }
-        match tokio::time::timeout(Duration::from_secs(2), self.pending.as_mut().unwrap()).await {
-            Ok(result) => {
-                self.pending = None;
-                let (roles, devices) = result.unwrap_or_default();
-                (roles, if enabled { devices } else { Vec::new() })
+    }
+
+    fn start(&mut self, probe: impl FnOnce() -> InventorySnapshot + Send + 'static) {
+        debug_assert!(self.pending.is_none());
+        let (send, receive) = tokio::sync::oneshot::channel();
+        match std::thread::Builder::new()
+            .name("porthub-usb-inventory".into())
+            .spawn(move || {
+                let _ = send.send(probe());
+            }) {
+            Ok(_) => self.pending = Some(receive),
+            Err(error) => tracing::warn!(%error, "Cannot start native USB inventory"),
+        }
+    }
+
+    async fn snapshot(&mut self, path: &Path, enabled: bool) -> InventorySnapshot {
+        let path = path.to_owned();
+        self.snapshot_with(enabled, move || {
+            let roles = capabilities();
+            let devices = inventory_for(&path);
+            // Provenance can acquire the same ownership locks as the native
+            // scan. Never reacquire those locks on the async reporting task.
+            let imports = relay::imports(&path);
+            (roles, devices, imports)
+        })
+        .await
+    }
+
+    async fn snapshot_with(
+        &mut self,
+        enabled: bool,
+        probe: impl FnOnce() -> InventorySnapshot + Send + 'static,
+    ) -> InventorySnapshot {
+        if !enabled {
+            self.invalidate();
+            return Default::default();
+        }
+        let mut probe = Some(probe);
+        loop {
+            if self.pending.is_none() {
+                self.start(
+                    probe
+                        .take()
+                        .expect("at most one new native probe per report"),
+                );
             }
-            Err(_) => Default::default(),
+            let Some(pending) = self.pending.as_mut() else {
+                return Default::default();
+            };
+            match tokio::time::timeout(Duration::from_secs(2), pending).await {
+                Ok(result) => {
+                    self.pending = None;
+                    if std::mem::take(&mut self.discard_pending) {
+                        // A late result is not a fresh observation. Retire it
+                        // before starting one new probe; never overlap scans.
+                        continue;
+                    }
+                    return result.unwrap_or_default();
+                }
+                Err(_) => {
+                    self.invalidate();
+                    return Default::default();
+                }
+            }
         }
     }
 }
 
 #[cfg(test)]
-#[tokio::test(start_paused = true)]
-async fn stalled_windows_inventory_fails_closed_and_recovers_without_overlap() {
+fn inventory_fixture(serial: &str) -> InventorySnapshot {
+    (
+        [true, true],
+        vec![porthub_components::usb::Device {
+            busid: "0-42".into(),
+            vendor: "1377".into(),
+            product: "1100".into(),
+            serial: serial.into(),
+            name: "Fixture".into(),
+            busnum: 1,
+            devnum: 2,
+            speed: 2,
+            blocked: None,
+        }],
+        vec![relay::Import {
+            busid: "0-42".into(),
+            upstream_id: "a".repeat(32),
+        }],
+    )
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn stalled_native_inventory_discards_late_alias_and_recovers_without_overlap() {
     let (send, receive) = tokio::sync::oneshot::channel();
-    let mut inventory = WindowsInventory { pending: Some(receive) };
+    let mut inventory = NativeInventory {
+        pending: Some(receive),
+        discard_pending: false,
+    };
     for _ in 0..2 {
-        let (roles, devices) = inventory.snapshot(Path::new("unused"), true).await;
+        let (roles, devices, imports) = inventory
+            .snapshot_with(true, || panic!("overlapping scan"))
+            .await;
         assert_eq!(roles, [false, false]);
         assert!(devices.is_empty());
+        assert!(imports.is_empty());
         assert!(inventory.pending.is_some());
     }
-    send.send(([true, true], Vec::new())).unwrap();
-    assert_eq!(inventory.snapshot(Path::new("unused"), true).await.0, [true, true]);
+    send.send(inventory_fixture("stale")).ok().unwrap();
+    let fresh = inventory
+        .snapshot_with(true, || inventory_fixture("fresh"))
+        .await;
+    assert_eq!(fresh.1[0].serial, "fresh");
+    assert_eq!(fresh.2.len(), 1);
     assert!(inventory.pending.is_none());
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn disabled_or_changed_policy_never_republishes_old_probe() {
+    for disabled in [false, true] {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let mut inventory = NativeInventory {
+            pending: Some(receive),
+            discard_pending: false,
+        };
+        if disabled {
+            assert!(inventory
+                .snapshot_with(false, || panic!("disabled scan"))
+                .await
+                .1
+                .is_empty());
+        } else {
+            inventory.invalidate(); // Includes disable/re-enable coalesced by watch.
+        }
+        send.send(inventory_fixture("before-policy-change"))
+            .ok()
+            .unwrap();
+        let fresh = inventory
+            .snapshot_with(true, || inventory_fixture("after-policy-change"))
+            .await;
+        assert_eq!(fresh.1[0].serial, "after-policy-change");
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_native_probe_leaves_control_executor_responsive() {
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let mut inventory = NativeInventory::default();
+    inventory.start(move || {
+        let _ = entered.send(());
+        blocked.recv().unwrap();
+        inventory_fixture("fresh")
+    });
+    entry.await.unwrap();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        tokio::task::yield_now().await;
+    })
+    .await
+    .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        inventory
+            .snapshot_with(true, || panic!("overlapping scan"))
+            .await
+            .1[0]
+            .serial,
+        "fresh"
+    );
+}
+
 fn ordinary_report(body:&mut Value) {
     if let Some(object)=body.as_object_mut(){object.remove("imports");}
     if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias));}
@@ -207,18 +351,20 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         windows::recover(&path);
         #[cfg(windows)]
         let _preparing={let path=path.clone();let control=control.clone();let cancel=work.child_token();tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {prerequisite_retry::run(features::subscribe(&path),cancel,||async {match windows_drivers::prepare(&path,control.clone()).await {Ok(())=>true,Err(error)=>{tracing::warn!(%error,"Windows USB driver preparation unavailable; retrying with backoff");false}}}).await;}))};
+        let diagnostics = diagnostics::Events::process();
         let mut policy = features::subscribe(&path);
         let mut permissions = transport_policy(&policy.borrow());
         let mut sessions: HashMap<String, Session> = HashMap::new();
         let states = Arc::new(Mutex::new(HashMap::<String, State>::new()));
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        #[cfg(windows)]
-        let mut inventory = WindowsInventory::default();
+        #[cfg(any(target_os = "linux", windows))]
+        let mut inventory = NativeInventory::default();
         loop {
-            tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}},_=tick.tick()=>{}}
+            tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}#[cfg(any(target_os="linux",windows))] {inventory.invalidate();}let next=transport_policy(&policy.borrow());if next!=permissions{diagnostics.record(diagnostics::Event::PolicyChanged,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());sessions.clear();permissions=next;}},_=tick.tick()=>{}}
             let enabled = policy.borrow().enabled(Feature::Usb);
             if !enabled {
+                diagnostics.record(diagnostics::Event::PolicyChanged,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());
                 sessions.clear();
             }
             let report_states = states
@@ -228,9 +374,11 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            #[cfg(windows)]
-            let (physical_roles,devices)=inventory.snapshot(&path,enabled).await;
-            #[cfg(not(windows))]
+            #[cfg(any(target_os = "linux", windows))]
+            let (physical_roles,devices,imports)=inventory.snapshot(&path,enabled).await;
+            #[cfg(any(target_os = "linux", windows))]
+            if policy.has_changed().unwrap_or(true) { inventory.invalidate(); continue; }
+            #[cfg(not(any(target_os = "linux", windows)))]
             let (physical_roles,devices)=(capabilities(),if enabled{inventory_for(&path)}else{vec![]});
             let [can_export,can_import]=physical_roles;
             // An authenticated owned import can be routed without installing
@@ -239,31 +387,51 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             #[cfg(windows)] let can_export=can_export||devices.iter().any(|d|relay::is_alias(&d.busid)&&d.blocked.is_none());
             let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":devices,"states":report_states});
             #[cfg(any(target_os="linux",windows))] {
-                let mut imports=relay::imports(&path);
+                let mut imports=imports;
                 imports.retain(|r|body["devices"].as_array().is_some_and(|devices|devices.iter().any(|d|d["busid"]==r.busid)));
                 if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias)||imports.iter().any(|r|d["busid"]==r.busid));}
                 body["imports"]=json!(imports);
             }
-            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
+            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}#[cfg(any(target_os="linux",windows))] {inventory.invalidate();}let next=transport_policy(&policy.borrow());if next!=permissions{diagnostics.record(diagnostics::Event::PolicyChanged,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
             // Gateways with directional roles but no relay support must keep
             // ordinary USB (including export-only Mac sources) operational.
             let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { physical_report_roles(&mut body,physical_roles);ordinary_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[]).await }else{result};
             let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { physical_report_roles(&mut body,physical_roles);legacy_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
-            let response = result.ok().and_then(|r| r.json().ok());
+            let response = diagnostics::report_response(result);
+            let report_failure = response.as_ref().err().copied();
+            if let Some(reason) = report_failure {
+                diagnostics.record(reason,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());
+            }
+            let response = response.ok();
             #[cfg(any(target_os="linux",windows))]
             relay::gateway(&path,response.as_ref().is_some_and(|v|v["relay_version"]==1));
             let plans = response.and_then(|v|serde_json::from_value::<Vec<Forward>>(v["forwards"].clone()).ok());
             let Some(plans) = plans else {
+                if report_failure.is_none() {
+                    diagnostics.record(diagnostics::Event::PlansInvalid,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());
+                }
                 sessions.clear();
                 continue;
             };
-            sessions.retain(|id, s| {
-                !s.task.is_finished()
-                    && plans.iter().any(|p| {
-                        &p.id == id
-                            && serde_json::to_string(p).ok().as_deref()
-                                == Some(s.configuration.as_str())
-                    })
+            sessions.retain(|id, session| {
+                // Keep the original finished-task short circuit and single
+                // ordered search, including its behavior for duplicate IDs.
+                let reason = if session.task.is_finished() {
+                    Some(diagnostics::Event::TaskFinished)
+                } else {
+                    let mut exists = false;
+                    let same = plans.iter().any(|plan| {
+                        if &plan.id != id { return false; }
+                        exists = true;
+                        serde_json::to_string(plan).ok().as_deref()
+                            == Some(session.configuration.as_str())
+                    });
+                    diagnostics::reconciliation(false,exists,same)
+                };
+                if let Some(reason) = reason {
+                    diagnostics.record(reason,diagnostics::Role::Controller,diagnostics::Phase::Control,1);
+                    false
+                } else { true }
             });
             states
                 .lock()
@@ -283,7 +451,11 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 let path = path.clone();
                 let control = control.clone();
                 let states = states.clone();
+                let diagnostics = diagnostics.clone();
                 let task = tokio::spawn(async move {
+                    let role = if plan.source == control.profile().machine_id {
+                        diagnostics::Role::Source
+                    } else { diagnostics::Role::Destination };
                     let prefer_direct = states
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -292,7 +464,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                     set_state(&states, &plan.id, "connecting", None);
                     #[cfg(any(target_os="linux",windows))]
                     let _import = if plan.destination == control.profile().machine_id {
-                        match relay::register(&path,&plan) { Ok(guard)=>Some(guard),Err(error)=>{set_state(&states,&plan.id,"error",Some(error.to_string()));return;} }
+                        match relay::register(&path,&plan) { Ok(guard)=>Some(guard),Err(error)=>{diagnostics.record(diagnostics::Event::ImportRegistrationFailed,role,diagnostics::Phase::Setup,1);set_state(&states,&plan.id,"error",Some(error.to_string()));return;} }
                     } else { None };
                     #[cfg(any(target_os="linux",windows))]
                     let reroute = _import.as_ref().map(relay::ImportGuard::subscribe);
@@ -302,12 +474,14 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                         let mut epoch=reroute.clone();if let Some(changes)=epoch.as_mut(){changes.borrow_and_update();}
                         let result=tokio::select! {_=session_cancel.cancelled()=>break Ok(()),result=session(&path,control.clone(),&plan,states.clone(),prefer_direct,epoch)=>result};
                         if result.as_ref().is_err_and(|error|error.is::<relay::Reconfigure>()) {
+                            diagnostics.record(diagnostics::Event::PlannedRestart,role,session_phase(&states,&plan.id),1);
                             set_state(&states,&plan.id,"connecting",None);
                             tokio::select!{_=session_cancel.cancelled()=>break Ok(()),_=tokio::time::sleep(Duration::from_millis(300))=>{}}
                             continue;
                         }
                         break result;
                     };
+                    diagnostics.record(diagnostics::terminal(&result,session_cancel.is_cancelled()),role,session_phase(&states,&plan.id),1);
                     let was_direct = states
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -337,6 +511,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 );
             }
         }
+        diagnostics.record(diagnostics::Event::WorkerStopped,diagnostics::Role::Controller,diagnostics::Phase::Control,sessions.len());
         sessions.clear();
     });
     Worker { cancel, task }
@@ -351,6 +526,10 @@ fn set_state(states: &States, id: &str, state: &str, error: Option<String>) {
             error,
         },
     );
+}
+fn session_phase(states: &States, id: &str) -> diagnostics::Phase {
+    let rows = states.lock().unwrap_or_else(|p| p.into_inner());
+    diagnostics::Phase::from_state(rows.get(id).map(|row| row.state.as_str()))
 }
 fn record_session_result(states: &States, id: &str, result: Result<()>) {
     match result {
@@ -707,6 +886,25 @@ fn restart_frame(ack:bool)->tokio_tungstenite::tungstenite::Message {tokio_tungs
 fn planned_restart(value:&str)->bool {
     serde_json::from_str::<Value>(value).is_ok_and(|v|v["type"]=="path"&&v["route"]=="restart")
 }
+#[derive(Debug)]
+enum NativeStreamIo {
+    Read,
+    Write,
+}
+impl std::fmt::Display for NativeStreamIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Read => "USB native read failed",
+            Self::Write => "USB native write failed",
+        })
+    }
+}
+impl std::error::Error for NativeStreamIo {}
+fn reroute_pending(changes: &Option<tokio::sync::watch::Receiver<u64>>) -> bool {
+    changes
+        .as_ref()
+        .is_some_and(|changes| changes.has_changed().unwrap_or(false))
+}
 async fn rerouted(changes:&mut Option<tokio::sync::watch::Receiver<u64>>) {
     match changes {Some(changes)=>{let _=changes.changed().await;},None=>std::future::pending().await}
 }
@@ -739,6 +937,7 @@ async fn bridge_bulk_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
     use tokio_tungstenite::tungstenite::Message;
     enum Action {
         Closed,
+        Transfer(std::io::Result<(u64,u64)>),
         LocalRestart,
         PeerRestart,
         PeerAck,
@@ -779,15 +978,36 @@ async fn bridge_bulk_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
             }
         };
         tokio::select! {
-            result = transfer => { let (sent, received) = result?; tracing::debug!(sent, received, "USB bulk stream closed"); return Ok(()); },
+            result = transfer => Action::Transfer(result),
             result = control => result?,
             _ = revoked(policy.clone()) => return Ok(()),
         }
     }; // Drop the copy future, retaining both carrier handles for the planned ACK.
+    // A local ownership notification can become ready inside the final native
+    // read poll. Recheck after dropping the competing futures; an acknowledged
+    // handoff must not be lost merely because old I/O won select's first poll.
+    let action = match action {
+        Action::Transfer(_) if restart && reroute_pending(&reroute) => Action::LocalRestart,
+        Action::Transfer(result) => {
+            let (sent, received) = result?;
+            diagnostics::carrier(diagnostics::Event::DataClosed, diagnostics::Phase::Direct);
+            tracing::debug!(sent, received, "USB bulk stream closed");
+            return Ok(());
+        }
+        action => action,
+    };
     match action {
-        Action::Closed => Ok(()),
-        Action::PeerAck => Err(relay::Reconfigure.into()),
+        Action::Transfer(_)=>unreachable!("transfer classified above"),
+        Action::Closed => {
+            diagnostics::carrier(diagnostics::Event::ControlClosed,diagnostics::Phase::Direct);
+            Ok(())
+        },
+        Action::PeerAck => {
+            diagnostics::carrier(diagnostics::Event::PeerRestart,diagnostics::Phase::Direct);
+            Err(relay::Reconfigure.into())
+        },
         Action::LocalRestart | Action::PeerRestart => {
+            diagnostics::carrier(if matches!(&action,Action::LocalRestart) { diagnostics::Event::LocalRestart } else { diagnostics::Event::PeerRestart },diagnostics::Phase::Direct);
             let handshake = async {
                 if matches!(action, Action::PeerRestart) {
                     socket.send(restart_frame(true)).await?;
@@ -839,11 +1059,13 @@ async fn bridge_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     let control_socket = ws_send.clone();
     let direct_send = direct.as_ref().map(|d| d.send.clone());
     let local = direct.is_some();
+    let phase = if local { diagnostics::Phase::Direct } else { diagnostics::Phase::Gateway };
     let upload = async move {
         let mut bytes = vec![0u8; 16384];
         loop {
-            let n = reader.read(&mut bytes).await?;
+            let n = reader.read(&mut bytes).await.context(NativeStreamIo::Read)?;
             if n == 0 {
+                diagnostics::carrier(diagnostics::Event::DataClosed,phase);
                 return Ok::<_, anyhow::Error>(());
             }
             if let Some(send) = &direct_send {
@@ -865,35 +1087,103 @@ async fn bridge_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         }
         Ok::<_, anyhow::Error>(())
     };
-    let download = async {
+    let mut download = Box::pin(async {
         loop {
             tokio::select! {
-             message=source.next()=>{match message{Some(Ok(Message::Binary(b))) if !local=>writer.write_all(&b).await?,Some(Ok(Message::Ping(b)))=>{control_socket.send((Message::Pong(b),None)).await.context("USB gateway closed")?;},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(value))) if planned_restart(&value)=>{let(ack,sent)=tokio::sync::oneshot::channel();control_socket.send((restart_frame(true),Some(ack))).await?;sent.await?;return Err(relay::Reconfigure.into());},Some(Ok(Message::Text(value))) if planned_ack(&value)=>return Err(relay::Reconfigure.into()),Some(Ok(Message::Close(_)))|None=>return Ok::<_,anyhow::Error>(()),Some(Err(e))=>return Err(e.into()),_=>anyhow::bail!("Unexpected USB carrier message")}},
-             data=async{if let Some(d)=direct.as_mut(){d.incoming.recv().await}else{std::future::pending().await}}=>{writer.write_all(&data.context("Direct USB transport closed")?).await?;}
+             message=source.next()=>{match message{Some(Ok(Message::Binary(b))) if !local=>writer.write_all(&b).await.context(NativeStreamIo::Write)?,Some(Ok(Message::Ping(b)))=>{control_socket.send((Message::Pong(b),None)).await.context("USB gateway closed")?;},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(value))) if planned_restart(&value)=>{diagnostics::carrier(diagnostics::Event::PeerRestart,phase);let(ack,sent)=tokio::sync::oneshot::channel();control_socket.send((restart_frame(true),Some(ack))).await?;sent.await?;return Err(relay::Reconfigure.into());},Some(Ok(Message::Text(value))) if planned_ack(&value)=>{diagnostics::carrier(diagnostics::Event::PeerRestart,phase);return Err(relay::Reconfigure.into())},Some(Ok(Message::Close(_)))|None=>{diagnostics::carrier(diagnostics::Event::ControlClosed,phase);return Ok::<_,anyhow::Error>(())},Some(Err(e))=>return Err(e.into()),_=>anyhow::bail!("Unexpected USB carrier message")}},
+             data=async{if let Some(d)=direct.as_mut(){d.incoming.recv().await}else{std::future::pending().await}}=>{writer.write_all(&data.context("Direct USB transport closed")?).await.context(NativeStreamIo::Write)?;}
+            }
+        }
+    });
+    tokio::pin!(upload, carrier);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let old_io_completion = loop {
+        tokio::select! {
+            result = &mut upload => break Some(result),
+            result = &mut carrier => return result,
+            result = &mut download => break Some(result),
+            _ = heartbeat.tick() => {
+                let _ = ws_send.try_send((Message::Ping(vec![].into()), None));
+            },
+            _ = rerouted(&mut reroute), if restart => break None,
+            changed = policy.changed() => {
+                if changed.is_err()
+                    || !policy.borrow().enabled(required)
+                    || local && !policy.borrow().enabled(Feature::DirectConnections)
+                {
+                    return Ok(());
+                }
             }
         }
     };
-    tokio::pin!(upload, carrier, download);
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    loop {
-        tokio::select! {
-         result=&mut upload=>return result,result=&mut carrier=>return result,result=&mut download=>return result,
-         _=heartbeat.tick()=>{let _=ws_send.try_send((Message::Ping(vec![].into()),None));},
-         _=rerouted(&mut reroute),if restart=>{
-            let (ack,ready)=tokio::sync::oneshot::channel();
-            let notify=async {
-                let send=ws_send.send((restart_frame(false),Some(ack)));
-                tokio::pin!(send);
-                tokio::select!{result=&mut send=>{result?;},result=&mut carrier=>{return result;}}
-                tokio::select!{result=ready=>{result?;},result=&mut carrier=>{return result;}}
-                // Continue polling the control carrier and receiver until the
-                // peer acknowledges, while retaining the existing data stream.
-                tokio::select!{result=&mut download=>result,result=&mut carrier=>result}
-            };
-            return tokio::time::timeout(Duration::from_secs(2),notify).await?;
-         },
-         changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(required)||local&&!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}}
+    if let Some(result) = old_io_completion {
+        if !restart
+            || !reroute_pending(&reroute)
+            || !result.as_ref().is_err_and(|e| e.is::<NativeStreamIo>())
+        {
+            return result;
         }
+    }
+    // Never repoll a completed native-write future. Its websocket stream keeps
+    // framing state when the canceled next()/native write is dropped.
+    drop(download);
+    let receive_ack = async {
+        while let Some(message) = source.next().await {
+            match message? {
+                Message::Text(value) if planned_ack(&value) => {
+                    return Err::<(), anyhow::Error>(relay::Reconfigure.into())
+                }
+                Message::Text(value) if planned_restart(&value) => {
+                    let (ack, sent) = tokio::sync::oneshot::channel();
+                    control_socket
+                        .send((restart_frame(true), Some(ack)))
+                        .await?;
+                    sent.await?;
+                    return Err(relay::Reconfigure.into());
+                }
+                Message::Ping(value) => control_socket.send((Message::Pong(value), None)).await?,
+                Message::Pong(_) | Message::Binary(_) => {} // Retiring epoch bytes are never replayed.
+                _ => anyhow::bail!("USB peer closed during rerouting"),
+            }
+        }
+        anyhow::bail!("USB peer closed during rerouting")
+    };
+    tokio::pin!(receive_ack);
+    diagnostics::carrier(diagnostics::Event::LocalRestart, phase);
+    let (ack, ready) = tokio::sync::oneshot::channel();
+    let notify = async {
+        let send = ws_send.send((restart_frame(false), Some(ack)));
+        tokio::pin!(send);
+        tokio::select! {
+            result = &mut send => { result?; },
+            result = &mut carrier => return result,
+        }
+        tokio::select! {
+            result = ready => { result?; },
+            result = &mut carrier => return result,
+        }
+        // Continue polling the control carrier and receiver until the
+        // peer acknowledges, while retaining the existing data stream.
+        tokio::select! {
+            result = &mut receive_ack => result,
+            result = &mut carrier => result,
+        }
+    };
+    let revoked = async {
+        loop {
+            if !policy.borrow().enabled(required)
+                || local && !policy.borrow().enabled(Feature::DirectConnections)
+            {
+                return;
+            }
+            if policy.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(2), notify) => result?,
+        _ = revoked => Ok(()),
     }
 }
 /// The OS-authenticated local broker keeps machine credentials inside the agent.
@@ -1061,6 +1351,110 @@ mod stream_tests {
     async fn direct_usb_stream_remains_full_duplex_and_revokes_locally() -> Result<()> {
         full_duplex(true).await
     }
+    // A native read can report teardown in the same poll that the already
+    // authenticated local owner publishes its handoff. Classify after observing
+    // that poll, rather than relying on random select polling order.
+    struct HandoffError {
+        signal: Option<tokio::sync::watch::Sender<u64>>,
+        write_error: bool,
+    }
+    impl tokio::io::AsyncRead for HandoffError {
+        fn poll_read(mut self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>, _: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            if self.write_error {return std::task::Poll::Pending;}
+            if let Some(signal)=self.signal.take(){signal.send_replace(1);}
+            std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset,"old native stream retired")))
+        }
+    }
+    impl tokio::io::AsyncWrite for HandoffError {
+        fn poll_write(mut self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>, bytes: &[u8]) -> std::task::Poll<std::io::Result<usize>> { if self.write_error {if let Some(signal)=self.signal.take(){signal.send_replace(1);}return std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset,"old native write retired")));} std::task::Poll::Ready(Ok(bytes.len())) }
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> { std::task::Poll::Ready(Ok(())) }
+        fn poll_shutdown(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> { std::task::Poll::Ready(Ok(())) }
+    }
+    async fn handoff_error_case(bulk:bool,signaled:bool,write_error:bool)->Result<()> {
+        use futures_util::{SinkExt,StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;
+        let peer=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let(stream,_)=listener.accept().await?;let mut ws=tokio_tungstenite::accept_async(stream).await?;
+            if write_error && !bulk {ws.send(Message::Binary(vec![1,2,3].into())).await?;}
+            while let Some(frame)=ws.next().await {match frame? {
+                Message::Ping(v)=>ws.send(Message::Pong(v)).await?,
+                Message::Text(v) if planned_restart(&v)=>{ws.send(restart_frame(true)).await?;return Ok::<bool,anyhow::Error>(true)},
+                Message::Close(_)=>break,
+                _=>{},
+            }}Ok(false)
+        }));
+        let(ws,_)=tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        let(change,changes)=tokio::sync::watch::channel(0u64);
+        let _owner=change.clone();
+        let kernel=HandoffError{signal:signaled.then_some(change),write_error};
+        let(_policy,rx)=tokio::sync::watch::channel(crate::features::Policy::default());
+        let result=tokio::time::timeout(Duration::from_secs(3),async {
+            if bulk {
+                let listener=tcp::Listener::bind(None).await?;let offer=listener.offer.clone();
+                let(a,_held)=tokio::join!(listener.accept(),tcp::connect(offer,None));let mut _held=_held?;
+                if write_error {use tokio::io::AsyncWriteExt;_held.write_all(b"retiring native payload").await?;}
+                bridge_bulk(kernel,ws,a?,rx,Some(changes),true).await
+            }else{bridge(kernel,ws,None,rx,Some(changes),true).await}
+        }).await?;
+        if signaled {
+            ensure!(result.as_ref().is_err_and(|e|e.is::<relay::Reconfigure>()),"owned handoff lost to old I/O bulk={bulk}: {result:?}");
+            ensure!(tokio::time::timeout(Duration::from_secs(1),peer).await??? ,"peer did not receive authenticated restart");
+        } else {
+            ensure!(result.as_ref().is_err_and(|e|e.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind()==std::io::ErrorKind::ConnectionReset)),"ordinary native error hidden bulk={bulk}: {result:?}");
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn signaled_owned_handoff_beats_simultaneous_old_io_error()->Result<()> {for bulk in [true,false]{for write in [false,true]{handoff_error_case(bulk,true,write).await?;}}Ok(())}
+    #[tokio::test]
+    async fn old_io_error_without_owned_handoff_is_not_a_restart()->Result<()> {for bulk in [true,false]{for write in [false,true]{handoff_error_case(bulk,false,write).await?;}}Ok(())}
+
+    #[tokio::test]
+    async fn unexpected_control_without_handoff_remains_a_failure()->Result<()> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        for bulk in [false,true] {
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;
+            let _peer=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let(stream,_)=listener.accept().await?;let mut ws=tokio_tungstenite::accept_async(stream).await?;
+                ws.send(Message::Text("unexpected-control".into())).await?;tokio::time::sleep(Duration::from_secs(3)).await;Ok::<_,anyhow::Error>(())
+            }));
+            let(ws,_)=tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+            let(kernel,_held)=tokio::io::duplex(64);let(_owner,changes)=tokio::sync::watch::channel(0u64);
+            let(_policy,rx)=tokio::sync::watch::channel(crate::features::Policy::default());
+            let result=tokio::time::timeout(Duration::from_secs(1),async {
+                if bulk {let listener=tcp::Listener::bind(None).await?;let offer=listener.offer.clone();let(a,b)=tokio::join!(listener.accept(),tcp::connect(offer,None));let _b=b?;bridge_bulk(kernel,ws,a?,rx,Some(changes),true).await}
+                else {bridge(kernel,ws,None,rx,Some(changes),true).await}
+            }).await?;
+            ensure!(result.as_ref().is_err_and(|e|!e.is::<relay::Reconfigure>()),"control failure hidden bulk={bulk}: {result:?}");
+        }Ok(())
+    }
+    #[tokio::test]
+    async fn policy_revocation_interrupts_pending_handoff_ack()->Result<()> {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        for bulk in [false,true] {
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;
+            let(saw,seen)=tokio::sync::oneshot::channel();
+            let _peer=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let(stream,_)=listener.accept().await?;let mut ws=tokio_tungstenite::accept_async(stream).await?;
+                while let Some(frame)=ws.next().await {if matches!(frame?,Message::Text(v) if planned_restart(&v)){let _=saw.send(());break;}}
+                tokio::time::sleep(Duration::from_secs(3)).await;Ok::<_,anyhow::Error>(())
+            }));
+            let(ws,_)=tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+            let(owner,changes)=tokio::sync::watch::channel(0u64);let _held_owner=owner.clone();
+            let kernel=HandoffError{signal:Some(owner),write_error:false};let(policy,rx)=tokio::sync::watch::channel(crate::features::Policy::default());
+            let task=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                if bulk {let listener=tcp::Listener::bind(None).await?;let offer=listener.offer.clone();let(a,b)=tokio::join!(listener.accept(),tcp::connect(offer,None));let _b=b?;bridge_bulk(kernel,ws,a?,rx,Some(changes),true).await}
+                else {bridge(kernel,ws,None,rx,Some(changes),true).await}
+            }));
+            tokio::time::timeout(Duration::from_secs(1),seen).await??;
+            let mut disabled=crate::features::Policy::default();disabled.disabled.insert(Feature::Usb,true);policy.send_replace(disabled);
+            tokio::time::timeout(Duration::from_millis(200),task).await???;
+        }Ok(())
+    }
+
     #[tokio::test]
     async fn planned_rerouting_ack_beats_local_eof_on_gateway_and_bulk() -> Result<()> {
         use futures_util::{SinkExt,StreamExt};
