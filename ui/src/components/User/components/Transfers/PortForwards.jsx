@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconCopy, IconPlus, IconTrash } from "@tabler/icons-react";
+import { IconChevronDown, IconCopy, IconPlus, IconTerminal2, IconTrash } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
 import {
@@ -323,7 +323,8 @@ function Builder({ machines, onCreated, onCancel }) {
     }
   }
   return (
-    <form onSubmit={submit} className="max-w-2xl space-y-4">
+    <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
       <label className={label}>
         Profile name{" "}
         <span className="font-normal text-muted-foreground">
@@ -352,10 +353,7 @@ function Builder({ machines, onCreated, onCancel }) {
             />
           </label>
         )}
-      <p className="text-sm text-muted-foreground">
-        Run the generated command on the computer sharing the port. Choose who
-        can reach it afterward.
-      </p>
+      </div>
       {!advanced &&
         (mappings.length > 1 || mappings[0].direction !== "remote") && (
           <p className="text-sm">
@@ -372,6 +370,7 @@ function Builder({ machines, onCreated, onCancel }) {
         aria-controls="advanced-port-mappings"
         onClick={() => setAdvanced((open) => !open)}
       >
+        <IconChevronDown size={16} aria-hidden="true" className={advanced ? "rotate-180" : ""} />
         Advanced ports and direction
       </Button>
       {advanced && (
@@ -499,8 +498,9 @@ function Builder({ machines, onCreated, onCancel }) {
           {error}
         </p>
       )}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
         <Button disabled={saving} type="submit">
+          <IconTerminal2 size={16} aria-hidden="true" />
           {saving ? "Creating…" : "Generate command"}
         </Button>
         {onCancel && (
@@ -746,11 +746,11 @@ function SavedForwards() {
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold">
-            {building ? "New port forward" : "Port forwards"}
+            {building || data?.entries.length === 0 ? "New port forward" : "Port forwards"}
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            {building
-              ? "Share a client port with one SSH command."
+            {building || data?.entries.length === 0
+              ? "Run the SSH command on the computer sharing the port, then choose who can connect."
               : "Connect a computer using SSH. The computer running the command does not need a PortHub agent."}
           </p>
         </div>
