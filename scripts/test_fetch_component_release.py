@@ -54,25 +54,40 @@ class FetchRelease(unittest.TestCase):
     def test_corrupt_download_and_failed_verifier_publish_nothing(self):
         with patch.object(fetch, 'download', side_effect=lambda url,path,*args:path.write_bytes(b'corrupt')):
             with self.assertRaises(ValueError): fetch.stage(self.release, self.root/'staged', Path('/verifier'))
-        with patch.object(fetch, 'download', side_effect=self.copy_asset), patch.object(fetch.recovery.publisher, 'assets', side_effect=ValueError('Rust rejected')):
-            with self.assertRaises(ValueError): fetch.stage(self.release, self.root/'staged', Path('/verifier'))
+        with patch.object(fetch, 'download', side_effect=self.copy_asset), patch.object(fetch.recovery.publisher, 'assets', side_effect=ValueError('Rust rejected')), patch.object(fetch.recovery, '_recover_all_verified') as batch:
+            with self.assertRaises(ValueError): fetch.stage(self.release, self.root/'staged', Path('/verifier'), recover_output=self.root/'all')
+            batch.assert_not_called()
+        self.assertFalse((self.root/'all').exists())
         self.assertFalse((self.root/'staged').exists())
 
-    def test_cli_recovers_all_platforms_only_after_verified_staging(self):
+    def test_existing_recovery_output_is_preserved_without_downloads(self):
+        recovered = self.root/'all'; recovered.mkdir(); (recovered/'keep').write_text('existing')
+        with patch.object(fetch, 'download', side_effect=AssertionError('must not download')):
+            with self.assertRaises(ValueError): fetch.stage(self.release, self.root/'staged', Path('/verifier'), recover_output=recovered)
+        self.assertEqual((recovered/'keep').read_text(), 'existing')
+        self.assertFalse((self.root/'staged').exists())
+
+    def test_cli_recovers_all_platforms_with_one_full_catalog_verification(self):
         output, recovered = self.root/'staged', self.root/'builds'
-        def recover(directory, destination, target, version, verifier):
-            self.assertEqual(directory, output)
-            self.assertEqual(version, '1.12.0')
-            destination.mkdir()
-            (destination/'index.json').write_text('{}')
-        args = ['fetch', '--output', str(output), '--artifact-verifier', '/verifier', '--recover-output', str(recovered)]
-        response = SimpleNamespace(returncode=0, stdout=json.dumps(self.release), stderr='')
-        with patch.dict(fetch.os.environ, {'GITHUB_OUTPUT':str(self.root/'outputs')}), patch.object(sys, 'argv', args), patch.object(fetch.subprocess, 'run', return_value=response), patch.object(fetch, 'stage', return_value='1.12.0') as staged, patch.object(fetch.recovery, 'recover', side_effect=recover) as restored:
+        verifier = self.root/'verifier'; verifier.write_text('trusted executable fixture')
+        args = ['fetch', '--output', str(output), '--artifact-verifier', str(verifier), '--recover-output', str(recovered)]
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[0] == 'gh':
+                return SimpleNamespace(returncode=0, stdout=json.dumps(self.release), stderr='')
+            self.assertEqual(argv[0], str(verifier))
+            self.assertEqual(argv[1], '--check-artifacts')
+            self.assertEqual(argv[3], '1.12.0')
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'version':'1.12.0', 'releases':[{}]*10}))
+        with patch.dict(fetch.os.environ, {'GITHUB_OUTPUT':str(self.root/'outputs')}), patch.object(sys, 'argv', args), patch.object(fetch.subprocess, 'run', side_effect=run), patch.object(fetch, 'download', side_effect=self.copy_asset), patch.object(fetch.recovery.publisher, 'assets', wraps=fetch.recovery.publisher.assets) as verified:
             fetch.main()
-            staged.assert_called_once()
-            self.assertEqual(restored.call_count, 10)
+            verified.assert_called_once()
+        self.assertEqual(sum(argv[0] == str(verifier) for argv in calls), 1)
         self.assertEqual(len(list(recovered.iterdir())), 10)
         self.assertEqual((self.root/'outputs').read_text(), 'reuse_available=true\n')
+        for target in fetch.recovery.packager.TARGETS:
+            self.assertEqual(json.loads((recovered/target/'index.json').read_text())['release'], '1.12.0')
 
     def test_unsafe_redirects_are_rejected(self):
         handler = fetch.ReleaseRedirects()

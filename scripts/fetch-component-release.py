@@ -49,7 +49,7 @@ def download(url, destination, size, digest):
     destination.chmod(0o644)
 
 
-def stage(release, output, verifier):
+def stage(release, output, verifier, *, recover_output=None):
     if output.exists() or output.is_symlink():
         raise ValueError('Release staging requires a new output directory')
     tag = release.get('tag_name', '')
@@ -82,6 +82,8 @@ def stage(release, output, verifier):
         total += size
     if total > 6*1024*1024*1024:
         raise ValueError('Release assets exceed aggregate limit')
+    if recover_output is not None and (recover_output.exists() or recover_output.is_symlink()):
+        raise ValueError('Recovered builds require a new output directory')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.porthub-fetch-', dir=output.parent) as temporary:
         directory = Path(temporary)/'release'; directory.mkdir()
@@ -93,8 +95,10 @@ def stage(release, output, verifier):
             download(url, path, asset['size'], asset['digest'][7:])
             if path.is_symlink() or path.stat().st_size != asset['size'] or recovery.planner.file_digest(path) != asset['digest'][7:]:
                 raise ValueError('Downloaded release differs from GitHub metadata')
-        publisher.assets(directory, tag[1:], verifier)
+        verified = publisher.assets(directory, tag[1:], verifier)
         directory.rename(output)
+        if recover_output is not None:
+            recovery._recover_all_verified(output, recover_output, tag[1:], verified)
     return tag[1:]
 
 
@@ -124,16 +128,7 @@ def main():
         return
     if args.output is None or args.artifact_verifier is None:
         parser.error('--output and --artifact-verifier are required for staging')
-    version = stage(release, args.output, args.artifact_verifier) if release is not None else None
-    if version is not None and args.recover_output is not None:
-        if args.recover_output.exists() or args.recover_output.is_symlink():
-            raise ValueError('Recovered builds require a new output directory')
-        args.recover_output.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='.porthub-recover-all-', dir=args.recover_output.parent) as temporary:
-            root = Path(temporary)/'platforms'; root.mkdir()
-            for target in recovery.packager.TARGETS:
-                recovery.recover(args.output, root/target, target, version, args.artifact_verifier)
-            root.rename(args.recover_output)
+    version = stage(release, args.output, args.artifact_verifier, recover_output=args.recover_output) if release is not None else None
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('reuse_available='+str(version is not None).lower()+'\n')
