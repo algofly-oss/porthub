@@ -232,6 +232,7 @@ def main():
     machine = os.urandom(12).hex()
     token = "disposable-fixture-only"
     syncs = []
+    sync_times = []
     errors = []
     downloads = []
     server = None
@@ -286,6 +287,7 @@ def main():
                     if value.get("machine_id") != machine or value.get("token") != token:
                         errors.append("Invalid control identity")
                         return self.reply(status=403)
+                    sync_times.append(time.time())
                     syncs.append(value.get("client_version"))
                     config = dict(machine_id=machine, version="windows-install-fixture",
                                   files={"client.toml": "[client]\nremote_addr='ws://127.0.0.1:9'\n"})
@@ -341,7 +343,11 @@ def main():
         env["PATH"] = os.path.expandvars(machine_path) + ";" + env["PATH"]
         run(["cmd.exe", "/d", "/c", "porthub --version"], env=env)
         run([str(cli), "stop", identity[:12]])
-        ps("if ((Get-Service '" + service + "').Status -ne 'Stopped') { exit 1 }")
+        # The first SCM recovery action is delayed five seconds. A clean stop
+        # must remain stopped past that deadline, even with recovery enabled.
+        ps("$until=[DateTime]::UtcNow.AddSeconds(7); do { "
+           "if ((Get-Service '" + service + "').Status -ne 'Stopped') { exit 1 }; "
+           "Start-Sleep -Milliseconds 250 } while ([DateTime]::UtcNow -lt $until)")
         before = len(syncs)
         run([str(cli), "start", identity[:12]])
         wait_for(lambda: len(syncs) > before, "service start control sync")
@@ -371,6 +377,35 @@ def main():
             run([str(replacement), "service", "install", "--profile", previous_spec["profile"], "--publish-cli"])
             assert json.loads(manifest_path.read_text())["identity"] == previous_spec["identity"]
             assert wait_keyboard_image(next_spec["executable"]) == updated_helper, "Idempotent setup restarted a healthy desktop helper"
+        # Confirm that the installed policy actually relaunches the enrolled
+        # service and reconnects it to this fixture's authenticated controller.
+        # Hold the exact process handle to avoid a PID reuse race with teardown.
+        recovery = ps(r"""$ErrorActionPreference='Stop'
+$name='""" + service + """'
+$expected='""" + next_spec["executable"].replace("'", "''") + r"""'
+$svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
+if ($svc.State -ne 'Running' -or $svc.ProcessId -le 0) {throw 'Fixture service is not running'}
+$child=Get-Process -Id $svc.ProcessId
+$handle=$child.Handle
+if ($child.SessionId -ne 0 -or $child.Path -ne $expected) {throw 'Unexpected fixture service image'}
+$child.Kill()
+if (-not $child.WaitForExit(5000)) {throw 'Fixture process did not exit'}
+$deadline=[DateTime]::UtcNow.AddSeconds(45)
+do {
+    $svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
+    if ($svc.State -eq 'Running' -and $svc.ProcessId -gt 0 -and $svc.ProcessId -ne $child.Id) {
+        $replacement=Get-Process -Id $svc.ProcessId
+        if ($replacement.Path -ne $expected) {throw 'Recovered service image changed'}
+        ([DateTimeOffset]$replacement.StartTime).ToUnixTimeMilliseconds()
+        exit 0
+    }
+    Start-Sleep -Milliseconds 250
+} while ([DateTime]::UtcNow -lt $deadline)
+throw 'SCM did not recover the fixture service'
+""")
+        started_at = int(recovery.stdout.decode().strip()) / 1000
+        wait_for(lambda: any(at >= started_at for at in sync_times),
+                 "authenticated control sync after SCM crash recovery")
         print("PASS verified owned SCM image replacement and idempotency", flush=True)
         run([str(cli), "remove", identity[:12]])
         ps("if (Get-Service '" + service + "' -ErrorAction SilentlyContinue) { exit 1 }")
