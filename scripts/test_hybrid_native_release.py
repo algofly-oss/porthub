@@ -112,4 +112,154 @@ class ReleaseTests(unittest.TestCase):
             loader.assert_not_called()
 
 
+
+class RetentionTests(unittest.TestCase):
+    def setup_sources(self, root, count=12):
+        state=root/'state';state.mkdir(mode=0o700)
+        checkpoint={'sources':{}}
+        for i in range(count):
+            source=f'{i+1:040x}';folder=state/source;folder.mkdir(mode=0o700)
+            (folder/'repo').mkdir()
+            checkpoint['sources'][source]={'run_id':i+1}
+            r.os.utime(folder,(i+1,i+1))
+        return state,checkpoint
+
+    def git_metadata(self, repo, *args):
+        if args == ('worktree','list','--porcelain'):
+            state=repo/'state'
+            return '\n\n'.join('worktree '+str(folder/'repo')+'\nHEAD '+folder.name
+                for folder in state.iterdir() if (folder/'repo').is_dir())
+        if args == ('rev-parse','HEAD'):
+            return repo.parent.name
+        return ''
+
+    def metadata(self, repository, path):
+        if path.startswith('/actions/runs?'):return {'workflow_runs':[]}
+        run_id=int(path.rsplit('/',1)[1]);return {'id':run_id,'status':'completed'}
+
+    def test_cap_removes_only_one_finished_source_and_keeps_recent_four(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=self.git_metadata) as git:
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[f'{1:040x}'])
+            self.assertEqual(len(r.source_directories(state)),11)
+            self.assertTrue((state/f'{12:040x}').exists())
+            self.assertIn('worktree',git.call_args.args)
+
+    def test_active_current_unknown_and_outstanding_remote_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            first=state/f'{1:040x}'
+            out=first/'outputs'/'native';out.mkdir(parents=True)
+            (out/'components.ssh.json').write_text('{}')
+            checkpoint['sources'].pop(f'{2:040x}')
+            def metadata(repository,path):
+                if path=='/actions/runs/3':return {'id':3,'status':'in_progress'}
+                return self.metadata(repository,path)
+            with patch.object(r,'gh',side_effect=metadata),patch.object(r,'git',side_effect=self.git_metadata):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,{f'{4:040x}'},execute=True)
+            self.assertEqual(result['removed'],[f'{5:040x}'])
+            for i in range(1,5):self.assertTrue((state/f'{i:040x}').exists())
+
+    def test_dirty_checkout_and_unuploaded_artifacts_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            out=state/f'{1:040x}'/'outputs';out.mkdir()
+            (out/'manifest.json').write_text('{"targets":{"native":{}}}')
+            def git(repo,*args):
+                if args==('status','--porcelain') and repo.parent.name==f'{2:040x}':return ' M source.rs'
+                return self.git_metadata(repo,*args)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=git):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[f'{3:040x}'])
+
+    def test_dry_run_and_unknown_active_requests_never_delete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=self.git_metadata):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set())
+            self.assertEqual(len(r.source_directories(state)),12)
+            self.assertEqual(result['removed'],[f'{1:040x}'])
+            active=ReleaseTests().run_metadata()
+            with patch.object(r,'gh',side_effect=lambda repository,path: {'workflow_runs':[active]} if path.startswith('/actions/runs?') else {'artifacts':[]}),patch.object(r,'git',side_effect=self.git_metadata):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[])
+            self.assertEqual(len(r.source_directories(state)),12)
+
+    def test_symlink_source_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            foreign=root/'foreign';foreign.mkdir();(foreign/'keep').write_text('keep')
+            first=state/f'{1:040x}';(first/'repo').rmdir();first.rmdir();first.symlink_to(foreign,target_is_directory=True)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=self.git_metadata):
+                r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertTrue((foreign/'keep').exists());self.assertTrue(first.is_symlink())
+
+    def test_active_prepared_source_protected_even_when_old_run_completed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            active=ReleaseTests().run_metadata()
+            def metadata(repository,path):
+                if path.startswith('/actions/runs?'):return {'workflow_runs':[active]}
+                if '/artifacts?' in path:return {'artifacts':[{'id':55}]}
+                return self.metadata(repository,path)
+            with patch.object(r,'gh',side_effect=metadata),patch.object(r,'read_request',return_value={'source_revision':f'{1:040x}'}),patch.object(r,'git',side_effect=self.git_metadata):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[f'{2:040x}'])
+
+    def test_normal_timer_reclaims_capacity_before_dispatching_next_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            (state/'checkpoint.json').write_text(json.dumps({'schema_version':1,**checkpoint}))
+            config=root/'config';config.write_text('{"builders":[]}');config.chmod(0o600)
+            controller=Mock();controller.control.return_value={'targets':{}}
+            def git(repo,*args):
+                return 'https://github.com/'+REPOSITORY if args[:3]==('remote','get-url','origin') else self.git_metadata(repo,*args)
+            with patch.object(r,'requests',return_value=[({},ReleaseTests().run_metadata())]),patch.object(r,'read_request',return_value={'source_revision':SOURCE}),patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=git),patch.object(r,'load_controller',return_value=controller):
+                result=r.run_once(root,REPOSITORY,'main',config,state)
+            self.assertEqual(result['status'],'processed')
+            self.assertEqual(len(r.source_directories(state)),12)
+            controller.control.assert_called_once()
+
+    def test_locked_worktree_failure_preserves_outputs_and_recovery_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            first=state/f'{1:040x}'
+            def git(repo,*args):
+                if args[:2]==('worktree','remove'):
+                    raise r.subprocess.CalledProcessError(1,['git','worktree','remove'])
+                return self.git_metadata(repo,*args)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=git):
+                with self.assertRaises(r.subprocess.CalledProcessError):
+                    r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertTrue(first.exists());self.assertTrue((first/'repo').exists())
+
+    def test_switched_checkout_and_unrecognized_owned_files_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            (state/f'{1:040x}'/'operator-notes').write_text('keep')
+            def git(repo,*args):
+                if args==('rev-parse','HEAD') and repo.parent.name==f'{2:040x}':return 'f'*40
+                return self.git_metadata(repo,*args)
+            with patch.object(r,'gh',side_effect=self.metadata),patch.object(r,'git',side_effect=git):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[f'{3:040x}'])
+
+    def test_preparing_newer_trigger_without_request_does_not_lease_old_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state,checkpoint=self.setup_sources(root)
+            active=ReleaseTests().run_metadata()
+            def metadata(repository,path):
+                if path.startswith('/actions/runs?'):return {'workflow_runs':[active]}
+                if '/artifacts?' in path:return {'artifacts':[]}
+                return self.metadata(repository,path)
+            def git(repo,*args):
+                if args[:2]==('merge-base','--is-ancestor'):
+                    raise r.subprocess.CalledProcessError(1,['git','merge-base'])
+                return self.git_metadata(repo,*args)
+            with patch.object(r,'gh',side_effect=metadata),patch.object(r,'git',side_effect=git):
+                result=r.prune_finished_sources(root,REPOSITORY,'main',state,checkpoint,set(),execute=True)
+            self.assertEqual(result['removed'],[f'{1:040x}'])
+
 if __name__=='__main__':unittest.main()

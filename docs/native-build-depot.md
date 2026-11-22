@@ -68,3 +68,29 @@ of an API-writable mount, and the actual application router's session boundary.
 Filesystem fixtures bypass only the read-only-mount check under `cfg(test)`;
 production has no environment override for that check. Deployment mount behavior
 requires separate operator verification.
+
+### Controller staging retention
+
+The trusted `hybrid-native-release.py` timer checks staging capacity before a new
+prepared source is built. At the 12-source or 4 GiB cap it reclaims only enough
+old staging to admit the new source, retaining at least the four newest sources.
+The controller lock excludes another local dispatch during this operation.
+
+The current source and every active prepared workflow source are protected.
+Before an active run publishes its request, only staging proven older than or
+unrelated to its immutable trigger can be reclaimed: the controller requires
+every accepted prepared source to descend from that trigger. Unknown ancestry
+remains protected. Unknown workflow state, a pending manifest upload, an unacknowledged artifact,
+an unfinished remote SSH stage, a dirty/locked checkout, or unknown ownership
+prevents deletion. Each candidate's recorded workflow runs must be terminal.
+Registered Git worktrees must still have the exact source HEAD, a clean checkout,
+and no manual lock. Unknown top-level files are preserved. Worktrees are
+removed through Git before their owned outputs are
+removed. Published depot archives and remote builder stages are not deleted by
+this policy. If safe reclamation cannot make room, hosted fallback remains the
+bounded outcome; the controller does not bypass a lease or raise the cap.
+
+Builders are dispatched by Luna's trusted controller over SSH. Aero does not
+need a resident ScheduledTask and the Mac does not need a public Actions runner.
+Both require unattended, host-key-verified authentication from the controller;
+an interactive SSH session elsewhere does not establish that capability.

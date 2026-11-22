@@ -5,6 +5,8 @@ Suitable for a user timer. Reads GitHub metadata only; no workflow dispatch,
 publication, fleet setup, or long-lived polling process.
 """
 import argparse
+import hashlib
+import shutil
 from contextlib import contextmanager
 import importlib.util
 import json
@@ -106,6 +108,125 @@ def locked(state):
         yield True
 
 
+def source_directories(state):
+    return [p for p in state.iterdir() if re.fullmatch('[a-f0-9]{40}', p.name)]
+
+
+def source_size(folder):
+    return sum(p.stat().st_size for p in folder.rglob('*')
+               if p.is_file() and not p.is_symlink())
+
+
+def retention_busy(folder):
+    # Unknown ownership, unfinished remote leases and unacknowledged published
+    # artifacts remain recoverable. Never erase their only recovery record.
+    if folder.is_symlink() or folder.stat().st_uid != os.getuid() or folder.stat().st_mode & 0o022:
+        return True
+    if any(p.name not in ('repo','outputs','core-validation-outputs') for p in folder.iterdir()):
+        return True
+    for outputs in (folder/'outputs', folder/'core-validation-outputs'):
+        if not outputs.exists():
+            continue
+        if outputs.is_symlink() or (outputs/'manifest.pending.json').exists():
+            return True
+        for record in outputs.glob('*/components.ssh.json'):
+            if record.is_symlink() or json.loads(record.read_text()).get('cleanup_pending') is not False:
+                return True
+        manifest = outputs/'manifest.json'
+        if manifest.exists():
+            data = manifest.read_bytes()
+            if json.loads(data).get('targets'):
+                acknowledgement = outputs/'manifest-uploaded.sha256'
+                if (not acknowledgement.is_file() or acknowledgement.is_symlink()
+                        or acknowledgement.read_text() != hashlib.sha256(data).hexdigest()):
+                    return True
+    return False
+
+
+def prune_finished_sources(root, repository, branch, state, checkpoint, protected, execute=False, keep=4):
+    """Called under controller.lock, only at capacity; fail closed on unknown state.
+
+    Depot files are separate immutable copies and are never touched here.
+    Remote stages must already have explicit cleanup acknowledgements.
+    """
+    folders = sorted(source_directories(state), key=lambda p: p.stat().st_mtime, reverse=True)
+    protected = set(protected) | {p.name for p in folders[:keep]}
+    # Include older still-active workflows, not merely the last ten releases.
+    runs = []
+    for status in ('in_progress', 'queued', 'waiting', 'pending', 'requested'):
+        active = gh(repository, '/actions/runs?branch='+branch+'&status='+status+'&per_page=100').get('workflow_runs')
+        if not isinstance(active, list) or len(active) >= 100:
+            return {'removed': [], 'reason': 'unknown_active_runs'}
+        runs.extend(active)
+    for run in runs:
+        if (run.get('status') == 'completed' or run.get('head_branch') != branch
+                or run.get('path') not in ('.github/workflows/continuous-release.yml', '.github/workflows/agent-platforms.yml')):
+            continue
+        if (run.get('head_repository') or {}).get('full_name') != repository:
+            return {'removed': [], 'reason': 'unknown_active_owner'}
+        artifacts = gh(repository, '/actions/runs/'+str(run['id'])+'/artifacts?name=native-build-request&per_page=10').get('artifacts', [])
+        if not artifacts:
+            # Before request publication, the controller only accepts sources
+            # descended from this immutable trigger. Older unrelated sources
+            # therefore cannot be consumed by that run. Unknown ancestry stays.
+            head = run.get('head_sha', '')
+            if not re.fullmatch('[a-f0-9]{40}', head):
+                return {'removed': [], 'reason': 'unknown_active_source', 'run_id':run.get('id')}
+            for folder in folders:
+                try:
+                    git(root, 'merge-base', '--is-ancestor', head, folder.name)
+                    protected.add(folder.name)
+                except subprocess.CalledProcessError as error:
+                    if error.returncode != 1:
+                        protected.add(folder.name)
+            continue
+        if len(artifacts) >= 10:
+            return {'removed': [], 'reason': 'unknown_active_source', 'run_id':run.get('id')}
+        for artifact in artifacts:
+            protected.add(read_request(repository, artifact, run)['source_revision'])
+    registrations = {}
+    for block in git(root, 'worktree', 'list', '--porcelain').split('\n\n'):
+        fields = dict(line.split(' ', 1) if ' ' in line else (line, '') for line in block.splitlines())
+        if 'worktree' in fields:
+            registrations[str(Path(fields['worktree']).resolve())] = fields
+    removed = []
+    for folder in reversed(folders):
+        source = folder.name
+        if source in protected or retention_busy(folder):
+            continue
+        records = [value for key, value in checkpoint['sources'].items() if key.split(':', 1)[0] == source]
+        if not records or any(type(row.get('run_id')) is not int for row in records):
+            continue
+        terminal = True
+        for run_id in {row['run_id'] for row in records}:
+            run = gh(repository, '/actions/runs/'+str(run_id))
+            if run.get('id') != run_id or run.get('status') != 'completed':
+                terminal = False
+                break
+        if not terminal:
+            continue
+        checkout = folder/'repo'
+        if checkout.is_symlink():
+            continue
+        # A dirty or manually locked checkout is not disposable build state.
+        if checkout.exists():
+            registration = registrations.get(str(checkout.resolve()), {})
+            if (registration.get('HEAD') != source or 'locked' in registration
+                    or git(checkout, 'rev-parse', 'HEAD') != source
+                    or git(checkout, 'status', '--porcelain')):
+                continue
+        removed.append(source)
+        if execute:
+            if checkout.exists():
+                git(root, 'worktree', 'remove', str(checkout))
+            shutil.rmtree(folder)
+        # Make room for the incoming source without clearing the whole cache.
+        remaining = [p for p in folders if p.name not in removed]
+        if len(remaining) < 12 and sum(source_size(p) for p in remaining) < 4*1024**3:
+            break
+    return {'removed': removed, 'execute': execute}
+
+
 def run_once(root,repository,branch,config_path,state):
     if not re.fullmatch(r'[\w.-]+/[\w.-]+',repository) or not re.fullmatch(r'[\w./-]+',branch):
         raise ValueError('Explicit trusted repository and branch required')
@@ -144,10 +265,16 @@ def run_once(root,repository,branch,config_path,state):
             owned=state/source
             if not owned.exists():
                 # Refuse growth rather than deleting a potentially active source.
-                retained=[p for p in state.iterdir() if re.fullmatch('[a-f0-9]{40}',p.name)]
-                size=sum(p.stat().st_size for folder in retained for p in folder.rglob('*') if p.is_file() and not p.is_symlink())
+                retained=source_directories(state)
+                size=sum(source_size(folder) for folder in retained)
                 if len(retained)>=12 or size>=4*1024**3:
-                    return {'status':'state_cap_reached_github_fallback'}
+                    try:
+                        cleanup=prune_finished_sources(root,repository,branch,state,current,{source},execute=True)
+                    except (OSError,ValueError,KeyError,subprocess.SubprocessError):
+                        return {'status':'state_cap_reached_github_fallback','cleanup':'unavailable'}
+                    retained=source_directories(state)
+                    if len(retained)>=12 or sum(source_size(folder) for folder in retained)>=4*1024**3:
+                        return {'status':'state_cap_reached_github_fallback','cleanup':cleanup}
                 owned.mkdir(mode=0o700)
             checkout=owned/'repo'
             if not checkout.exists():git(root,'worktree','add','--detach',str(checkout),source)
