@@ -17,7 +17,7 @@ use mongodb::{
     options::IndexOptions,
     IndexModel,
 };
-use porthub_components::metrics::Sample;
+use porthub_components::metrics::{Memory, Sample};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
@@ -260,6 +260,19 @@ struct Range {
 fn default_hours() -> u32 {
     24
 }
+fn mean_capacity<'a>(readings: impl Iterator<Item = &'a Memory>) -> Memory {
+    let (mut used, mut total, mut count) = (0u128, 0u128, 0u128);
+    for reading in readings.filter(|r| r.total > 0) {
+        used += u128::from(reading.used);
+        total += u128::from(reading.total);
+        count += 1;
+    }
+    if count == 0 {
+        return Memory { used: 0, total: 0 };
+    }
+    Memory { used: (used / count) as u64, total: (total / count) as u64 }
+}
+
 async fn history(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -315,20 +328,11 @@ async fn history(
                 .filter_map(|r| sample_from_row(r))
                 .collect();
             if !samples.is_empty() {
-                let n = samples.len() as f64;
                 let cpus:Vec<_>=samples.iter().filter(|s|s.cpu_available).collect();
                 value["sample"]["cpu_available"]=json!(!cpus.is_empty());
                 value["sample"]["cpu"]=if cpus.is_empty(){json!(0)}else{json!(cpus.iter().map(|s|f64::from(s.cpu)).sum::<f64>()/cpus.len() as f64)};
-                for key in ["ram", "disk"] {
-                    let memories: Vec<_> = samples
-                        .iter()
-                        .map(|s| if key == "ram" { &s.ram } else { &s.disk })
-                        .collect();
-                    value["sample"][key]["used"] =
-                        json!((memories.iter().map(|m| m.used as f64).sum::<f64>() / n) as u64);
-                    value["sample"][key]["total"] =
-                        json!((memories.iter().map(|m| m.total as f64).sum::<f64>() / n) as u64);
-                }
+                value["sample"]["ram"] = json!(mean_capacity(samples.iter().map(|s| &s.ram)));
+                value["sample"]["disk"] = json!(mean_capacity(samples.iter().map(|s| &s.disk)));
                 let mut gpu_groups = std::collections::BTreeMap::<String, Vec<&porthub_components::metrics::Gpu>>::new();
                 let mut disk_groups = std::collections::BTreeMap::<String, Vec<&porthub_components::metrics::Disk>>::new();
                 for sample in &samples {
@@ -478,6 +482,19 @@ fn bound_drive_history(history: &mut Vec<Value>, scanned: usize, scan_limit: usi
 #[cfg(test)]
 mod drive_history_tests {
     use super::*;
+
+    #[test]
+    fn missing_capacity_does_not_lower_history_but_empty_drive_counts() {
+        let readings = [
+            Memory { used: 0, total: 0 },
+            Memory { used: 0, total: 100 },
+            Memory { used: 40, total: 100 },
+        ];
+        let mean = mean_capacity(readings.iter());
+        assert_eq!((mean.used, mean.total), (20, 100));
+        let unavailable = mean_capacity(readings[..1].iter());
+        assert_eq!((unavailable.used, unavailable.total), (0, 0));
+    }
 
     #[test]
     fn state_change_storm_keeps_newest_observations_and_reports_truncation() {
