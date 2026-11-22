@@ -7,6 +7,7 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
  try{
   for(const width of [390,1440]){
    const context=await browser.newContext({viewport:{width,height:1000},serviceWorkers:'block'});
+   await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});
    const state=makeDemoData(),machine=state.machines[1],now=Date.now();
    const integrated={id:'integrated',name:'Integrated fixture',integrated:true,utilization:50,memory:null,shared_memory_capacity:8*1024**3,shared_memory:{used:256*1024**2,total:8*1024**3}};
    const discrete={id:'discrete',name:'Discrete fixture',utilization:null,memory:{used:1024**3,total:4*1024**3}};
