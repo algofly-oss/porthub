@@ -498,7 +498,6 @@ impl Runner {
                 match Pin::new(&mut active.pipe).poll_read(cx, &mut buffer) {
                     Poll::Ready(Ok(())) if buffer.filled().is_empty() => {
                         active.eof = true;
-                        socket.close();
                         progress = true;
                     }
                     Poll::Ready(Ok(())) => {
@@ -511,6 +510,14 @@ impl Runner {
                     }
                     Poll::Pending => {}
                 }
+            }
+            // Keep queued DATA in ESTABLISHED/CLOSE-WAIT until it is ACKed.
+            // In LAST-ACK smoltcp challenges duplicate ACKs before processing
+            // their window updates. Closing with pending DATA can therefore
+            // strand its tail behind a previously advertised zero window.
+            if active.eof && socket.send_queue() == 0 && socket.may_send() {
+                socket.close();
+                progress = true;
             }
         }
         for flow in closed {
@@ -601,3 +608,85 @@ mod exit_admission_tests {
 
 /// Experimental origin-tagged native DATA/ACK foundation; no default runtime hookup.
 pub mod tagged;
+
+#[cfg(test)]
+mod half_close_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn unacked_half_close_keeps_data_state_and_cancels_promptly() -> Result<()> {
+        timeout(Duration::from_secs(3), async {
+            let (client, mut client_packets, client_runner) = stack()?;
+            let (server, mut server_packets, mut server_runner) = stack()?;
+            let cancel = CancellationToken::new();
+            let client_task = tokio::spawn(client_runner.run(cancel.clone()));
+            let (state_tx, state_rx) = oneshot::channel();
+            let server_cancel = cancel.clone();
+            let server_task = tokio::spawn(async move {
+                let mut timer = Box::pin(tokio::time::sleep(Duration::from_secs(86400)));
+                let mut state_tx = Some(state_tx);
+                loop {
+                    tokio::select! {
+                        _ = server_cancel.cancelled() => return Ok::<_, anyhow::Error>(()),
+                        result = poll_fn(|cx| server_runner.poll(cx, &mut timer)) => {
+                            if !result? { return Ok(()); }
+                        }
+                    }
+                    for active in server_runner.flows.values() {
+                        let socket = server_runner.sockets.get::<tcp::Socket>(active.handle);
+                        if active.eof && socket.send_queue() > 0 {
+                            if let Some(tx) = state_tx.take() {
+                                let _ = tx.send((socket.state(), socket.send_queue()));
+                            }
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            });
+            let flow = Flow {
+                source: "10.234.249.1:42000".parse()?,
+                destination: "10.234.249.2:443".parse()?,
+            };
+            let connecting = {
+                let client = client.clone();
+                tokio::spawn(async move { client.connect(flow).await })
+            };
+            let syn = client_packets.recv().await.unwrap();
+            let accepting = {
+                let server = server.clone();
+                tokio::spawn(async move { server.accept_syn(syn).await })
+            };
+            client.packet(server_packets.recv().await.unwrap())?;
+            server.packet(client_packets.recv().await.unwrap())?;
+            let mut client_app = connecting.await??;
+            let (_, mut server_app) = accepting.await??;
+            // Deliver the opening client's FIN and its ACK normally.
+            client_app.shutdown().await?;
+            server.packet(client_packets.recv().await.unwrap())?;
+            client.packet(server_packets.recv().await.unwrap())?;
+            let mut empty = Vec::new();
+            server_app.read_to_end(&mut empty).await?;
+            ensure!(empty.is_empty(), "unexpected request data");
+            // No response DATA ACK reaches the server. Application EOF must
+            // not push its still-unacknowledged tail into LAST-ACK.
+            server_app.write_all(&[7; 8192]).await?;
+            server_app.shutdown().await?;
+            let (state, queued) = state_rx.await?;
+            cancel.cancel();
+            timeout(Duration::from_secs(1), client_task).await???;
+            timeout(Duration::from_secs(1), server_task).await???;
+            ensure!(
+                queued > 0 && state == tcp::State::CloseWait,
+                "unacknowledged response entered terminal state: {state:?}"
+            );
+            ensure!(
+                !client.owns(flow) && !server.owns(flow),
+                "cancelled unacknowledged half-close retained native flow"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
+    }
+}

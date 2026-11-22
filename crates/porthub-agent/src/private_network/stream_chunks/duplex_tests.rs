@@ -326,6 +326,14 @@ fn receiver_current(
     Arc::new(move || context.receiver_access(&local, side).ok())
 }
 async fn exercise(revoke: bool, idle_parent: bool) -> Result<()> {
+    exercise_sized(revoke, idle_parent, 2 * CHUNK + 193, 2 * CHUNK + 77).await
+}
+async fn exercise_sized(
+    revoke: bool,
+    idle_parent: bool,
+    request_size: usize,
+    response_size: usize,
+) -> Result<()> {
     let a = Identity::new()?;
     let b = Identity::new()?;
     let ap = Peer {
@@ -533,20 +541,36 @@ async fn exercise(revoke: bool, idle_parent: bool) -> Result<()> {
                 return Ok::<_, anyhow::Error>(());
             }
             eprintln!("app-a write request");
-            let request_body = vec![3; 2 * CHUNK + 193];
-            na.app.write_all(&request_body).await?;
-            na.app.shutdown().await?;
+            let request_body = vec![3; request_size];
             let mut request = Vec::new();
             eprintln!("app-b wait request EOF");
-            nb.app.read_to_end(&mut request).await?;
+            tokio::try_join!(
+                async {
+                    na.app.write_all(&request_body).await?;
+                    na.app.shutdown().await?;
+                    Ok::<_, anyhow::Error>(())
+                },
+                async {
+                    nb.app.read_to_end(&mut request).await?;
+                    Ok::<_, anyhow::Error>(())
+                }
+            )?;
             eprintln!("app-b request EOF");
             ensure!(request == request_body, "native request differs");
-            let response_body = vec![7; 2 * CHUNK + 77];
-            nb.app.write_all(&response_body).await?;
-            nb.app.shutdown().await?;
+            let response_body = vec![7; response_size];
             let mut response = Vec::new();
             eprintln!("app-a wait response EOF");
-            na.app.read_to_end(&mut response).await?;
+            tokio::try_join!(
+                async {
+                    nb.app.write_all(&response_body).await?;
+                    nb.app.shutdown().await?;
+                    Ok::<_, anyhow::Error>(())
+                },
+                async {
+                    na.app.read_to_end(&mut response).await?;
+                    Ok::<_, anyhow::Error>(())
+                }
+            )?;
             eprintln!("app-a response EOF");
             ensure!(response == response_body, "native response differs");
             let (mut da, ra) = ta.await?;
@@ -615,4 +639,9 @@ async fn actual_native_source_revoke_while_remote_native_ack_blocked_cannot_publ
 async fn actual_idle_native_source_parent_revocation_is_synchronous_without_transport_traffic(
 ) -> Result<()> {
     exercise(false, true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_native_halfclose_preserves_reverse_tail_and_fin() -> Result<()> {
+    exercise_sized(false, false, 32 * CHUNK + 77, 32 * CHUNK + 193).await
 }
