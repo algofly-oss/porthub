@@ -450,6 +450,16 @@ jobs:
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib windows_path_tests --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib usb::windows_drivers::installer_path_tests --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test windows_bootstrap --target ${{ matrix.target }} -- --include-ignored --test-threads=1
+      - name: Verify Windows service recovery on a disposable SCM entry
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        env:
+          PORTHUB_TEST_SCM_RECOVERY: owned-never-started-service
+        run: |
+          case=service::windows_recovery::native::tests::actual_scm_policy_reconciles_without_starting_a_service
+          cargo test --locked -p porthub-agent --lib --target ${{ matrix.target }} -- --list > "$RUNNER_TEMP/porthub-scm-tests.txt"
+          grep -Fx "$case: test" "$RUNNER_TEMP/porthub-scm-tests.txt"
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib --target ${{ matrix.target }} -- "$case" --exact --ignored
       - name: Verify protected Windows native adapter route lifecycle
         if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: bash
