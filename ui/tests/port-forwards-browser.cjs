@@ -210,12 +210,18 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .click();
-      const command = page.getByRole("textbox", {
-        name: "SSH command",
-        exact: true,
-      });
+      const command = page.getByLabel("SSH command", { exact: true });
       await command.waitFor();
-      assert.equal(await command.inputValue(), cleanCommand);
+      assert.equal(await command.textContent(), cleanCommand);
+      assert.equal(
+        await command.evaluate(
+          (element) =>
+            element.scrollWidth <= element.clientWidth &&
+            element.scrollHeight <= element.clientHeight,
+        ),
+        true,
+        "Complete clean command fits without clipping",
+      );
       await page.getByText("Not published", { exact: true }).waitFor();
       assert.equal(
         await page.getByText("test.phub:24000", { exact: true }).count(),
@@ -278,7 +284,7 @@ async function choose(page, label, option) {
         .getByRole("form", { name: "Edit access for Port 22", exact: true })
         .waitFor({ state: "hidden" });
       await page.getByText("gateway.example:24000", { exact: true }).waitFor();
-      assert.equal(await command.inputValue(), cleanCommand);
+      assert.equal(await command.textContent(), cleanCommand);
       assert.equal(creates, 1);
       assert.equal(reveals, 1);
       await shot("public");
@@ -364,7 +370,7 @@ async function choose(page, label, option) {
       assert.equal(creates, 1);
       assert.equal(reveals, 1);
       assert.equal(updates, 4);
-      assert.equal(await command.inputValue(), cleanCommand);
+      assert.equal(await command.textContent(), cleanCommand);
       await page
         .getByRole("button", { name: "Delete Port 22", exact: true })
         .click();
@@ -413,9 +419,7 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .click();
-      await page
-        .getByRole("textbox", { name: "SSH command", exact: true })
-        .waitFor();
+      await page.getByLabel("SSH command", { exact: true }).waitFor();
       await page
         .getByText("Advanced: self-contained command", { exact: true })
         .click();

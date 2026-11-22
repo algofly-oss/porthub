@@ -80,15 +80,16 @@ function Commands({ credentials }) {
         Download and extract the SSH profile into a private folder, then run
         this command from that folder.
       </p>
-      <label className={label}>
-        SSH command
-        <input
-          className={`${field} font-mono text-xs`}
+      <div>
+        <p className={label}>SSH command</p>
+        <pre
           aria-label="SSH command"
-          readOnly
-          value={forwardProfileCommand}
-        />
-      </label>
+          tabIndex={0}
+          className="mt-1 min-w-0 select-text whitespace-pre-wrap break-words rounded-lg border border-input bg-background px-3 py-3 font-mono text-xs leading-5 text-foreground focus-visible:outline-primary"
+        >
+          {forwardProfileCommand}
+        </pre>
+      </div>
       <div className="flex flex-wrap gap-2">
         <Button
           size="sm"
