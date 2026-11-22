@@ -26,6 +26,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/port-forwards", get(list).post(create))
         .route("/api/port-forwards/{id}", axum::routing::delete(remove))
+        .route("/api/port-forwards/{id}/audience", axum::routing::put(update_audience))
         .route(
             "/api/port-forwards/{id}/credentials",
             axum::routing::post(reveal),
@@ -133,11 +134,6 @@ fn validate(input: &NewEntry) -> ApiResult<()> {
             "Exposure applies only to ports shared from this computer.",
         ));
     }
-    if !remote.is_empty() && !input.public && !selected {
-        return Err(ApiError::bad_request(
-            "Choose a machine or group allowed to reach the private forward.",
-        ));
-    }
     if input.public && selected {
         return Err(ApiError::bad_request(
             "Public forwards cannot restrict access by private machine or group.",
@@ -179,6 +175,7 @@ async fn choices(app: &App, owner: ObjectId, collection: &str) -> ApiResult<Vec<
 }
 fn summary(row: &Document) -> Value {
     json!({"id":store::id(row.get("_id")), "name":store::string(row,"name"), "public":row.get_bool("public").unwrap_or(false),
+        "published":row.get_bool("public").unwrap_or(false) || row.get_array("machine_ids").is_ok_and(|v| !v.is_empty()) || row.get_array("group_ids").is_ok_and(|v| !v.is_empty()),
         "mappings":store::field(row,"mappings"), "machineIds":store::field(row,"machine_ids"), "groupIds":store::field(row,"group_ids")})
 }
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
@@ -312,6 +309,78 @@ async fn create(
     Ok(Json(json!({"id":id.to_hex()})))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Audience {
+    public: bool,
+    #[serde(default)]
+    machine_ids: Vec<String>,
+    #[serde(default)]
+    group_ids: Vec<String>,
+}
+
+async fn update_audience(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<Audience>,
+) -> ApiResult<Json<Value>> {
+    let owner = owner(&app, &headers, Method::PUT).await?;
+    let id = object_id(&id, "Invalid forward.")?;
+    let clients = ids(&input.machine_ids)?;
+    let groups = ids(&input.group_ids)?;
+    if input.public && (!clients.is_empty() || !groups.is_empty()) {
+        return Err(ApiError::bad_request("Public forwards cannot restrict access by private machine or group."));
+    }
+    // Serialize with creation/deletion; no credentials or mapping fields are writable.
+    let _guard = app.connection_lock.lock().await;
+    let filter = doc! {"_id":id,"workspace_id":owner,"state":"active"};
+    let row = app.collection(COLLECTION).find_one(filter.clone()).await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Forward not found."))?;
+    check_inventory(&app, "machines", owner, &clients).await?;
+    check_inventory(&app, "machine_groups", owner, &groups).await?;
+
+    let remote = row.get_array("mappings").is_ok_and(|items| items.iter().any(|m|
+        m.as_document().is_some_and(|m| m.get_str("direction") == Ok("remote"))));
+    if !remote && (input.public || !clients.is_empty() || !groups.is_empty()) {
+        return Err(ApiError::bad_request("Exposure applies only to ports shared from this computer."));
+    }
+    let same_ids = |key: &str, expected: &[ObjectId]| {
+        row.get_array(key).ok().and_then(|items| items.iter()
+            .map(|item| item.as_object_id()).collect::<Option<HashSet<_>>>())
+            == Some(expected.iter().copied().collect())
+    };
+    if row.get_bool("audience_cleanup_pending") != Ok(true)
+        && row.get_bool("public") == Ok(input.public)
+        && same_ids("machine_ids", &clients) && same_ids("group_ids", &groups)
+    {
+        return Ok(Json(json!({"id":id.to_hex()})));
+    }
+    // Withdraw before touching listeners. A reconciliation failure leaves an
+    // unpublished entry with its original credentials and reserved port intact.
+    app.collection(COLLECTION).update_one(filter.clone(), doc!{"$set":{
+        "public":false,"machine_ids":[],"group_ids":[],
+        "audience_cleanup_pending":row.get_bool("public")==Ok(true) || row.get_bool("audience_cleanup_pending")==Ok(true)}}).await?;
+    crate::port_forward_bridge::withdraw_audience(&app, owner, id, &row)
+        .await.map_err(unavailable)?;
+    let changed = app.collection(COLLECTION).update_one(filter.clone(), doc!{"$set":{
+        "public":input.public,"machine_ids":clients,"group_ids":groups},"$unset":{"audience_cleanup_pending":""}}).await?;
+    if changed.matched_count == 0 {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "Forward not found."));
+    }
+    if let Err(error) = crate::port_forward_bridge::activate(&app, owner, id).await {
+        app.collection(COLLECTION).update_one(filter, doc!{"$set":{
+            "public":false,"machine_ids":[],"group_ids":[],"audience_cleanup_pending":input.public}}).await?;
+        crate::port_forward_bridge::withdraw_audience(&app, owner, id,
+            &doc!{"public":input.public,"mappings":row.get_array("mappings").cloned().unwrap_or_default()})
+            .await.map_err(unavailable)?;
+        app.collection(COLLECTION).update_one(doc!{"_id":id,"workspace_id":owner},
+            doc!{"$unset":{"audience_cleanup_pending":""}}).await?;
+        return Err(unavailable(error));
+    }
+    Ok(Json(json!({"id":id.to_hex()})))
+}
+
 async fn reveal(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -364,6 +433,26 @@ async fn remove(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let owner = owner(&app, &headers, Method::DELETE).await?;
+    let _guard = app.connection_lock.lock().await;
     retire(&app, owner, object_id(&id, "Invalid forward.")?).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpublished_remote_mapping_and_audience_edit_contract() {
+        let entry: NewEntry = serde_json::from_value(json!({
+            "name":"Unpublished", "mappings":[{"direction":"remote","clientPort":22}]
+        })).unwrap();
+        assert!(validate(&entry).is_ok());
+        assert!(serde_json::from_value::<Audience>(json!({
+            "public":false,"gatewayPort":1234
+        })).is_err());
+        assert!(serde_json::from_value::<Audience>(json!({
+            "public":false,"mappings":[]
+        })).is_err());
+    }
 }

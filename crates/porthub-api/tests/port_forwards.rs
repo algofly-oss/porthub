@@ -33,13 +33,13 @@ async fn owner_can_recopy_and_revoke_a_private_forward_across_restarts() -> Resu
         ensure!(response.0.is_client_error());
         let response=case.call("POST",api,&cookie,input.clone(),&[("origin","https://another.invalid")]).await?;
         ensure!(response.0==StatusCode::FORBIDDEN);
-        let mut invalid=input.clone();invalid["machineIds"]=json!([]);
-        case.status("POST",api,&cookie,invalid,StatusCode::BAD_REQUEST).await?;
+
         let mut invalid=input.clone();invalid["machineIds"]=json!([outsider.to_hex()]);
         case.status("POST",api,&cookie,invalid,StatusCode::BAD_REQUEST).await?;
         let mut invalid=input.clone();invalid["mappings"]=json!([{"direction":"local","machineId":outsider.to_hex(),"clientPort":23000,"servicePort":22}]);invalid["machineIds"]=json!([]);
         case.status("POST",api,&cookie,invalid,StatusCode::BAD_REQUEST).await?;
-        let created=case.status("POST",api,&cookie,input.clone(),StatusCode::OK).await?;
+        let mut isolated=input.clone(); isolated["machineIds"]=json!([]);
+        let created=case.status("POST",api,&cookie,isolated,StatusCode::OK).await?;
         let id=created["id"].as_str().context("missing new entry")?;
         let item=format!("{api}/{id}");
         let reveal=format!("{item}/credentials");
@@ -49,10 +49,21 @@ async fn owner_can_recopy_and_revoke_a_private_forward_across_restarts() -> Resu
         ensure!(headers["cache-control"].to_str()?.contains("no-store"));
         ensure!(first["privateKey"].as_str().is_some_and(|v|v.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")));
         ensure!(first["mappings"][0]["gatewayPort"]==41201 && first["username"]==format!("pf-{id}"));
+        let audience=format!("{item}/audience");
+        let isolated=case.status("GET",api,&cookie,Value::Null,StatusCode::OK).await?;
+        ensure!(isolated["entries"][0]["published"]==false);
+        ensure!(isolated["entries"][0]["machineIds"].as_array().unwrap().is_empty());
+        case.status("PUT",&audience,&other,json!({"public":false,"machineIds":[machine.to_hex()]}),StatusCode::NOT_FOUND).await?;
+        case.status("PUT",&audience,&cookie,json!({"public":false,"machineIds":[outsider.to_hex()]}),StatusCode::BAD_REQUEST).await?;
+        case.status("PUT",&audience,&cookie,json!({"public":true,"machineIds":[machine.to_hex()]}),StatusCode::BAD_REQUEST).await?;
+
+        case.status("PUT",&audience,&cookie,json!({"public":false,"machineIds":[machine.to_hex()]}),StatusCode::OK).await?;
+        let after=case.status("POST",&reveal,&cookie,Value::Null,StatusCode::OK).await?;
+        ensure!(after==first, "Audience update changed SSH credentials or mappings");
         let listed=case.status("GET",api,&cookie,Value::Null,StatusCode::OK).await?;
         ensure!(listed["entries"].as_array().unwrap().len()==1);
         ensure!(listed["machines"].as_array().unwrap().len()==1 && !listed.to_string().contains("PRIVATE KEY"));
-        ensure!(listed["entries"][0]["public"]==false);
+        ensure!(listed["entries"][0]["public"]==false && listed["entries"][0]["published"]==true);
         let row=case.app.collection(COLLECTION).find_one(doc!{"_id":ObjectId::parse_str(id)?}).await?.unwrap();
         ensure!(row.get_str("public_key")?.starts_with("ssh-ed25519 ") && !row.to_string().contains("PRIVATE KEY"));
         // A fresh API process opens the same master and database. Recopying a
@@ -61,8 +72,25 @@ async fn owner_can_recopy_and_revoke_a_private_forward_across_restarts() -> Resu
         let restart=Case{router:porthub_api::router(fresh.clone()),app:fresh,db:case.db.clone()};
         let second=restart.status("POST",&reveal,&cookie,Value::Null,StatusCode::OK).await?;
         ensure!(first==second);
+        case.status("PUT",&audience,&cookie,json!({"public":false}),StatusCode::OK).await?;
+        let unpublished=case.status("GET",api,&cookie,Value::Null,StatusCode::OK).await?;
+        ensure!(unpublished["entries"][0]["published"]==false);
+        ensure!(case.status("POST",&reveal,&cookie,Value::Null,StatusCode::OK).await?==first);
         case.status("POST",api,&cookie,input,StatusCode::CONFLICT).await?;
         ensure!(case.app.collection(COLLECTION).count_documents(doc!{}).await?==1);
+        // No edge is configured in this fixture: failed public publication
+        // must leave the command reusable and every audience withdrawn.
+        case.status("PUT",&audience,&cookie,json!({"public":true}),StatusCode::SERVICE_UNAVAILABLE).await?;
+        let failed=case.status("GET",api,&cookie,Value::Null,StatusCode::OK).await?;
+        ensure!(failed["entries"][0]["published"]==false);
+        ensure!(case.status("POST",&reveal,&cookie,Value::Null,StatusCode::OK).await?==first);
+        // A retry cannot forget uncertain public cleanup just because the
+        // durable audience was already withdrawn by the failed request.
+        case.status("PUT",&audience,&cookie,json!({"public":false}),StatusCode::SERVICE_UNAVAILABLE).await?;
+        let pending=case.app.collection(COLLECTION).find_one(doc!{"_id":ObjectId::parse_str(id)?}).await?.unwrap();
+        ensure!(pending.get_bool("audience_cleanup_pending")==Ok(true));
+        // This fixture never had an edge; simulate completed cleanup before deletion.
+        case.app.collection(COLLECTION).update_one(doc!{"_id":ObjectId::parse_str(id)?},doc!{"$unset":{"audience_cleanup_pending":""}}).await?;
         case.status("DELETE",&item,&cookie,Value::Null,StatusCode::NO_CONTENT).await?;
         case.status("POST",&reveal,&cookie,Value::Null,StatusCode::NOT_FOUND).await?;
         ensure!(case.app.collection("connections").count_documents(doc!{}).await?==1);

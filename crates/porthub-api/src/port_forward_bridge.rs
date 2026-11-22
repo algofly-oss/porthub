@@ -355,6 +355,25 @@ pub async fn activate(app: &Arc<App>, owner: ObjectId, id: ObjectId) -> Result<(
     private::signal(app, owner);
     Ok(())
 }
+/// Close only audience-facing resources; SSH identity and port reservations survive.
+pub(crate) async fn withdraw_audience(app: &App, owner: ObjectId, id: ObjectId, old: &Document) -> Result<()> {
+    let _provision = app.forward_bridge.changes.lock().await;
+    private::signal(app, owner);
+    app.forward_bridge.workers().retain(|(entry, _), worker| {
+        if *entry == id { worker.stop.cancel(); false } else { true }
+    });
+    if old.get_bool("public") == Ok(true) || old.get_bool("audience_cleanup_pending") == Ok(true) {
+        edge(app).await?.delete(format!("{BASE}/public/{id}"))
+            .timeout(Duration::from_secs(3)).send().await?.error_for_status()?;
+        for mapping in mappings(old)? {
+            if mapping.get_str("direction") == Ok("remote") {
+                policy(app, number(mapping, "gatewayPort")?, false).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn deactivate(app: &App, owner: ObjectId, id: ObjectId) -> Result<()> {
     let _provision = app.forward_bridge.changes.lock().await;
     let row = app
@@ -371,7 +390,7 @@ pub async fn deactivate(app: &App, owner: ObjectId, id: ObjectId) -> Result<()> 
         }
     });
     if let Some(row) = row {
-        if row.get_bool("public") == Ok(true) {
+        if row.get_bool("public") == Ok(true) || row.get_bool("audience_cleanup_pending") == Ok(true) {
             edge(app)
                 .await?
                 .delete(format!("{BASE}/public/{id}"))
@@ -427,15 +446,20 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
                 .is_some_and(|worker| worker.ready.load(std::sync::atomic::Ordering::Acquire))
         })
     };
-    let ready = attached && edge_ready;
-    let reason = if !edge_ready {
+    let selected = row.get_array("machine_ids").is_ok_and(|v| !v.is_empty())
+        || row.get_array("group_ids").is_ok_and(|v| !v.is_empty());
+    let unpublished = !ports.is_empty() && !public && !selected;
+    let ready = attached && edge_ready && !unpublished;
+    let reason = if unpublished {
+        Some("Choose an audience to publish this forward")
+    } else if !edge_ready {
         Some("Waiting for the public gateway listener")
     } else if !attached {
         Some("Waiting for the saved SSH command to connect")
     } else {
         None
     };
-    let private_host = if !public && !ports.is_empty() {
+    let private_host = if !public && selected && !ports.is_empty() {
         Some(format!("{id}.forwards.{suffix}"))
     } else {
         None
@@ -535,6 +559,21 @@ async fn reap(app: &Arc<App>) -> Result<()> {
     Ok(())
 }
 async fn recover_public(app: &Arc<App>) -> Result<()> {
+    // A failed audience withdrawal remains durable across retries/restarts.
+    let pending: Vec<Document> = app.collection(COLLECTION)
+        .find(doc!{"state":"active","audience_cleanup_pending":true})
+        .limit(256).await?.try_collect().await?;
+    for candidate in pending {
+        let _connection = app.connection_lock.lock().await;
+        let id = candidate.get_object_id("_id")?;
+        if let Some(row) = app.collection(COLLECTION)
+            .find_one(doc!{"_id":id,"state":"active","audience_cleanup_pending":true}).await? {
+            withdraw_audience(app,row.get_object_id("workspace_id")?,id,&row).await?;
+            app.collection(COLLECTION).update_one(doc!{"_id":id},
+                doc!{"$unset":{"audience_cleanup_pending":""}}).await?;
+        }
+    }
+
     let mut rows = app
         .collection(COLLECTION)
         .find(doc! {"state":"active","public":true})
@@ -667,6 +706,19 @@ mod recovery_tests {
             http.delete(format!("{BASE}/public/{id}")).send().await?.error_for_status()?;
             assert!(list().await?.is_empty());
             recover_public(&app).await?;assert_eq!(list().await?,vec![(id.to_hex(),port)]);
+            // Audience withdrawal closes the actual public listener while
+            // retaining the exact reservation and durable SSH mapping.
+            let old = app.collection(COLLECTION).find_one(doc!{"_id":id}).await?.unwrap();
+            app.collection(COLLECTION).update_one(doc!{"_id":id},doc!{"$set":{"public":false,"machine_ids":[],"group_ids":[],"audience_cleanup_pending":true}}).await?;
+            let _ = old;
+            recover_public(&app).await?;
+            assert!(app.collection(COLLECTION).find_one(doc!{"_id":id}).await?.unwrap().get("audience_cleanup_pending").is_none());
+            assert!(list().await?.is_empty());
+            assert!(TcpListener::bind(("0.0.0.0",port)).await.is_ok());
+            assert_eq!(app.collection("connections").count_documents(doc!{"forward_reservation":id}).await?,1);
+            app.collection(COLLECTION).update_one(doc!{"_id":id},doc!{"$set":{"public":true}}).await?;
+            recover_public(&app).await?;
+            assert_eq!(list().await?,vec![(id.to_hex(),port)]);
             app.collection(COLLECTION).insert_one(doc!{"_id":stale,"workspace_id":owner,"state":"provisioning","public":false,"created_at":DateTime::from_millis(0)}).await?;
             for (n,entry) in [(31003,orphan),(31004,stale)] {
                 app.collection("connections").insert_one(doc!{"forward_owner":owner,"forward_reservation":entry,"external_port":n,"enabled":false}).await?;
