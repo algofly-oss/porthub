@@ -275,6 +275,17 @@ async function choose(page, label, option) {
         await page.evaluate(() => window.testClipboard),
         cleanCommand,
       );
+      const layout = await page.evaluate(() => {
+        const panel = document.getElementById("transfer-panel").getBoundingClientRect();
+        const footer = document.querySelector('footer[aria-label="Forwards pagination"]').getBoundingClientRect();
+        const table = document.querySelector('table[aria-label="Saved port forwards"]').getBoundingClientRect();
+        return {
+          fullWidth: Math.abs(table.width - panel.width) < 3,
+          footerAtBottom: Math.abs(footer.bottom - panel.bottom) < 3,
+          footerWidth: Math.abs(footer.width - panel.width) < 3,
+        };
+      });
+      assert.deepEqual(layout, { fullWidth: true, footerAtBottom: true, footerWidth: true });
       await shot("isolated-command");
       await page
         .getByRole("button", { name: "Edit access", exact: true })

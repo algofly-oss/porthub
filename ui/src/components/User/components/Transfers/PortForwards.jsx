@@ -656,7 +656,7 @@ export default function PortForwards() {
   const demo = useDemo();
   if (demo)
     return (
-      <div className="space-y-3">
+      <div className="space-y-3 p-4 sm:p-5">
         <h2 className="text-base font-semibold">Port forwards</h2>
         <p className="text-sm text-muted-foreground">
           Sign in to create SSH credentials for your machines.
@@ -753,8 +753,8 @@ function SavedForwards() {
     }
   }
   return (
-    <div className="min-w-0">
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+    <div className={data?.entries.length && !building ? "flex min-h-0 w-full flex-1 flex-col" : "w-full p-4 sm:p-5"}>
+      <div className={`flex shrink-0 flex-wrap items-start justify-between gap-3 ${data?.entries.length && !building ? "px-3 pt-3 sm:px-4" : "mb-5"}`}>
         <div>
           <h2 className="text-base font-semibold">
             {building || data?.entries.length === 0 ? "New port forward" : "Port forwards"}
@@ -817,14 +817,15 @@ function SavedForwards() {
             }}
           />
         ) : (
-          <div>
-            <input type="search" aria-label="Search forwards" placeholder="Search by name or port" value={search}
+          <div className="flex min-h-0 w-full flex-1 flex-col">
+            <div className="shrink-0 px-3 py-3 sm:px-4"><input type="search" aria-label="Search forwards" placeholder="Search by name or port" value={search}
               onChange={event => { setSearch(event.target.value); setPage(1); }}
-              className={field + " mb-3 sm:max-w-xs"} />
+              className={field} /></div>
+            <div className="data-scroll">
             <table aria-label="Saved port forwards" className="block w-full text-left text-sm sm:table">
               <thead className="hidden border-y border-border text-xs text-muted-foreground sm:table-header-group">
                 <tr>{["Profile", "SSH client", "Actions"].map(heading =>
-                  <th key={heading} scope="col" className="px-2 py-2 font-medium">{heading}</th>)}</tr>
+                  <th key={heading} scope="col" className={heading === "Actions" ? "px-3 py-2 text-right font-medium" : "px-3 py-2 font-medium"}>{heading}</th>)}</tr>
               </thead>
               <tbody className="block sm:table-row-group">
               {!matches.length && <tr><td colSpan={3} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
@@ -843,7 +844,7 @@ function SavedForwards() {
                     </span>
                     {entry.status?.reason && <p className="mt-1 text-xs text-muted-foreground">{entry.status.reason}</p>}
                   </td>
-                  <td className="block px-2 pb-2 align-top sm:table-cell sm:pt-2"><div className="flex flex-wrap gap-1">
+                  <td className="block px-2 pb-2 align-top sm:table-cell sm:pt-2"><div className="flex flex-wrap gap-1 sm:justify-end">
                     <Button
                       variant="outline"
                       size="sm"
@@ -928,6 +929,7 @@ function SavedForwards() {
               })}
               </tbody>
             </table>
+            </div>
             <ResultsPagination noun="Forwards" count={matches.length} page={current} pages={pages} pageSize={pageSize}
               onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
           </div>
