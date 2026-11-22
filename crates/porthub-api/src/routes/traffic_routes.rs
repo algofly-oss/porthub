@@ -56,6 +56,9 @@ async fn ensure_index(app: &App) -> ApiResult<()> {
     Ok(())
 }
 async fn conflicts(app: &App, hosts: &[String], exclude: Option<ObjectId>) -> ApiResult<()> {
+    for host in hosts {
+        crate::port_forward_auth::check_proxy_hostname(app, host)?;
+    }
     let mut filter = doc! {"hosts":{"$in":hosts}};
     if let Some(id) = exclude {
         filter.insert("_id", doc! {"$ne":id});

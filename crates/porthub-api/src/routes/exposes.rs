@@ -156,7 +156,9 @@ async fn create(State(app): State<Arc<App>>, Json(body): Json<Value>) -> ApiResu
                 "Custom proxy domains are not configured",
             ));
         }
-        Some(format!("{label}.{suffix}"))
+        let hostname = format!("{label}.{suffix}");
+        crate::port_forward_auth::check_proxy_hostname(&app, &hostname)?;
+        Some(hostname)
     } else {
         None
     };

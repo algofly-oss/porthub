@@ -25,6 +25,19 @@ impl App {
     }
 }
 
+pub(crate) fn check_proxy_hostname(app: &App, host: &str) -> crate::error::ApiResult<()> {
+    if endpoint(app).is_ok_and(|(gateway, _)| {
+        gateway
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(host.trim_end_matches('.'))
+    }) {
+        return Err(crate::error::ApiError::bad_request(
+            "This hostname is reserved for the SSH forwarding gateway",
+        ));
+    }
+    Ok(())
+}
+
 /// Forwarding clients need a raw, publicly routable TCP endpoint. A TLS origin
 /// explicitly configured by the operator can also carry SSH on this listener.
 pub fn endpoint(app: &App) -> Result<(String, u16)> {
