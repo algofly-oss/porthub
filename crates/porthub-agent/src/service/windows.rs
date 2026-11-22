@@ -182,30 +182,33 @@ impl Manager for Windows {
             && previous.profile==next.profile && previous.user==next.user,
             "Windows service updates must preserve the registered identity");
         let start_type={
-            let Some(owned)=service(previous,ServiceAccess::CHANGE_CONFIG|ServiceAccess::STOP)? else {return Ok(());};
+            let Some(owned)=service(previous,ServiceAccess::CHANGE_CONFIG|ServiceAccess::STOP|ServiceAccess::START)? else {return Ok(());};
             // Keep native SCM handles out of the Send future's await state.
             // Idempotency and rollback may already have the requested image.
-            if verify_owned(next,&owned).is_ok() {return Ok(());}
+            if verify_owned(next,&owned).is_ok() {super::windows_recovery::native::ensure(&owned)?;return Ok(());}
             verify_owned(previous,&owned)?;
             owned.query_config()?.start_type
         };
         self.stop(previous).await?;
-        let owned=service(previous,ServiceAccess::CHANGE_CONFIG)?.context("Windows service disappeared during update")?;
+        let owned=service(previous,ServiceAccess::CHANGE_CONFIG|ServiceAccess::START)?.context("Windows service disappeared during update")?;
         verify_owned(previous,&owned)?;
         owned.change_config(&service_info(next,start_type)?)?;
         verify_owned(next,&owned)?;
+        super::windows_recovery::native::ensure(&owned)?;
         Ok(())
     }
 
     async fn enable(&self, spec: &Spec) -> Result<()> {
-        if with_owned_service(spec, ServiceAccess::CHANGE_CONFIG, |_| Ok(()))?.is_some() {
-            let service = service(spec, ServiceAccess::CHANGE_CONFIG)?
+        if with_owned_service(spec, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START, |_| Ok(()))?.is_some() {
+            let service = service(spec, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?
                 .context("Windows service disappeared")?;
+            verify_owned(spec, &service)?;
             service.change_config(&service_info(spec, ServiceStartType::AutoStart)?)?;
+            super::windows_recovery::native::ensure(&service)?;
         } else {
             let manager =
                 scm(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
-            manager.create_service(
+            let service = manager.create_service(
                 &service_info(spec, ServiceStartType::AutoStart)?,
                 ServiceAccess::QUERY_CONFIG
                     | ServiceAccess::QUERY_STATUS
@@ -214,6 +217,7 @@ impl Manager for Windows {
                     | ServiceAccess::CHANGE_CONFIG
                     | ServiceAccess::DELETE,
             )?;
+            super::windows_recovery::native::ensure(&service)?;
         }
         Ok(())
     }
@@ -230,8 +234,8 @@ impl Manager for Windows {
     async fn start(&self, spec: &Spec) -> Result<()> {
         let Some(current) = with_owned_service(
             spec,
-            ServiceAccess::START | ServiceAccess::QUERY_STATUS,
-            |service| Ok(service.query_status()?.current_state),
+            ServiceAccess::START | ServiceAccess::QUERY_STATUS | ServiceAccess::CHANGE_CONFIG,
+            |service| { super::windows_recovery::native::ensure(service)?; Ok(service.query_status()?.current_state) },
         )?
         else {
             anyhow::bail!("Windows PortHub service is not installed")
@@ -362,6 +366,7 @@ fn run_service() -> Result<()> {
         })?;
         Ok(runtime)
     })();
+    let deliberate_stop = stop.clone();
     let result = match runtime {
         Ok(runtime) => runtime.block_on(async {
             if let Err(error)=crate::windows_update::service_start_recovery(&profile).await {
@@ -378,7 +383,7 @@ fn run_service() -> Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(if result.is_err() { 1 } else { 0 }),
+        exit_code: ServiceExitCode::Win32(super::windows_recovery::exit_code(result.is_err(), deliberate_stop.is_cancelled())),
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,

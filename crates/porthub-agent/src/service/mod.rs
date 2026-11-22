@@ -23,6 +23,8 @@ pub mod systemd;
 pub(crate) mod dashboard;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(any(windows, test))]
+mod windows_recovery;
 #[cfg(windows)]
 pub(crate) mod windows_acl;
 const MARKER: &str = "# Managed by PortHub native agent";
