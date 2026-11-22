@@ -6,6 +6,47 @@ use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 mod support;
 use support::Case;
+// SIGTERM lets Xvfb remove its own socket/lock. Never unlink a replacement
+// display's paths: report leftovers after the bounded kill/reap fallback.
+async fn stop_xvfb(child: &mut tokio::process::Child, display: &str) -> Result<()> {
+    let mut fallback = false;
+    if child.try_wait()?.is_none() {
+        let pid = child.id().context("Xvfb PID absent before shutdown")?;
+        // The unreaped Child owns this PID; do not signal by process name.
+        let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+        let stopped = if sent {
+            match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                Ok(status) => {
+                    status?;
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        if !stopped {
+            fallback = true;
+            child.start_kill()?;
+            tokio::time::timeout(Duration::from_secs(3), child.wait()).await??;
+        }
+    }
+    let number = display
+        .strip_prefix(':')
+        .context("Invalid fixture display")?
+        .parse::<u16>()?;
+    for path in [
+        format!("/tmp/.X11-unix/X{number}"),
+        format!("/tmp/.X{number}-lock"),
+    ] {
+        ensure!(
+            matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "Owned Xvfb path remains after shutdown"
+        );
+    }
+    println!("native_xvfb_cleanup reaped=true socket_absent=true lock_absent=true kill_fallback={fallback}");
+    Ok(())
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires built static UI, Xvfb, Playwright and isolated MongoDB"]
 async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal() -> Result<()> {
@@ -26,6 +67,7 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
         ..Default::default()
     })
     .await?;
+    let mut xvfb: Option<(tokio::process::Child, String)> = None;
     let result:Result<()>=async{
         let(owner,cookie)=case.user("keyboard-browser@example.invalid","admin").await?;let machine=ObjectId::new();let token="isolated-keyboard-native-test-token";
         case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":"Isolated desktop","token":token,"enabled":true}).await?;
@@ -60,9 +102,14 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
         let record=porthub_agent::service::readable::Record{format_version:1,id:id.clone(),machine_id:machine.to_hex(),email:String::new(),gateway:base.clone(),private:false,enabled:true,active:Some(true),state:"running".into(),agent_version:"test".into(),ports:0,route:String::new(),updated_at:1,strategy:Default::default(),strategy_override:false,private_status:None};
         porthub_agent::profile::write_private(&state.with_file_name("status").join(format!("{id}.json")),&serde_json::to_vec(&record)?,false)?;
         let display=std::env::var("PORTHUB_TEST_KEYBOARD_DISPLAY").unwrap_or_else(|_|":199".into());
-        let mut xvfb=tokio::process::Command::new("Xvfb").args([&display,"-screen","0","1440x900x24","-nolisten","tcp"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn()?;
+        let number=display.strip_prefix(':').context("Invalid fixture display")?.parse::<u16>()?;
+        for path in [format!("/tmp/.X11-unix/X{number}"),format!("/tmp/.X{number}-lock")] {
+            ensure!(matches!(std::fs::symlink_metadata(path),Err(error) if error.kind()==std::io::ErrorKind::NotFound),"Fixture display is already occupied");
+        }
+        let child=tokio::process::Command::new("Xvfb").args([&display,"-screen","0","1440x900x24","-nolisten","tcp"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn()?;
+        xvfb=Some((child,display.clone()));
         tokio::time::sleep(Duration::from_millis(300)).await;
-        ensure!(xvfb.try_wait()?.is_none(),"Xvfb did not start");
+        ensure!(xvfb.as_mut().unwrap().0.try_wait()?.is_none(),"Xvfb did not start");
         let executable=PathBuf::from(std::env::var("PORTHUB_TEST_AGENT_EXECUTABLE").context("Set the test CLI binary")?);
         let mut module=tokio::process::Command::new(&executable).args(["keyboard","run","--user","--registration",&id]).env("XDG_CONFIG_HOME",&config).env("XDG_DATA_HOME",&data).env("DISPLAY",&display).env("RUST_BACKTRACE","1").env("RUST_LOG","warn,porthub_agent::keyboard=debug").env_remove("WAYLAND_DISPLAY").kill_on_drop(true).spawn()?;
         tokio::time::timeout(Duration::from_secs(15),async {
@@ -75,8 +122,13 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
         }).await??;
         let project=PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_owned();
         let output=tokio::time::timeout(Duration::from_secs(180),tokio::process::Command::new("node").arg(project.join("ui/tests/keyboard-browser.cjs")).env("PORTHUB_TEST_UI_URL",&base).env("PORTHUB_TEST_BOARD_COOKIE",&cookie).env("PORTHUB_TEST_KEYBOARD_CONFIG",&config).env("PORTHUB_TEST_KEYBOARD_DATA",&data).env("PORTHUB_TEST_KEYBOARD_ID",&id).env("PORTHUB_TEST_AGENT_EXECUTABLE",&executable).env("DISPLAY",&display).kill_on_drop(true).output()).await??;
-        print!("{}",String::from_utf8_lossy(&output.stdout));let _=module.kill().await;let _=xvfb.kill().await;ensure!(output.status.success(),"Browser verification failed: {}",String::from_utf8_lossy(&output.stderr));Ok(())
+        print!("{}",String::from_utf8_lossy(&output.stdout));let _=module.kill().await;ensure!(output.status.success(),"Browser verification failed: {}",String::from_utf8_lossy(&output.stderr));Ok(())
     }.await;
-    case.db.drop().await?;
-    result
+    let cleanup = if let Some((child,display)) = &mut xvfb { stop_xvfb(child,display).await } else { Ok(()) };
+    if let Err(error) = &cleanup { eprintln!("native_xvfb_cleanup failed: {error}"); }
+    let database_cleanup = case.db.drop().await;
+    result?;
+    cleanup?;
+    database_cleanup?;
+    Ok(())
 }
