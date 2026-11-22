@@ -51,7 +51,7 @@ async function request(suffix = "", method = "GET", body, signal) {
   return data;
 }
 
-function Commands({ credentials }) {
+function Commands({ credentials, profileName }) {
   const [downloadError, setDownloadError] = useState("");
   const [client, setClient] = useState(() =>
     navigator.userAgent.includes("Windows") ? "powershell" : "openssh",
@@ -95,7 +95,7 @@ function Commands({ credentials }) {
           size="sm"
           onClick={async () => {
             try {
-              await downloadForwardProfile(credentials);
+              await downloadForwardProfile(credentials, profileName);
               setDownloadError("");
             } catch (error) {
               setDownloadError(error.message);
@@ -906,7 +906,7 @@ function SavedForwards() {
                   </div>
                 )}
                 {shown?.id === entry.id && (
-                  <Commands credentials={shown.credentials} />
+                  <Commands credentials={shown.credentials} profileName={entry.name} />
                 )}
               </li>
             ))}

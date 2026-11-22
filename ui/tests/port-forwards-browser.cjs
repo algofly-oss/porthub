@@ -246,7 +246,7 @@ async function choose(page, label, option) {
         .getByRole("button", { name: "Download SSH profile", exact: true })
         .click();
       const download = await downloaded;
-      assert.equal(download.suggestedFilename(), `porthub-pf-${id}.zip`);
+      assert.equal(download.suggestedFilename(), `porthub-condor-notebook-pf-${id}.zip`);
       const zip = await fs.readFile(await download.path());
       assert.equal(zip.readUInt32LE(0), 0x04034b50);
       // Inspect the actual downloaded file, not only the click event.

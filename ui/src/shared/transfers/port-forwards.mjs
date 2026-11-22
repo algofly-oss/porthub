@@ -161,14 +161,20 @@ export async function forwardProfileArchive(entry) {
   return zipSync(Object.fromEntries(files), { level: 0 });
 }
 
-export async function downloadForwardProfile(entry) {
+export function forwardProfileFilename(username, profileName = "") {
+  const label = profileName.normalize("NFKC").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 48).replace(/^-+|-+$/g, "");
+  return `porthub-${label ? label + "-" : ""}${username}.zip`;
+}
+
+export async function downloadForwardProfile(entry, profileName) {
   const bytes = await forwardProfileArchive(entry);
   const url = URL.createObjectURL(
     new Blob([bytes], { type: "application/zip" }),
   );
   const link = document.createElement("a");
   link.href = url;
-  link.download = `porthub-${entry.username}.zip`;
+  link.download = forwardProfileFilename(entry.username, profileName);
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
