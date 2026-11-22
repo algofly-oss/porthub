@@ -151,6 +151,7 @@ async function choose(page, label, option) {
         } else if (path.endsWith("/credentials")) {
           reveals++;
           body = {
+            launcherToken: "test-launch-token",
             gateway: "gateway.example",
             sshPort: 8347,
             username: "pf-" + id,
@@ -225,6 +226,22 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .click();
+      const launcher = page.getByLabel("Reusable SSH command", { exact: true });
+      await launcher.waitFor();
+      const launcherUrl = new URL(`/api/port-forwards/${id}/launcher`, base);
+      launcherUrl.protocol = "https:";
+      const expectedLauncher = `curl -fsS -H 'Authorization: Bearer test-launch-token' '${launcherUrl.href}' | sh`;
+      assert.equal(await launcher.textContent(), expectedLauncher);
+      await page.getByRole("button", { name: "Copy connection command" }).click();
+      assert.equal(await page.evaluate(() => window.testClipboard), expectedLauncher);
+      await choose(page, "Command for", "Windows · PowerShell / OpenSSH");
+      await page.getByRole("button", { name: "Copy connection command" }).click();
+      const windowsLauncher = await page.evaluate(() => window.testClipboard);
+      assert(windowsLauncher.includes("curl.exe -fsS -H 'Authorization: Bearer test-launch-token'"));
+      assert(windowsLauncher.includes(launcherUrl.href + "?shell=powershell"));
+      assert(windowsLauncher.includes("if ($LASTEXITCODE -eq 0)"));
+      await choose(page, "Command for", "Linux / macOS · OpenSSH");
+      await page.getByText("Download an SSH profile", { exact: true }).click();
       const command = page.getByLabel("SSH command", { exact: true });
       await command.waitFor();
       assert.equal(await command.textContent(), cleanCommand);
@@ -446,9 +463,9 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .click();
-      await page.getByLabel("SSH command", { exact: true }).waitFor();
+      await page.getByLabel("Reusable SSH command", { exact: true }).waitFor();
       await page
-        .getByText("Advanced: self-contained command", { exact: true })
+        .getByText("Self-contained SSH command options", { exact: true })
         .click();
       const advanced = page.getByRole("textbox", {
         name: "Self-contained SSH command",

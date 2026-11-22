@@ -61,11 +61,22 @@ async function request(suffix = "", method = "GET", body, signal) {
   return data;
 }
 
-function Commands({ credentials, profileName }) {
+function Commands({ credentials, profileName, profileId }) {
   const [downloadError, setDownloadError] = useState("");
   const [client, setClient] = useState(() =>
     navigator.userAgent.includes("Windows") ? "powershell" : "openssh",
   );
+  const launcherUrl = new URL(`${api}/${encodeURIComponent(profileId)}/launcher`, window.location.origin);
+  launcherUrl.protocol = "https:";
+  if (client === "powershell") launcherUrl.searchParams.set("shell", "powershell");
+  const token = credentials.launcherToken;
+  let launcher = "";
+  if (token && /^[A-Za-z0-9._~+/=-]+$/.test(token)) {
+    const args = `-fsS -H 'Authorization: Bearer ${token}' '${launcherUrl.href}'`;
+    launcher = client === "powershell"
+      ? `& { $s = curl.exe ${args}; if ($LASTEXITCODE -eq 0) { & ([scriptblock]::Create($s -join [Environment]::NewLine)) } }`
+      : `curl ${args} | sh`;
+  }
   const [draft, setDraft] = useState(null);
   let generated, problem;
   try {
@@ -86,75 +97,94 @@ function Commands({ credentials, profileName }) {
   };
   return (
     <div className="mt-3 space-y-3 rounded-lg border border-border bg-background p-3">
-      <p className="text-xs text-muted-foreground">
-        Download and extract the SSH profile into a private folder, then run
-        this command from that folder.
-      </p>
-      <div>
-        <p className={label}>SSH command</p>
-        <pre
-          aria-label="SSH command"
-          tabIndex={0}
-          className="mt-1 min-w-0 select-text whitespace-pre-wrap break-words rounded-lg border border-input bg-background px-3 py-3 font-mono text-xs leading-5 text-foreground focus-visible:outline-primary"
-        >
-          {forwardProfileCommand}
-        </pre>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <label className={label}>
+          Command for
+          <SearchDropdown
+            aria-label="Command for"
+            className={field}
+            value={client}
+            onChange={(e) => {
+              setClient(e.target.value);
+              setDraft(null);
+            }}
+          >
+            <option value="openssh">Linux / macOS · OpenSSH</option>
+            <option value="powershell">Windows · PowerShell / OpenSSH</option>
+          </SearchDropdown>
+        </label>
       </div>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          onClick={async () => {
-            try {
-              await downloadForwardProfile(credentials, profileName);
-              setDownloadError("");
-            } catch (error) {
-              setDownloadError(error.message);
-            }
-          }}
-        >
-          Download SSH profile
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={async () => {
-            try {
-              await copyText(forwardProfileCommand);
-              toast.success("SSH command copied");
-            } catch {
-              toast.error("Select and copy the command above.");
-            }
-          }}
-        >
-          <IconCopy size={16} />
-          Copy command
-        </Button>
-      </div>
-      {downloadError && (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          {downloadError}
-        </p>
-      )}
-      <details>
-        <summary className="cursor-pointer py-2 text-sm text-muted-foreground">
-          Advanced: self-contained command
-        </summary>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <label className={label}>
-            Command for
-            <SearchDropdown
-              className={field}
-              value={client}
-              onChange={(e) => {
-                setClient(e.target.value);
-                setDraft(null);
+      {launcher && <div className="space-y-2">
+        <p className={label}>Connection command</p>
+        <p className="text-xs text-muted-foreground">Run this in a terminal on the computer to connect. Run it again to reconnect. Keep the command private.</p>
+        <pre aria-label="Reusable SSH command" tabIndex={0} className="min-w-0 select-text whitespace-pre-wrap break-all rounded-lg border border-input bg-surface p-3 font-mono text-xs leading-5">{launcher}</pre>
+        <Button size="sm" onClick={async () => {
+          try {
+            await copyText(launcher);
+            toast.success("Connection command copied");
+          } catch {
+            toast.error("Select and copy the command above.");
+          }
+        }}><IconCopy size={16} /> Copy connection command</Button>
+      </div>}
+      <details open={launcher ? undefined : true}>
+        <summary className="cursor-pointer py-2 text-sm font-medium">Download an SSH profile</summary>
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Download and extract the SSH profile into a private folder, then run
+            this command from that folder.
+          </p>
+          <div>
+            <p className={label}>SSH command</p>
+            <pre
+              aria-label="SSH command"
+              tabIndex={0}
+              className="mt-1 min-w-0 select-text whitespace-pre-wrap break-words rounded-lg border border-input bg-background px-3 py-3 font-mono text-xs leading-5 text-foreground focus-visible:outline-primary"
+            >
+              {forwardProfileCommand}
+            </pre>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              onClick={async () => {
+                try {
+                  await downloadForwardProfile(credentials, profileName);
+                  setDownloadError("");
+                } catch (error) {
+                  setDownloadError(error.message);
+                }
               }}
             >
-              <option value="openssh">Linux / macOS · OpenSSH</option>
-              <option value="powershell">Windows · PowerShell / OpenSSH</option>
-            </SearchDropdown>
-          </label>
+              Download SSH profile
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                try {
+                  await copyText(forwardProfileCommand);
+                  toast.success("SSH command copied");
+                } catch {
+                  toast.error("Select and copy the command above.");
+                }
+              }}
+            >
+              <IconCopy size={16} />
+              Copy command
+            </Button>
+          </div>
+          {downloadError && (
+            <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+              {downloadError}
+            </p>
+          )}
         </div>
+      </details>
+      <details>
+        <summary className="cursor-pointer py-2 text-sm text-muted-foreground">
+          Self-contained SSH command options
+        </summary>
         {problem ? (
           <p role="alert">{problem}</p>
         ) : (
@@ -995,7 +1025,7 @@ function SavedForwards() {
           onCancel={() => setSection("Profile")} onSaved={() => { setSection("Profile"); setRevision(n => n + 1); }} />}
         {section === "Public ports" && <PublicPorts key={selected.id} entry={selected} />}
         {section === "SSH command" && (shown?.id === selected.id
-          ? <Commands credentials={shown.credentials} profileName={selected.name} />
+          ? <Commands credentials={shown.credentials} profileName={selected.name} profileId={selected.id} />
           : busy ? <p role="status" className="text-sm">Loading command…</p>
           : <Button onClick={() => reveal(selected.id)}>Load SSH command</Button>)}
         {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
