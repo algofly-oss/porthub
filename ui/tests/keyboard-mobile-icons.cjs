@@ -6,6 +6,8 @@ const {launchBrowser}=require('./browser.cjs');
  try {
   for(const width of [320,390,402,768,1512,1920]) {
    const context=await browser.newContext({viewport:{width,height:874},serviceWorkers:'block'});
+   // Workbox expects a registration when the browser exposes the service worker API.
+   await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});
    const state=makeDemoData();
    await context.route('**/api/**',async route=>{
     const request=route.request(),path=new URL(request.url()).pathname;

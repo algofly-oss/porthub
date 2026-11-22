@@ -249,7 +249,7 @@ async function choose(page, label, option) {
       const zip = await fs.readFile(await download.path());
       assert.equal(zip.readUInt32LE(0), 0x04034b50);
       // Inspect the actual downloaded file, not only the click event.
-      const { unzipSync, strFromU8 } = require("../node_modules/fflate");
+      const { unzipSync, strFromU8 } = require("fflate");
       const files = unzipSync(zip);
       assert.deepEqual(Object.keys(files).sort(), [
         "porthub.conf",

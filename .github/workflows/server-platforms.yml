@@ -174,7 +174,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bison ncurses-bin aria2 cmake g++ xvfb
       - name: Install isolated Playwright package
-        run: npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
+        run: npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1 fflate@0.8.2
       - name: Install WebKit and system dependencies
         run: node "$RUNNER_TEMP/terminal-browser-tools/node_modules/playwright/cli.js" install --with-deps webkit
       - uses: actions/cache@v4
