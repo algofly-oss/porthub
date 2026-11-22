@@ -64,6 +64,69 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(again['targets'][TARGET]['status'],'local_verified_reused')
         self.assertEqual(calls.count('build'),1)
 
+    def test_failed_upload_revalidates_zip_and_resumes_without_online_builder(self):
+        root, result, calls, _, planner = self.controller('upload')
+        self.assertEqual(result['targets'][TARGET]['failed_phase'], 'upload')
+        folder = root/'output'/TARGET
+        # A stale extracted cache must never authorize different ZIP contents.
+        (folder/'verified/porthub').write_bytes(b'stale extracted bytes')
+        resumed = []
+        def upload_only(argv, values, timeout):
+            resumed.append(argv[0])
+            self.assertEqual(argv[0], 'upload', 'verified ZIP retry tried to rebuild or contact builder')
+        with patch.object(h, 'load', return_value=planner), patch.object(h, 'command', side_effect=upload_only), patch.object(h, 'verify') as verify:
+            again = h.control(root, SOURCE, self.config(), root/'output')
+        self.assertEqual(again['targets'][TARGET]['status'], 'local_verified')
+        self.assertEqual(calls.count('build'), 1)
+        self.assertEqual(resumed, ['upload', 'upload'])
+        verify.assert_called_once()
+        self.assertEqual((folder/'verified/porthub').read_bytes(), b'fake-native-artifact')
+
+    def test_corrupt_cached_zip_fails_closed_without_rebuild_or_artifact_upload(self):
+        root, _, _, _, planner = self.controller('upload')
+        archive = root/'output'/TARGET/'components.zip'; archive.write_bytes(b'broken zip')
+        uploaded = []
+        def only_manifest(argv, values, timeout):
+            self.assertEqual(argv[0], 'upload')
+            uploaded.append(values['key'])
+        with patch.object(h, 'load', return_value=planner), patch.object(h, 'command', side_effect=only_manifest), patch.object(h, 'verify'):
+            again = h.control(root, SOURCE, self.config(), root/'output')
+        self.assertEqual(again['targets'][TARGET], {'status':'github_fallback', 'failed_phase':'verify'})
+        self.assertTrue(all(key.endswith('/manifest.json') for key in uploaded))
+        self.assertNotIn(TARGET, json.loads((root/'output/manifest.json').read_text())['targets'])
+
+    def test_cached_zip_source_verification_failure_keeps_old_cache_and_never_builds(self):
+        root, _, _, _, planner = self.controller('upload')
+        folder = root/'output'/TARGET; previous = (folder/'verified/porthub').read_bytes()
+        def only_manifest(argv, values, timeout):
+            self.assertEqual(argv[0], 'upload'); self.assertTrue(values['key'].endswith('/manifest.json'))
+        with patch.object(h, 'load', return_value=planner), patch.object(h, 'command', side_effect=only_manifest), patch.object(h, 'verify', side_effect=ValueError('input closure/source mismatch')):
+            again = h.control(root, SOURCE, self.config(), root/'output')
+        self.assertEqual(again['targets'][TARGET]['failed_phase'], 'verify')
+        self.assertEqual((folder/'verified/porthub').read_bytes(), previous)
+        self.assertFalse(list(folder.glob('.native-revalidate-*')))
+
+    def test_cached_zip_change_during_verification_never_reaches_upload(self):
+        root, _, _, _, planner = self.controller('upload')
+        folder = root/'output'/TARGET; archive = folder/'components.zip'
+        def mutate(*args, **kwargs): archive.write_bytes(archive.read_bytes()[:-1])
+        def only_manifest(argv, values, timeout):
+            self.assertEqual(argv[0], 'upload'); self.assertTrue(values['key'].endswith('/manifest.json'))
+        with patch.object(h, 'load', return_value=planner), patch.object(h, 'command', side_effect=only_manifest), patch.object(h, 'verify', side_effect=mutate):
+            again = h.control(root, SOURCE, self.config(), root/'output')
+        self.assertEqual(again['targets'][TARGET]['failed_phase'], 'verify')
+        self.assertEqual((folder/'verified/porthub').read_bytes(), b'fake-native-artifact')
+
+    @unittest.skipIf(h.os.name == 'nt', 'Symlink privilege is not assumed on Windows')
+    def test_cached_archive_symlink_is_rejected_without_rebuild(self):
+        root, _, _, _, planner = self.controller('upload')
+        archive = root/'output'/TARGET/'components.zip'; archive.unlink(); archive.symlink_to(root/'input.zip')
+        def only_manifest(argv, values, timeout):
+            self.assertEqual(argv[0], 'upload'); self.assertTrue(values['key'].endswith('/manifest.json'))
+        with patch.object(h, 'load', return_value=planner), patch.object(h, 'command', side_effect=only_manifest), patch.object(h, 'verify'):
+            again = h.control(root, SOURCE, self.config(), root/'output')
+        self.assertEqual(again['targets'][TARGET]['failed_phase'], 'verify')
+
     def test_interrupted_first_probe_can_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

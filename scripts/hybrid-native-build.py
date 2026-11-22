@@ -119,6 +119,31 @@ def pack(directory, output):
         raise ValueError('Native archive too large')
 
 
+def verify_cached_archive(root, source, target, folder, archive):
+    """Rebind a retained ZIP to its source before retrying an interrupted upload.
+
+    The extracted directory alone is not evidence for the ZIP being uploaded.
+    Always extract fresh, verify its full closure/binaries, then fence the ZIP.
+    """
+    if archive.is_symlink() or not archive.is_file() or not 0 < archive.stat().st_size <= MAX_ARCHIVE:
+        raise ValueError('Builder archive missing/oversized or unsafe')
+    size, digest = archive.stat().st_size, sha(archive)
+    with tempfile.TemporaryDirectory(prefix='.native-revalidate-', dir=folder) as temporary:
+        staged = Path(temporary)/'verified'
+        unpack(archive, staged)
+        verify(root, staged, target, source, controller=True)
+        load('component-build-plan').require_clean_source(root, source)
+        if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != size or sha(archive) != digest:
+            raise ValueError('Builder archive changed during verification')
+        extracted = folder/'verified'
+        if extracted.is_symlink():
+            raise ValueError('Unsafe existing native build cache')
+        if extracted.exists():
+            shutil.rmtree(extracted)
+        staged.rename(extracted)
+    return digest
+
+
 def command(argv, values, timeout):
     if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
         raise ValueError('Configured command must be a nonempty argv list')
@@ -181,30 +206,30 @@ def control(root, source, config, output):
                 raise ValueError('Builder does not support this historical or unproven source')
             stage='probe'
             retained = (prior or {}).get('targets', {}).get(target)
-            if retained and archive.is_file() and sha(archive) == retained['sha256']:
+            if retained:
+                stage='verify'
+                if archive.is_symlink() or not archive.is_file() or sha(archive) != retained['sha256']:
+                    raise ValueError('Published native build cache changed')
                 verify(root, folder/'verified', target, source, controller=True)
                 report['targets'][target] = {'status': 'local_verified_reused', 'sha256': retained['sha256']}
                 with publication_lock:
                     manifest['targets'][target] = retained
                 return
-            stage='capacity'
-            if shutil.disk_usage(output).free < 768*1024**2:
-                raise ValueError('Insufficient owned staging capacity')
-            stage='probe'
-            command(builder['probe'], values, 8)
-            stage = 'build'
-            command(builder['build'], values, min(1800, max(1, int(builder.get('build_timeout_seconds', 900)))))
-            stage = 'fetch'
-            command(builder['fetch'], values, 120)
-            if not archive.is_file() or archive.stat().st_size > MAX_ARCHIVE:
-                raise ValueError('Builder archive missing/oversized')
-            extracted = folder/'verified'
-            if extracted.exists():
-                shutil.rmtree(extracted)
-            unpack(archive, extracted)
+            # An upload interruption leaves a valid ZIP but no manifest row.
+            # Revalidate and upload it without requiring an online builder or
+            # rebuilding into an output path that intentionally already exists.
+            if not archive.exists() and not archive.is_symlink():
+                stage='capacity'
+                if shutil.disk_usage(output).free < 768*1024**2:
+                    raise ValueError('Insufficient owned staging capacity')
+                stage='probe'
+                command(builder['probe'], values, 8)
+                stage = 'build'
+                command(builder['build'], values, min(1800, max(1, int(builder.get('build_timeout_seconds', 900)))))
+                stage = 'fetch'
+                command(builder['fetch'], values, 120)
             stage = 'verify'
-            verify(root, extracted, target, source, controller=True)
-            digest = sha(archive)
+            digest = verify_cached_archive(root, source, target, folder, archive)
             key = source + '/' + target + '/' + digest + '.zip'
             stage = 'upload'
             command(depot['upload'], {'file': str(archive), 'key': key}, 120)
