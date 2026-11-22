@@ -325,15 +325,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                         );
                         return;
                     }
-                    match result {
-                        Ok(()) => set_state(&states, &plan.id, "disconnected", None),
-                        Err(e) => set_state(
-                            &states,
-                            &plan.id,
-                            "error",
-                            Some(format!("{e:#}").chars().take(512).collect()),
-                        ),
-                    }
+                    record_session_result(&states, &plan.id, result);
                 });
                 sessions.insert(
                     id,
@@ -360,6 +352,52 @@ fn set_state(states: &States, id: &str, state: &str, error: Option<String>) {
         },
     );
 }
+fn record_session_result(states: &States, id: &str, result: Result<()>) {
+    match result {
+        Ok(()) => set_state(states, id, "disconnected", None),
+        // Do not create a new retry loop: the existing ten-second report cycle
+        // reauthenticates the current plan and honors policy/cancellation first.
+        Err(error) if error.is::<relay::Reconnecting>() => {
+            set_state(states, id, "connecting", None)
+        }
+        Err(error) => set_state(
+            states,
+            id,
+            "error",
+            Some(format!("{error:#}").chars().take(512).collect()),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod session_state_tests {
+    use super::*;
+
+    #[test]
+    fn reconnecting_epoch_reports_connecting_but_legacy_peer_still_reports_error() {
+        let states: States = Arc::new(Mutex::new(HashMap::new()));
+        let transient = anyhow::Error::new(relay::Reconnecting).context("USB relay claim");
+        record_session_result(&states, "child", Err(transient));
+        {
+            let rows = states.lock().unwrap();
+            assert_eq!(rows["child"].state, "connecting");
+            assert!(rows["child"].error.is_none());
+        }
+        record_session_result(
+            &states,
+            "child",
+            Err(anyhow::anyhow!("Upstream agent upgrade required for safe USB rerouting")),
+        );
+        {
+            let rows = states.lock().unwrap();
+            assert_eq!(rows["child"].state, "error");
+            assert_eq!(rows["child"].error.as_deref(), Some("Upstream agent upgrade required for safe USB rerouting"));
+        }
+        record_session_result(&states, "child", Ok(()));
+        assert_eq!(states.lock().unwrap()["child"].state, "disconnected");
+    }
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States, _: bool, _: Option<tokio::sync::watch::Receiver<u64>>) -> Result<()> {
     anyhow::bail!("Native USB forwarding currently requires Linux kernel USB/IP support")

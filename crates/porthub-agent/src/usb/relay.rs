@@ -21,6 +21,15 @@ impl std::fmt::Display for Reconfigure {
     }
 }
 impl std::error::Error for Reconfigure {}
+/// A registered alias exists, but this epoch has no authenticated metadata yet.
+#[derive(Debug)]
+pub(super) struct Reconnecting;
+impl std::fmt::Display for Reconnecting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("USB upstream session is reconnecting; retry shortly")
+    }
+}
+impl std::error::Error for Reconnecting {}
 #[derive(Clone)]
 pub(super) struct Metadata {
     pub device: Device,
@@ -440,20 +449,21 @@ fn claim_checked(
     let (producer, consumer) = pair()?;
     let mut s = entry.state.lock().unwrap_or_else(|p| p.into_inner());
     ensure!(!s.closed, "USB upstream session ended");
+    // A stable alias can outlive an upstream connection epoch. Its replacement
+    // entry is intentionally unready until fresh authenticated descriptors arrive.
+    let metadata = s
+        .metadata
+        .as_ref()
+        .ok_or(Reconnecting)?;
     ensure!(
-        s.metadata.as_ref().is_some_and(|m| m.restart),
+        metadata.restart,
         "Upstream agent upgrade required for safe USB rerouting"
     );
     ensure!(
         s.child.is_none(),
         "Imported USB device already has a downstream consumer"
     );
-    validate(
-        &s,
-        s.metadata
-            .as_ref()
-            .context("USB import metadata unavailable")?,
-    )?;
+    validate(&s, metadata)?;
     let (ready, receive) = oneshot::channel();
     let cancel = CancellationToken::new();
     let key = format!("{child_id}:{}", uuid::Uuid::new_v4());
@@ -644,6 +654,58 @@ mod tests {
         assert!(claim_checked(dir.path(), &alias, "offline-gateway", |_, _| Ok(())).is_err());
         gateway(dir.path(), true);
         assert!(claim_checked(dir.path(), &alias, "new", |_, _| Ok(())).is_ok());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn reconnecting_alias_is_unready_without_claiming_legacy_capability() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let p = plan();
+        gateway(dir.path(), true);
+        let guard = register(dir.path(), &p)?;
+        let mut metadata = Metadata {
+            device: p.device.clone(),
+            wire: super::super::protocol::legacy_device(&p.device)?,
+            restart: true,
+        };
+        destination(dir.path(), &p, metadata.clone())?;
+        let alias = inventory(dir.path()).remove(0).busid;
+        // Reconnect recreates the same public alias before any new authenticated
+        // descriptor/capability publication. A stale selection must fail closed.
+        drop(guard);
+        let _replacement = register(dir.path(), &p)?;
+        let validated = std::cell::Cell::new(false);
+        let result = claim_checked(dir.path(), &alias, "unready", |_, _| {
+            validated.set(true);
+            Ok(())
+        });
+        let error = result.err().unwrap();
+        assert!(error.is::<Reconnecting>());
+        assert_eq!(
+            error.to_string(),
+            "USB upstream session is reconnecting; retry shortly"
+        );
+        assert!(!validated.get());
+        assert!(find(dir.path(), &alias)?.state.lock().unwrap().child.is_none());
+        // A genuinely negotiated old peer still gets the upgrade diagnostic.
+        metadata.restart = false;
+        destination(dir.path(), &p, metadata.clone())?;
+        let result = claim_checked(dir.path(), &alias, "legacy", |_, _| {
+            validated.set(true);
+            Ok(())
+        });
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Upstream agent upgrade required for safe USB rerouting"
+        );
+        assert!(!validated.get());
+        // Only a fresh authenticated, restart-capable epoch permits a child.
+        metadata.restart = true;
+        destination(dir.path(), &p, metadata)?;
+        let _lease = claim_checked(dir.path(), &alias, "current", |_, _| {
+            validated.set(true);
+            Ok(())
+        })?;
+        assert!(validated.get());
         Ok(())
     }
     #[tokio::test]
