@@ -289,6 +289,7 @@ class SecureRedirect(urllib.request.HTTPRedirectHandler):
 def download(url, path, maximum, deadline):
     https_url(url)
     opener = urllib.request.build_opener(SecureRedirect())
+    opener.addheaders = [('User-Agent', 'PortHub-native-build/1')]
     remaining = deadline-time.monotonic()
     if remaining <= 0:
         raise TimeoutError('Depot budget expired')
