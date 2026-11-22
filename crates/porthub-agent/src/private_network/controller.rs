@@ -218,6 +218,8 @@ pub(crate) use stream_offer::NativeReady;
 
 pub enum Event {
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    ForwardLocal(super::port_forwards::Reply),
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
     VirtualHosts(super::authority_event::Authority<Vec<super::virtual_hosts::Spec>>),
     #[cfg(feature = "local-tor")]
     TorLocal { bytes: Bytes },

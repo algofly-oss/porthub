@@ -1,38 +1,149 @@
-//! Enrolled consumers of temporary SSH forwards. Each listener belongs to a
-//! successful private sync and an approved catalog entry. Nothing is persisted.
+//! Private SSH-forward host catalog. A name is published only under a current
+//! enrollment lease and while its PAN address is captured by this native TUN.
 use super::authority_event::Authority;
 use crate::{control::Control, private_profile::Profile};
 use anyhow::{anyhow, ensure, Context, Result};
+use porthub_mesh::{lan_routes::Network, udp::SendPermit};
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
+    collections::{HashMap, HashSet},
     net::Ipv4Addr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
-    },
+    sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-    task::JoinSet,
-};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const MAX_STREAMS: usize = 64;
+mod tcp;
+pub(super) use tcp::{Native, Reply};
+
 const MAX_DESCRIPTORS: usize = 2048;
 const MAX_CATALOG_BYTES: usize = 512 * 1024;
 
+#[derive(Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Descriptor {
+    entry_id: String,
+    host: String,
+    address: Ipv4Addr,
+    ports: Vec<u16>,
+}
+#[derive(Deserialize)]
+struct Catalog {
+    // A legacy gateway cannot assign isolated PAN addresses. Leave its names
+    // unpublished: a fallback loopback answer can expose unrelated local apps.
+    #[serde(default)]
+    hosts: Vec<Descriptor>,
+}
+fn valid_id(id: &str) -> bool {
+    id.len() == 24
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+impl Catalog {
+    fn validate(mut self, suffix: &str) -> Result<Self> {
+        ensure!(
+            self.hosts.len() <= MAX_DESCRIPTORS,
+            "too many SSH forwarding hosts"
+        );
+        let mut names = HashSet::new();
+        let mut addresses = HashSet::new();
+        for host in &mut self.hosts {
+            let zone = format!(".forwards.{suffix}");
+            let label = host
+                .host
+                .strip_suffix(&zone)
+                .context("SSH hostname outside forwarding zone")?;
+            ensure!(
+                valid_id(&host.entry_id)
+                    && (1..=63).contains(&label.len())
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "invalid SSH forwarding hostname"
+            );
+            ensure!(
+                host.address.is_private() && addresses.insert(host.address),
+                "invalid or duplicate SSH forwarding address"
+            );
+            ensure!(
+                names.insert(label.to_string())
+                    && (label == host.entry_id || names.insert(host.entry_id.clone())),
+                "SSH forwarding name collision"
+            );
+            host.ports.sort_unstable();
+            ensure!(
+                host.ports.len() <= 32
+                    && !host.ports.contains(&0)
+                    && !host.ports.windows(2).any(|p| p[0] == p[1]),
+                "invalid SSH forward port list"
+            );
+        }
+        Ok(self)
+    }
+}
+struct Entry {
+    identity: Descriptor,
+    stop: CancellationToken,
+}
+#[derive(Default)]
+struct Entries {
+    by_address: HashMap<Ipv4Addr, Arc<Entry>>,
+    by_name: HashMap<String, Ipv4Addr>,
+}
+impl Entries {
+    fn reconcile(&mut self, catalog: Catalog) {
+        let mut current = Self::default();
+        for identity in catalog.hosts {
+            let address = identity.address;
+            current.by_name.insert(identity.host.clone(), address);
+            let (_, suffix) = identity.host.split_once('.').expect("validated SSH host");
+            current
+                .by_name
+                .insert(format!("{}.{suffix}", identity.entry_id), address);
+            let entry = if self
+                .by_address
+                .get(&address)
+                .is_some_and(|entry| entry.identity == identity)
+            {
+                self.by_address.remove(&address).unwrap()
+            } else {
+                Arc::new(Entry {
+                    identity,
+                    stop: CancellationToken::new(),
+                })
+            };
+            current.by_address.insert(address, entry);
+        }
+        for retired in self.by_address.values() {
+            retired.stop.cancel();
+        }
+        *self = current;
+    }
+}
+#[derive(Default)]
+struct Capture {
+    own: Option<Ipv4Addr>,
+    pools: Vec<Network>,
+    stop: CancellationToken,
+}
+impl Capture {
+    fn allows(&self, address: Ipv4Addr) -> bool {
+        self.own.is_some_and(|own| own != address)
+            && self.pools.iter().any(|pool| pool.contains(address))
+    }
+}
 struct Generation {
-    control: Arc<Control>,
-    cursor: tokio::sync::watch::Sender<Uuid>,
+    client: Client,
     suffix: String,
+    cursor: tokio::sync::watch::Sender<Uuid>,
     lease: RwLock<Authority<()>>,
-    published: RwLock<HashMap<String, Arc<AtomicBool>>>,
+    entries: RwLock<Entries>,
     stop: CancellationToken,
 }
 impl Generation {
@@ -47,77 +158,97 @@ impl Generation {
         ensure!(!left.is_zero(), "private forwards lease expired");
         Ok(left)
     }
-
     async fn until_expiry(&self) {
         while let Ok(left) = self.remaining() {
-            tokio::select! {
-                _ = self.stop.cancelled() => break,
-                _ = tokio::time::sleep(left) => {}
-            }
+            tokio::select! {_=self.stop.cancelled()=>break,_=tokio::time::sleep(left)=>{}}
         }
         self.stop.cancel();
     }
-
-    async fn during<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        tokio::pin!(future);
-        tokio::select! {
-            biased;
-            _ = self.stop.cancelled() => Err(anyhow!("private forwards retired")),
-            result = std::future::poll_fn(|cx| {
-                if let Err(error) = self.remaining() {
-                    return std::task::Poll::Ready(Err(error));
+    async fn run(&self) {
+        let mut changes = self.cursor.subscribe();
+        let mut retry = Duration::from_secs(1);
+        loop {
+            let _ = changes.borrow_and_update();
+            let fetched = tokio::select! {biased;_=changes.changed()=>continue,result=self.client.fetch()=>result.and_then(|catalog|catalog.validate(&self.suffix))};
+            let valid = fetched.is_ok();
+            self.entries
+                .write()
+                .expect("forward catalog")
+                .reconcile(fetched.unwrap_or(Catalog { hosts: vec![] }));
+            if valid {
+                retry = Duration::from_secs(1);
+                if changes.changed().await.is_err() {
+                    return;
                 }
-                future.as_mut().poll(cx)
-            }) => result
+            } else {
+                tokio::select! {_=changes.changed()=>{},_=tokio::time::sleep(retry)=>{}}
+                retry = (retry * 2).min(Duration::from_secs(15));
+            }
         }
     }
 }
-
 #[derive(Clone, Default)]
-pub(super) struct Names(Arc<RwLock<Option<Arc<Generation>>>>);
+pub(super) struct Names {
+    current: Arc<RwLock<Option<Arc<Generation>>>>,
+    capture: Arc<RwLock<Capture>>,
+}
 impl Names {
-    pub(super) fn reserved(&self, name: &str) -> bool {
-        let Some((id, suffix)) = name.trim_end_matches('.').split_once(".forwards.") else {
-            return false;
-        };
-        valid_id(id)
-            && self
-                .0
-                .read()
-                .ok()
-                .as_deref()
-                .and_then(Option::as_ref)
-                .is_some_and(|g| g.suffix == suffix)
-    }
-    pub(super) fn contains(&self, name: &str) -> bool {
-        self.0
+    pub(super) fn address(&self, name: &str) -> Option<Ipv4Addr> {
+        let current = self.current.read().ok()?;
+        let g = current.as_ref()?;
+        g.remaining().ok()?;
+        let target = *g
+            .entries
             .read()
-            .ok()
-            .as_deref()
-            .and_then(Option::as_ref)
-            .is_some_and(|g| {
-                g.remaining().is_ok()
-                    && g.published.read().is_ok_and(|names| {
-                        names
-                            .get(name.trim_end_matches('.'))
-                            .is_some_and(|ready| ready.load(Ordering::Acquire))
-                    })
-            })
+            .ok()?
+            .by_name
+            .get(name.trim_end_matches('.'))?;
+        self.capture.read().ok()?.allows(target).then_some(target)
+    }
+    fn target(&self, address: Ipv4Addr) -> Option<Scope> {
+        let current = self.current.read().ok()?;
+        let g = current.as_ref()?;
+        let entry = g.entries.read().ok()?.by_address.get(&address)?.clone();
+        let capture = self.capture.read().ok()?;
+        capture.allows(address).then(|| Scope {
+            g: g.clone(),
+            entry,
+            capture: capture.stop.clone(),
+        })
     }
 }
-
+#[derive(Clone)]
+struct Scope {
+    g: Arc<Generation>,
+    entry: Arc<Entry>,
+    capture: CancellationToken,
+}
+impl Scope {
+    fn current(&self) -> Option<SendPermit> {
+        let lease = self.g.lease.read().ok()?.clone();
+        let grant = self.entry.stop.clone();
+        let generation = self.g.stop.clone();
+        let capture = self.capture.clone();
+        let permit = SendPermit::bounded(
+            move || !grant.is_cancelled() && !generation.is_cancelled() && !capture.is_cancelled(),
+            move || lease.remaining().ok().flatten(),
+        );
+        permit.valid().then_some(permit)
+    }
+    fn allows(&self, port: u16) -> bool {
+        let ports = &self.entry.identity.ports;
+        port != 0 && (ports.is_empty() || ports.binary_search(&port).is_ok())
+    }
+}
 struct Client {
     control: Arc<Control>,
     profile: Profile,
     instance: String,
-    permits: Arc<Semaphore>,
 }
-
 pub(super) struct Manager {
     names: Names,
     profile: Profile,
     instance: String,
-    permits: Arc<Semaphore>,
 }
 impl Manager {
     pub(super) fn new(profile: Profile, instance: String) -> Self {
@@ -125,15 +256,24 @@ impl Manager {
             names: Names::default(),
             profile,
             instance,
-            permits: Arc::new(Semaphore::new(MAX_STREAMS)),
         }
     }
     pub(super) fn names(&self) -> Names {
         self.names.clone()
     }
-
+    pub(super) fn capture(&self, own: Option<Ipv4Addr>, pools: &[Network]) {
+        let mut capture = self.names.capture.write().expect("forward capture routes");
+        if capture.own != own || capture.pools != pools {
+            capture.stop.cancel();
+            *capture = Capture {
+                own,
+                pools: pools.to_vec(),
+                stop: CancellationToken::new(),
+            };
+        }
+    }
     pub(super) fn update<T>(&self, authority: &Authority<T>, suffix: Option<&str>) {
-        let mut current = self.names.0.write().expect("forward generation lock");
+        let mut current = self.names.current.write().expect("forward generation lock");
         let wanted = authority
             .forward_sync
             .as_ref()
@@ -145,7 +285,15 @@ impl Manager {
                         .is_ok_and(|r| r.is_some_and(|d| !d.is_zero()))
             });
         if let (Some(g), Some(((cursor, control), suffix))) = (current.as_ref(), wanted) {
-            if g.suffix == suffix && Arc::ptr_eq(&g.control, control) && g.remaining().is_ok() {
+            if g.suffix == suffix
+                && g.lease
+                    .read()
+                    .expect("forward lease lock")
+                    .workspace_generation()
+                    == authority.workspace_generation()
+                && Arc::ptr_eq(&g.client.control, control)
+                && g.remaining().is_ok()
+            {
                 *g.lease.write().expect("forward lease lock") = authority.retained();
                 g.cursor.send_if_modified(|old| {
                     if old == cursor {
@@ -165,26 +313,20 @@ impl Manager {
             return;
         };
         let generation = Arc::new(Generation {
-            control: control.clone(),
+            client: Client {
+                control: control.clone(),
+                profile: self.profile.clone(),
+                instance: self.instance.clone(),
+            },
+            suffix: suffix.into(),
             cursor: tokio::sync::watch::channel(*cursor).0,
-            suffix: suffix.to_owned(),
             lease: RwLock::new(authority.retained()),
-            published: Default::default(),
+            entries: Default::default(),
             stop: CancellationToken::new(),
         });
         *current = Some(generation.clone());
-        let client = Arc::new(Client {
-            control: control.clone(),
-            profile: self.profile.clone(),
-            instance: self.instance.clone(),
-            permits: self.permits.clone(),
-        });
         tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = generation.until_expiry() => {},
-                _ = client.run(generation.clone()) => {}
-            }
+            tokio::select! {biased;_=generation.until_expiry()=>{},_=generation.run()=>{}}
         });
     }
 }
@@ -192,7 +334,7 @@ impl Drop for Manager {
     fn drop(&mut self) {
         if let Some(old) = self
             .names
-            .0
+            .current
             .write()
             .expect("forward generation lock")
             .take()
@@ -201,64 +343,6 @@ impl Drop for Manager {
         }
     }
 }
-
-#[derive(Deserialize)]
-struct Catalog {
-    forwards: Vec<Descriptor>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Descriptor {
-    entry_id: String,
-    host: String,
-    port: u16,
-}
-
-fn valid_id(id: &str) -> bool {
-    id.len() == 24
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-impl Catalog {
-    fn validate(self, suffix: &str) -> Result<BTreeMap<String, Vec<u16>>> {
-        ensure!(
-            self.forwards.len() <= MAX_DESCRIPTORS,
-            "too many private forwards"
-        );
-        let mut entries: BTreeMap<String, Vec<u16>> = BTreeMap::new();
-        let mut ports = HashSet::new();
-        for row in self.forwards {
-            ensure!(valid_id(&row.entry_id), "invalid private forward ID");
-            ensure!(
-                row.host == format!("{}.forwards.{suffix}", row.entry_id),
-                "private forward is outside the enrolled domain"
-            );
-            ensure!(
-                row.port != 0 && ports.insert(row.port),
-                "invalid or duplicated private forward port"
-            );
-            entries.entry(row.entry_id).or_default().push(row.port);
-        }
-        for ports in entries.values_mut() {
-            ports.sort_unstable();
-        }
-        Ok(entries)
-    }
-}
-
-struct EntryTask {
-    ports: Vec<u16>,
-    name: String,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Drop for EntryTask {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
 impl Client {
     fn origins(&self) -> impl Iterator<Item = String> {
         let allow_test = self.profile.allow_insecure_http_for_tests;
@@ -273,6 +357,7 @@ impl Client {
                 let request = self.control.forward_catalog_request(&base).await?;
                 let mut response = request
                     .bearer_auth(&self.profile.token)
+                    .header("x-porthub-host-forwards", "1")
                     .header("x-porthub-peer", &self.profile.peer_id)
                     .header("x-porthub-instance", &self.instance)
                     .send()
@@ -303,125 +388,12 @@ impl Client {
         anyhow::bail!("private forward catalog unavailable")
     }
 
-    async fn run(self: Arc<Self>, g: Arc<Generation>) {
-        let mut changes = g.cursor.subscribe();
-        let mut active = BTreeMap::<String, EntryTask>::new();
-        let mut retry = Duration::from_secs(1);
-        loop {
-            let _ = changes.borrow_and_update();
-            let fetched = tokio::select! {
-                biased;
-                _ = changes.changed() => continue,
-                result = self.fetch() => result.and_then(|catalog| catalog.validate(&g.suffix)),
-            };
-            let valid = fetched.is_ok();
-            let mut desired = fetched.unwrap_or_default();
-            // A failed confirmation retires all old descriptors. An unrelated
-            // edit leaves a byte stream whose exact authorized ports still exist.
-            active.retain(|id, old| {
-                if desired.get(id) == Some(&old.ports) {
-                    desired.remove(id);
-                    true
-                } else {
-                    g.published
-                        .write()
-                        .expect("forward names lock")
-                        .remove(&old.name);
-                    false
-                }
-            });
-            for (id, ports) in desired {
-                let name = format!("{id}.forwards.{}", g.suffix);
-                let ready = Arc::new(AtomicBool::new(false));
-                g.published
-                    .write()
-                    .expect("forward names lock")
-                    .insert(name.clone(), ready.clone());
-                let task = tokio::spawn(self.clone().serve_entry(
-                    g.clone(),
-                    id.clone(),
-                    ports.clone(),
-                    ready,
-                ));
-                active.insert(id, EntryTask { ports, name, task });
-            }
-            if valid {
-                retry = Duration::from_secs(1);
-                if changes.changed().await.is_err() {
-                    return;
-                }
-            } else {
-                tokio::select! { _=changes.changed()=>{}, _=tokio::time::sleep(retry)=>{} }
-                retry = (retry * 2).min(Duration::from_secs(15));
-            }
-        }
-    }
-    async fn serve_entry(
-        self: Arc<Self>,
-        g: Arc<Generation>,
-        id: String,
-        ports: Vec<u16>,
-        ready: Arc<AtomicBool>,
-    ) {
-        let mut retry = Duration::from_millis(200);
-        loop {
-            let Ok(listeners) = bind_group(&ports).await else {
-                tokio::time::sleep(retry).await;
-                retry = (retry * 2).min(Duration::from_secs(15));
-                continue;
-            };
-            if g.remaining().is_err() {
-                return;
-            }
-            retry = Duration::from_millis(200);
-            let mut servers = JoinSet::new();
-            for (port, listener) in listeners {
-                servers.spawn(self.clone().accept(g.clone(), id.clone(), port, listener));
-            }
-            ready.store(true, Ordering::Release);
-            servers.join_next().await;
-            ready.store(false, Ordering::Release);
-            servers.shutdown().await;
-        }
-    }
-
-    async fn accept(
-        self: Arc<Self>,
-        g: Arc<Generation>,
-        id: String,
-        port: u16,
-        listener: TcpListener,
-    ) -> Result<()> {
-        let mut streams = JoinSet::new();
-        loop {
-            tokio::select! {
-                biased;
-                _=g.stop.cancelled()=>return Ok(()),
-                _=streams.join_next(), if !streams.is_empty()=>{},
-                socket=listener.accept()=>{
-                    let (mut local, _) = socket?;
-                    let Ok(permit) = self.permits.clone().try_acquire_owned() else {continue};
-                    let client = self.clone();
-                    let entry = id.clone();
-                    let g = g.clone();
-                    streams.spawn(async move {
-                        let _permit = permit;
-                        let _ = g.during(async {
-                            let mut remote = client.open(&entry, port).await?;
-                            tokio::io::copy_bidirectional(&mut local, &mut remote).await?;
-                            Ok(())
-                        }).await;
-                    });
-                }
-            }
-        }
-    }
-
-    async fn open(&self, id: &str, port: u16) -> Result<porthub_egress::BoxStream> {
+    async fn open(&self, id: &str, port: u16, dynamic: bool) -> Result<porthub_egress::BoxStream> {
         for base in self.origins() {
             let trial = async {
+                let action = if dynamic { "host-connect" } else { "connect" };
                 let mut url = url::Url::parse(&format!(
-                    "{base}/api/port-forwards/agent/{id}/{port}/connect"
+                    "{base}/api/port-forwards/agent/{id}/{port}/{action}"
                 ))?;
                 let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
                 url.set_scheme(scheme)
@@ -463,210 +435,5 @@ impl Client {
     }
 }
 
-async fn bind_group(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
-    let mut listeners = Vec::new();
-    for &port in ports {
-        listeners.push((port, TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?));
-    }
-    Ok(listeners)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::private_network::authority_clock::{NativeClock, RequestWindow};
-    use axum::{
-        extract::{
-            ws::{Message, WebSocketUpgrade},
-            Path, State,
-        },
-        http::{HeaderMap, StatusCode},
-        response::IntoResponse,
-        routing::get,
-        Json, Router,
-    };
-    use serde_json::{json, Value};
-    use std::sync::atomic::AtomicUsize;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    const ID: &str = "0123456789abcdef01234567";
-    const HOST: &str = "0123456789abcdef01234567.forwards.fixture.test";
-    const PEER: &str = "000000000000000000000001:000000000000000000000002";
-    const TOKEN: &str = "test-private-credential-scope-12345678";
-
-    #[derive(Default)]
-    struct Fixture {
-        rows: RwLock<Vec<Value>>,
-        catalogs: AtomicUsize,
-        streams: AtomicUsize,
-    }
-    fn authorized(headers: &HeaderMap) -> bool {
-        headers.get("authorization").and_then(|s| s.to_str().ok())
-            == Some(format!("Bearer {TOKEN}").as_str())
-            && headers.get("x-porthub-peer").and_then(|s| s.to_str().ok()) == Some(PEER)
-            && headers
-                .get("x-porthub-instance")
-                .and_then(|s| s.to_str().ok())
-                == Some("test-instance")
-    }
-    async fn config(State(s): State<Arc<Fixture>>, headers: HeaderMap) -> axum::response::Response {
-        if !authorized(&headers) {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-        s.catalogs.fetch_add(1, Ordering::SeqCst);
-        Json(json!({"forwards":s.rows.read().unwrap().clone()})).into_response()
-    }
-    async fn socket(
-        State(s): State<Arc<Fixture>>,
-        Path((id, port)): Path<(String, u16)>,
-        headers: HeaderMap,
-        ws: WebSocketUpgrade,
-    ) -> axum::response::Response {
-        let allowed = s
-            .rows
-            .read()
-            .unwrap()
-            .iter()
-            .any(|row| row["entryId"] == id && row["port"] == port);
-        if !authorized(&headers) || !allowed {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-        s.streams.fetch_add(1, Ordering::SeqCst);
-        ws.on_upgrade(|mut ws| async move {
-            while let Some(Ok(msg)) = ws.recv().await {
-                match msg {
-                    Message::Binary(_) => {
-                        if ws.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    Message::Text(eof) if eof == "eof" => {
-                        let _ = ws.send(Message::Binary(b"end".as_slice().into())).await;
-                        let _ = ws.send(Message::Text("eof".into())).await;
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-        })
-    }
-    fn authority(cursor: Option<Uuid>, control: &Arc<Control>) -> Result<Authority<()>> {
-        let mut a = Authority::new(
-            (),
-            Some(RequestWindow::start(Arc::new(NativeClock))?),
-            chrono::Utc::now() + chrono::Duration::seconds(14),
-        );
-        a.forward_sync = cursor.map(|id| (id, control.clone()));
-        Ok(a)
-    }
-    async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(4), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await
-            }
-        })
-        .await?;
-        Ok(())
-    }
-    async fn exchange(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
-        let mut reply = vec![0; payload.len()];
-        stream.write_all(payload).await?;
-        tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut reply)).await??;
-        ensure!(reply == payload, "fixture echo differs");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn catalog_reconciles_live_sockets_and_retries_only_conflicted_local_ports() -> Result<()>
-    {
-        let gw = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let server = format!("http://{}", gw.local_addr()?);
-        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let port = occupied.local_addr()?.port();
-        let spare = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let other = spare.local_addr()?.port();
-        drop(spare);
-        let fixture = Arc::new(Fixture::default());
-        *fixture.rows.write().unwrap() = vec![
-            json!({"entryId":ID,"host":HOST,"port":other}),
-            json!({"entryId":ID,"host":HOST,"port":port}),
-        ];
-        let app = Router::new()
-            .route("/api/port-forwards/agent/config", get(config))
-            .route("/api/port-forwards/agent/{id}/{port}/connect", get(socket))
-            .with_state(fixture.clone());
-        let gateway = tokio::spawn(async move { axum::serve(gw, app).await });
-        let profile = Profile {
-            server,
-            peer_id: PEER.into(),
-            workspace: "000000000000000000000001".into(),
-            token: TOKEN.into(),
-            account_email: None,
-            fallback_servers: vec![],
-            allow_insecure_http_for_tests: true,
-        };
-        let control = Arc::new(Control::new_private(&profile)?);
-        let lease = |cursor| authority(cursor, &control);
-        let manager = Manager::new(profile, "test-instance".into());
-        let names = manager.names();
-        manager.update(&lease(None)?, Some("fixture.test"));
-        tokio::task::yield_now().await;
-        assert_eq!(fixture.catalogs.load(Ordering::SeqCst), 0);
-        let first = Uuid::new_v4();
-        manager.update(&lease(Some(first))?, Some("fixture.test"));
-        wait_for(|| fixture.catalogs.load(Ordering::SeqCst) == 1).await?;
-        assert!(!names.contains(HOST));
-        drop(occupied);
-        wait_for(|| names.contains(HOST)).await?;
-        let mut connection = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
-        exchange(&mut connection, b"before change").await?;
-        manager.update(&lease(Some(first))?, Some("fixture.test"));
-        assert_eq!(fixture.catalogs.load(Ordering::SeqCst), 1);
-        fixture.rows.write().unwrap().reverse();
-        manager.update(&lease(Some(Uuid::new_v4()))?, Some("fixture.test"));
-        wait_for(|| fixture.catalogs.load(Ordering::SeqCst) == 2).await?;
-        exchange(&mut connection, b"after unrelated change").await?;
-        assert_eq!(fixture.streams.load(Ordering::SeqCst), 1);
-        let mut half = TcpStream::connect((Ipv4Addr::LOCALHOST, other)).await?;
-        half.write_all(b"hello").await?;
-        half.shutdown().await?;
-        let mut result = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), half.read_to_end(&mut result)).await??;
-        assert_eq!(result, b"helloend");
-        fixture.rows.write().unwrap().clear();
-        manager.update(&lease(Some(Uuid::new_v4()))?, Some("fixture.test"));
-        wait_for(|| !names.contains(HOST)).await?;
-        let closure = tokio::time::timeout(Duration::from_secs(2), connection.read_u8()).await?;
-        assert!(closure.is_err());
-        let rebound = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
-        assert_eq!(rebound.local_addr()?.ip(), Ipv4Addr::LOCALHOST);
-        *fixture.rows.write().unwrap() = vec![json!({"entryId":ID,"host":HOST,"port":other})];
-        manager.update(&lease(Some(Uuid::new_v4()))?, Some("fixture.test"));
-        wait_for(|| names.contains(&format!("{HOST}."))).await?;
-        drop(manager);
-        assert!(!names.contains(HOST));
-        gateway.abort();
-        Ok(())
-    }
-
-    #[test]
-    fn scoped_descriptors_reject_substituted_alias_and_duplicate_ports() {
-        let parse = |value: Value| {
-            serde_json::from_value::<Catalog>(json!({"forwards":value}))
-                .unwrap()
-                .validate("fixture.test")
-        };
-        let row = json!({"entryId":ID,"host":HOST,"port":10240});
-        assert!(parse(json!([row])).is_ok());
-        assert!(parse(json!([row, row])).is_err());
-        for (k, v) in [
-            ("host", json!("localhost")),
-            ("host", json!("forward.bad.test")),
-            ("entryId", json!("../foreign")),
-            ("port", json!(0)),
-        ] {
-            let mut bad = row.clone();
-            bad[k] = v;
-            assert!(parse(json!([bad])).is_err());
-        }
-    }
-}
+mod tests;

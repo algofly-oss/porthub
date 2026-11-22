@@ -488,7 +488,7 @@ async fn run_authorized_worker(
     let mut component_maintenance = None;
     #[cfg(feature="private-sparse")]
     let (component_clock, component_clock_rx)=tokio::sync::watch::channel(None);
-    #[cfg(feature="private-sparse")]
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
     let forwarder=super::port_forwards::Manager::new(profile.clone(),instance.clone());
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     // Older VPN discovery clients skip tun0-prefixed devices but advertise
@@ -506,6 +506,8 @@ async fn run_authorized_worker(
     let sessions: Sessions = Default::default();
     let (events, mut input) = mpsc::channel(4096);
     let work = cancel.child_token();
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut host_tcp=super::port_forwards::Native::new(forwarder.names(),events.clone(),work.child_token())?;
     let mut tasks = JoinSet::new();
     tasks.spawn({let t=traffic.clone();let c=work.clone();async move{t.run(c).await;Ok::<(),anyhow::Error>(())}});
     #[cfg(target_os="linux")]
@@ -745,8 +747,8 @@ async fn run_authorized_worker(
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 #[cfg(feature="private-sparse")]
                 component_clock.send_replace(authority.clock_sample());
-                #[cfg(feature="private-sparse")]
-                forwarder.update(&authority, snapshot.peers.iter().find(|p|p.id==snapshot.self_).and_then(|p|p.hostname.split_once('.').map(|(_,suffix)|suffix)));
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                forwarder.update(&authority, snapshot.sparse.as_ref().and_then(|_|snapshot.peers.iter().find(|p|p.id==snapshot.self_)).and_then(|p|p.hostname.split_once('.').map(|(_,suffix)|suffix)));
                 let mut route_snapshot=super::exit_plumbing::project(&snapshot,&sparse_handle.exit_leases());
                 #[cfg(feature="local-tor")]
                 {
@@ -892,7 +894,7 @@ async fn run_authorized_worker(
                     { recovery_sockets = server.recovery_sockets().ok(); }
                     let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
-                    #[cfg(feature="private-sparse")]
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
                     {server.zone.write().await.forward_names=Some(forwarder.names());}
                     #[cfg(feature="local-tor")]
                     {
@@ -911,7 +913,7 @@ async fn run_authorized_worker(
                 if snapshot.sparse.is_some(){
                     let audit=audit_capture(&mut device,&path,&snapshot,&routes).await?;
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+                    {forwarder.capture(Some(own.ip),&audit.capture.accepted);native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
                     retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     if !audit.capture.conflicting.is_empty(){tracing::warn!(conflicting_pools=audit.capture.conflicting.len(),"private capture pools conflict with existing routes; safe known hosts retained, range migration required for ambiguous addresses");}
@@ -1101,7 +1103,7 @@ async fn run_authorized_worker(
                 let base=sparse_authority.as_ref().ok_or_else(||anyhow::anyhow!("private pair arrived before base authority"))?;
                 let audit=audit_capture(&mut device,&path,base,&routes).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+                    {forwarder.capture(peer_ips.get(&profile.peer_id).copied(),&audit.capture.accepted);native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
                 let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                 for retired in retired{peer_ips.remove(&retired);by_ip.retain(|_,peer|peer!=&retired);}
@@ -1311,6 +1313,12 @@ async fn run_authorized_worker(
                 }
             },
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            Some(Event::ForwardLocal(reply))=>{
+                if let (Some(tun), Some(own))=(&device,peer_ips.get(&profile.peer_id)) {
+                    host_tcp.deliver(reply,tun,*own).await?;
+                }
+            },
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
             Some(Event::GuardedStreamLocal{peer,packet})=>{
                 // The queue owns the exact native first-origin packet. Never
                 // relabel it using StreamLocal's current-only byte delivery.
@@ -1395,6 +1403,8 @@ async fn run_authorized_worker(
             #[cfg(not(target_os="macos"))]let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
             check_installed_authority(installed_authority.as_ref())?;
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            if host_tcp.packet(peer_ips.get(&profile.peer_id).copied(),parsed.destination(),&buffer[..size]){continue;}
             continuity.pending.observe_lifecycle(parsed);
             if continuity.pending.peers().next().is_some() {
                 if let Some(generation)=installed_authority.as_ref().and_then(|a|a.workspace_generation()).filter(|g|Some(*g)==continuity.generation) {
@@ -1562,7 +1572,7 @@ async fn run_authorized_worker(
                 if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
                     let audit=audit_capture(&mut device,&path,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+                    {forwarder.capture(peer_ips.get(&profile.peer_id).copied(),&audit.capture.accepted);native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
@@ -1715,7 +1725,7 @@ async fn run_authorized_worker(
                 if let Some(base)=sparse_authority.as_ref().filter(|_|device.is_some()){
                     let audit=audit_capture(&mut device,&path,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
                     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+                    {forwarder.capture(peer_ips.get(&profile.peer_id).copied(),&audit.capture.accepted);native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
 
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}

@@ -143,5 +143,5 @@ mod virtual_hosts;
 
 mod sleep_generation;
 
-#[cfg(feature="private-sparse")]
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
 mod port_forwards;

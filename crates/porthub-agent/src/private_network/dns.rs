@@ -18,7 +18,7 @@ use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 #[derive(Default,Clone)]
 pub struct Zone {
-    #[cfg(feature="private-sparse")]
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
     pub(super) forward_names:Option<super::port_forwards::Names>,
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
@@ -92,6 +92,9 @@ fn dns_recovery_requires_an_authorized_answer_and_coalesces_names() {
 }
 
 impl Zone {
+    fn forward_suffix(&self,name:&str)->bool {
+        self.suffixes.iter().any(|suffix| name.strip_suffix(suffix).is_some_and(|prefix| prefix == "forwards." || prefix.ends_with(".forwards.")))
+    }
     pub fn set_sparse(&mut self,handle:super::sparse::Handle){self.sparse=Some(handle);}
     fn missing_private(&self,bytes:&[u8])->Option<String>{
         let query=Message::from_vec(bytes).ok()?;
@@ -103,8 +106,7 @@ impl Zone {
             return None;
         }
         let name=q.name().to_ascii().to_ascii_lowercase();
-        #[cfg(feature="private-sparse")]
-        if self.forward_names.as_ref().is_some_and(|catalog|catalog.reserved(&name)) {return None;}
+        if self.forward_suffix(&name) {return None;}
         if self.records.contains_key(&name)||self.suffixes.contains(&name)||!self.suffixes.iter().any(|s|name.ends_with(&format!(".{s}"))){return None;}
         self.sparse.as_ref().filter(|h|h.enabled()).map(|_|name)
     }
@@ -194,14 +196,16 @@ impl Zone {
                 return reply.to_vec().ok();
             }
         }
-        #[cfg(feature="private-sparse")]
-        if let Some(names) = self.forward_names.as_ref().filter(|names|
-            query.metadata.op_code == OpCode::Query && names.reserved(&name)) {
-            if !names.contains(&name) {
-                reply.metadata.response_code=ResponseCode::NXDomain;
-            } else if q.query_class()==DNSClass::IN && q.query_type()==RecordType::A {
-                reply.add_answer(Record::from_rdata(q.name().clone(),0,RData::A(A(Ipv4Addr::LOCALHOST))));
-            }
+        if query.metadata.op_code == OpCode::Query && self.forward_suffix(&name) {
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            let address=self.forward_names.as_ref().and_then(|names|names.address(&name));
+            #[cfg(not(all(feature="private-sparse",feature="private-stream")))]
+            let address:Option<Ipv4Addr>=None;
+            if let Some(ip)=address {
+                if q.query_class()==DNSClass::IN && q.query_type()==RecordType::A {
+                    reply.add_answer(Record::from_rdata(q.name().clone(),0,RData::A(A(ip))));
+                }
+            } else {reply.metadata.response_code=ResponseCode::NXDomain;}
             return reply.to_vec().ok();
         }
         let code = if query.metadata.op_code != OpCode::Query {
