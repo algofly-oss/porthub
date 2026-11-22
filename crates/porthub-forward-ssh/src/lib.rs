@@ -52,17 +52,25 @@ impl Registry {
             old.cancel.cancel();
         }
     }
-    fn admit(&self, id: &str, epoch: u64, fresh: Arc<Grant>) -> Option<Arc<Grant>> {
+    fn admit(
+        &self,
+        id: &str,
+        epoch: u64,
+        fresh: Arc<Grant>,
+    ) -> Option<(grant::ForwardSession, CancellationToken)> {
         let mut entries = self.0.lock().unwrap();
         if entries.epoch != epoch {
             return None;
         }
         entries.grants.retain(|_, g| g.strong_count() > 0);
         if let Some(existing) = entries.grants.get(id).and_then(Weak::upgrade) {
-            return (!existing.cancel.is_cancelled()).then_some(existing);
+            if existing.has_session() {
+                return None;
+            }
         }
         entries.grants.insert(id.to_owned(), Arc::downgrade(&fresh));
-        Some(fresh)
+        let cancel = fresh.cancel.clone();
+        Some((grant::ForwardSession::new(fresh), cancel))
     }
 }
 impl Drop for Grant {
@@ -151,7 +159,7 @@ impl server::Handler for Handler {
             return Ok(Auth::reject());
         }
         let witness = self.registry.0.lock().unwrap().epoch;
-        let Some(grant) = self
+        let Some((forwarding, token)) = self
             .authority
             .authorize(id, &key.public_key.to_openssh()?)
             .await?
@@ -159,8 +167,7 @@ impl server::Handler for Handler {
         else {
             return Ok(Auth::reject());
         };
-        let token = grant.cancel.clone();
-        self.forwarding = Some(grant::ForwardSession::new(grant));
+        self.forwarding = Some(forwarding);
         if let Some(tx) = self.authenticated.take() {
             let _ = tx.send(token);
         }

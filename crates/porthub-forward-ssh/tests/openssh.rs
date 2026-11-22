@@ -179,6 +179,28 @@ async fn openssh_enforces_saved_mappings_and_live_revocation() -> Result<()> {
         tokio::io::copy(&mut r, &mut w).await?;
         Ok::<(), anyhow::Error>(())
     });
+    // A client with no mappings still owns the profile until its SSH session ends.
+    let mut idle = command().args(["-N", &dest]).spawn()?;
+    timeout(Duration::from_secs(6), async {
+        while !f.auth.grant.has_session() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert!(!timeout(
+        Duration::from_secs(5),
+        command().args(["-N", &dest]).status()
+    )
+    .await??
+    .success());
+    assert!(idle.try_wait()?.is_none());
+    idle.kill().await?;
+    timeout(Duration::from_secs(6), async {
+        while f.auth.grant.has_session() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     let mut ssh = command()
         .args([
             "-N",
