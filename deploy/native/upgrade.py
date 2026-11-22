@@ -30,6 +30,12 @@ def run(arguments, cwd=None):
     return result.stdout
 
 
+def compose_configuration(arguments, root):
+    # Compose resolves relative COMPOSE_FILE entries from cwd even when
+    # --project-directory and --env-file already name an independent root.
+    return json.loads(run([*arguments, 'config', '--format', 'json'], cwd=root))
+
+
 def inspect(kind, name):
     return json.loads(run(['docker', kind, 'inspect', name]))[0]
 
@@ -415,7 +421,7 @@ def perform(args):
 
 def perform_candidate(args, root, roles, current, images, base, depot):
     architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(os.uname().machine, os.uname().machine)
-    configuration = json.loads(run([*base, 'config', '--format', 'json']))
+    configuration = compose_configuration(base, root)
     origins = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles, depot)
     for previous_root, previous_files in origins.values():
         files = [Path(name) for name in previous_files.split(',')]
@@ -474,7 +480,7 @@ def perform_candidate(args, root, roles, current, images, base, depot):
     def verify_selection():
         ordinary = base if depot is None else ['docker', 'compose', '--project-name', args.project,
             '--project-directory', str(root), '--env-file', str(root/'.env')]
-        normal = json.loads(run([*ordinary, 'config', '--format', 'json']))
+        normal = compose_configuration(ordinary, root)
         if depot is not None:
             validate(current, images, normal, args.revision, args.version, architecture, args.project, roles, depot)
         for role, image in images.items():

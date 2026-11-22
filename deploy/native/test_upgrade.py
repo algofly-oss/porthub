@@ -5,6 +5,8 @@ import signal
 import json
 import hashlib
 import tempfile
+import shutil
+import subprocess
 import importlib.util
 from pathlib import Path
 import unittest
@@ -475,4 +477,36 @@ class ReleaseSelection(unittest.TestCase):
                 upgrade.activate(['candidate'], ['previous'], lambda: None, after_roles=fail)
         self.assertEqual([call[0] for call in calls], ['candidate']*3+['previous']*3)
 
-if __name__=='__main__':unittest.main()
+
+
+class ComposeWorkingDirectory(unittest.TestCase):
+    def test_configuration_runner_anchors_the_release_directory(self):
+        root=Path('/independent/staged-release')
+        with patch.object(upgrade,'run',return_value='{"services":{}}') as runner:
+            self.assertEqual(upgrade.compose_configuration(['docker','compose'],root),{'services':{}})
+        runner.assert_called_once_with(['docker','compose','config','--format','json'],cwd=root)
+
+    def test_actual_compose_resolves_relative_depot_overlay_from_unrelated_cwd(self):
+        docker=shutil.which('docker')
+        if not docker or subprocess.run([docker,'compose','version'],capture_output=True,timeout=15).returncode:
+            self.skipTest('Docker Compose CLI unavailable; no daemon is required')
+        with tempfile.TemporaryDirectory(prefix='porthub-compose-cwd-') as temporary:
+            root=Path(temporary)/'release';root.mkdir()
+            outside=Path(temporary)/'unrelated';outside.mkdir()
+            (root/'docker-compose.yml').write_text('services:\n  core:\n    image: porthub:core-fixture\n')
+            (root/'docker-compose.native-builds.yml').write_text('services:\n  core:\n    environment:\n      DEPOT_FIXTURE: enabled\n')
+            env=root/'.env';env.write_text('COMPOSE_FILE=docker-compose.yml:docker-compose.native-builds.yml\n');env.chmod(0o600)
+            arguments=[docker,'compose','--project-name','porthub-cwd-fixture','--project-directory',str(root),'--env-file',str(env)]
+            before={f.name:f.read_bytes() for f in root.iterdir()}
+            original=Path.cwd()
+            try:
+                os.chdir(outside)
+                configuration=upgrade.compose_configuration(arguments,root)
+            finally:
+                os.chdir(original)
+            self.assertEqual(configuration['services']['core']['environment']['DEPOT_FIXTURE'],'enabled')
+            self.assertEqual({f.name:f.read_bytes() for f in root.iterdir()},before)
+
+
+if __name__ == '__main__':
+    unittest.main()
