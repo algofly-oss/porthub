@@ -185,6 +185,23 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(clock[0],30)
             self.assertEqual(len(result['hosted']),1)
 
+    def test_archive_source_change_during_verification_fails_before_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); archive = root/'input.zip'; output = root/'verified'
+            with zipfile.ZipFile(archive,'w') as stream: stream.writestr('file',b'input')
+            with patch.object(s,'expected',side_effect=[{'tree':'old'},{'tree':'new'}]), patch.object(s,'verify_tree',return_value={}):
+                with self.assertRaises(ValueError): s.verify_archive(root,SOURCE,ARM,archive,output)
+            self.assertFalse(output.exists())
+
+    def test_archive_bytes_changed_during_verification_fail_before_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); archive = root/'input.zip'; output = root/'verified'
+            with zipfile.ZipFile(archive,'w') as stream: stream.writestr('file',b'input')
+            def mutate(*args): archive.write_bytes(b'changed'); return {}
+            with patch.object(s,'expected',return_value={'tree':'same'}), patch.object(s,'verify_tree',side_effect=mutate):
+                with self.assertRaises(ValueError): s.verify_archive(root,SOURCE,ARM,archive,output)
+            self.assertFalse(output.exists())
+
     def test_workflow_reuses_configured_depot_and_keeps_all_final_gates(self):
         text = Path(__file__).parents[1].joinpath('.github/workflows/server-platforms.yml').read_text()
         self.assertIn('vars.PORTHUB_TRUSTED_NATIVE_DEPOT', text)
