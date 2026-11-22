@@ -85,6 +85,7 @@ def validation_config(config):
     # Commands remain operator-owned. Never inject flags into an arbitrary
     # builder command or treat a plain build as completed native validation.
     result=dict(config);builders=[]
+    result.pop('server_builders', None)
     for row in config['builders']:
         command=row.get('validation_build')
         if command:
@@ -272,7 +273,8 @@ def run_once(root,repository,branch,config_path,state):
         current=json.loads(checkpoint.read_text()) if checkpoint.exists() else {'schema_version':1,'sources':{}}
         if current.get('schema_version')!=1 or not isinstance(current.get('sources'),dict):
             raise ValueError('Invalid controller checkpoint')
-        complete_runs={row.get('run_id') for row in current['sources'].values() if cohort_complete(row,config)}
+        complete_runs={row.get('run_id') for key,row in current['sources'].items()
+            if cohort_complete(row, {} if key.endswith(':core_only_validation') else config)}
         for artifact,run in requests(repository,branch,complete_runs):
             request=read_request(repository,artifact,run);source=request['source_revision']
             purpose=request.get('purpose','release_build')

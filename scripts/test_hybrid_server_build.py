@@ -75,6 +75,14 @@ class ServerTests(unittest.TestCase):
         row['servers'] = {ARM:{'status':'local_verified'}}
         self.assertTrue(r.cohort_complete(row, config))
 
+    def test_standalone_core_validation_never_inherits_server_builders(self):
+        config = {'builders':[{'target':'aarch64-apple-darwin','build':['build'],'validation_build':['validate']}],
+                  'server_builders':[{'target':ARM}]}
+        selected = r.validation_config(config)
+        self.assertNotIn('server_builders', selected)
+        self.assertEqual(selected['builders'][0]['build'],['validate'])
+        self.assertTrue(r.cohort_complete({'complete':True}, selected))
+
     def test_actual_container_cpu_headroom_and_io_caps_required(self):
         limits = {'host_cpus':2,'cpus':1,'jobs':1,'memory_bytes':6*1024**3,'pids':384,
                   'read_bps':40*1024**2,'write_bps':40*1024**2,'io_device_number':'8:0',
