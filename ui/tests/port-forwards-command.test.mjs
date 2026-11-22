@@ -61,6 +61,18 @@ test("one-line commands use independent keys and fail closed on first contact", 
   );
 });
 
+test("host profiles restrict reverse dynamic forwarding to TCP on the exporter loopback", () => {
+  const host = { ...sample, mappings: [{ direction: "host", gatewayPort: 51000 }] };
+  for (const client of ["openssh", "powershell"]) {
+    const command = forwardCommand(host, client);
+    assert.match(command, /-o PermitRemoteOpen=127\.0\.0\.1:\* -R 127\.0\.0\.1:51000 /);
+  }
+  const config = forwardProfileFiles(host)["porthub.conf"];
+  assert.match(config, /^  PermitRemoteOpen 127\.0\.0\.1:\*$/m);
+  assert.match(config, /^  RemoteForward 127\.0\.0\.1:51000$/m);
+  assert.throws(() => forwardProfileFiles({ ...host, mappings: [...host.mappings, ...sample.mappings] }));
+});
+
 async function listen(server) {
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

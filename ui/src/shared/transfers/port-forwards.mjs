@@ -58,6 +58,11 @@ function forwardSettings(entry) {
   if (!entry.mappings.length || entry.mappings.length > 32)
     throw new Error("Choose 1–32 port mappings.");
   const bindings = entry.mappings.map((mapping) => {
+    if (mapping.direction === "host") {
+      if (entry.mappings.length !== 1)
+        throw new Error("Host forwarding requires its own SSH profile.");
+      return { direction: "host", listen: `127.0.0.1:${tcpPort(mapping.gatewayPort)}` };
+    }
     const local = `127.0.0.1:${tcpPort(mapping.clientPort)}`;
     if (mapping.direction === "remote")
       return {
@@ -85,7 +90,9 @@ export function forwardCommand(entry, client) {
   const rules = bindings
     .map(
       ({ direction, listen, destination }) =>
-        `${direction === "remote" ? "-R" : "-L"} ${listen}:${destination}`,
+        direction === "host"
+          ? `-o PermitRemoteOpen=127.0.0.1:* -R ${listen}`
+          : `${direction === "remote" ? "-R" : "-L"} ${listen}:${destination}`,
     )
     .join(" ");
   const args = `-N -T -a -x -o BatchMode=yes -o NumberOfPasswordPrompts=0 -o PasswordAuthentication=no -o ConnectTimeout=10 -o CheckHostIP=no -o HostKeyAlgorithms=ssh-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o PreferredAuthentications=publickey -o ExitOnForwardFailure=yes -o HostKeyAlias=porthub-forward-gateway -o GlobalKnownHostsFile=none -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p ${port} -l ${entry.username} ${rules} ${gateway}`;
@@ -118,7 +125,10 @@ export function forwardProfileFiles(entry) {
   const { gateway, port, pem, known, bindings } = forwardSettings(entry);
   const forwards = bindings.map(
     ({ direction, listen, destination }) =>
-      `  ${direction === "remote" ? "RemoteForward" : "LocalForward"} ${listen} ${destination}`,
+      direction === "host"
+        ? `  PermitRemoteOpen 127.0.0.1:*
+  RemoteForward ${listen}`
+        : `  ${direction === "remote" ? "RemoteForward" : "LocalForward"} ${listen} ${destination}`,
   );
   const config = [
     "Host forward",

@@ -38,7 +38,7 @@ async function choose(page, label, option) {
       });
       const page = await context.newPage(),
         state = makeDemoData();
-      let extraEntries = [];
+      let extraEntries = [], publicPorts = [];
       let entry,
         reveals = 0,
         creates = 0,
@@ -73,7 +73,7 @@ async function choose(page, label, option) {
           assert.equal(input.groupIds, undefined);
           if (creates === 1)
             assert.deepEqual(input.mappings, [
-              { direction: "remote", clientPort: 22 },
+              { direction: "host" },
             ]);
           else {
             assert.equal(input.mappings.length, 3);
@@ -89,14 +89,14 @@ async function choose(page, label, option) {
             groupIds: [],
             mappings: input.mappings.map((mapping, index) => ({
               ...mapping,
-              ...(mapping.direction === "remote"
+              ...(mapping.direction !== "local"
                 ? { gatewayPort: 24000 + index }
                 : { target: "host-" + machine }),
             })),
             status: {
               connected: false,
               ready: false,
-              privateHost: "test.phub",
+              privateHost: "condor-notebook.forwards.phub",
               publicHost: "gateway.example",
               reason: "Waiting for SSH connection",
             },
@@ -132,6 +132,20 @@ async function choose(page, label, option) {
               !!input.groupIds.length,
           };
           body = { id };
+        } else if (path === `/api/port-forwards/${id}` && method === "PATCH") {
+          entry.name = req.postDataJSON().name;
+          body = { id };
+        } else if (path.startsWith(`/api/port-forwards/${id}/public-ports`)) {
+          if (method === "POST") {
+            const { clientPort } = req.postDataJSON();
+            assert.equal(clientPort, 8888);
+            publicPorts = [{ clientPort, gatewayPort: 35000, host: "gateway.example" }];
+          }
+          if (method === "DELETE") {
+            assert(path.endsWith("/8888"));
+            publicPorts = [];
+          }
+          body = { ports: publicPorts };
         } else if (path.endsWith("/credentials")) {
           reveals++;
           body = {
@@ -181,12 +195,7 @@ async function choose(page, label, option) {
       await page
         .getByRole("button", { name: "Generate command", exact: true })
         .waitFor();
-      assert.equal(
-        await page
-          .getByRole("textbox", { name: "Port on this computer", exact: true })
-          .inputValue(),
-        "22",
-      );
+      assert.equal(await page.getByLabel("Port on this computer", { exact: true }).count(), 0);
       assert.equal(
         await page
           .getByRole("button", { name: "New forward", exact: true })
@@ -225,9 +234,9 @@ async function choose(page, label, option) {
         true,
         "Complete clean command fits without clipping",
       );
-      await page.getByText("Not published", { exact: true }).waitFor();
+
       assert.equal(
-        await page.getByText("test.phub:24000", { exact: true }).count(),
+        await page.getByText("condor-notebook.forwards.phub:24000", { exact: true }).count(),
         0,
       );
       assert.equal(
@@ -261,7 +270,7 @@ async function choose(page, label, option) {
       ]);
       assert.match(
         strFromU8(files["porthub.conf"]),
-        /RemoteForward 127\.0\.0\.1:24000 127\.0\.0\.1:22/,
+        /RemoteForward 127\.0\.0\.1:24000$/m,
       );
       assert.match(
         strFromU8(files["porthub.key"]),
@@ -275,6 +284,9 @@ async function choose(page, label, option) {
         await page.evaluate(() => window.testClipboard),
         cleanCommand,
       );
+      const closeSettings = () => page.getByRole("button", { name: "Close forward settings", exact: true }).click();
+      const settingsSection = name => page.getByRole("dialog").getByRole("button", { name, exact: true }).click();
+      await closeSettings();
       const layout = await page.evaluate(() => {
         const panel = document.getElementById("transfer-panel").getBoundingClientRect();
         const footer = document.querySelector('footer[aria-label="Forwards pagination"]').getBoundingClientRect();
@@ -286,25 +298,14 @@ async function choose(page, label, option) {
         };
       });
       assert.deepEqual(layout, { fullWidth: true, footerAtBottom: true, footerWidth: true });
-      await shot("isolated-command");
-      await page
-        .getByRole("button", { name: "Edit access", exact: true })
-        .click();
-      await choose(page, "Access mode", "Public address and port");
-      await page
-        .getByRole("button", { name: "Save access", exact: true })
-        .click();
-      await page
-        .getByRole("form", { name: "Edit access for Condor notebook", exact: true })
-        .waitFor({ state: "hidden" });
-      await page.getByText("gateway.example:24000", { exact: true }).waitFor();
-      assert.equal(await command.textContent(), cleanCommand);
-      assert.equal(creates, 1);
-      assert.equal(reveals, 1);
+      await shot("inventory");
+      await page.getByRole("button", { name: "Configure Condor notebook" }).click();
+      await settingsSection("Public ports");
+      await page.getByLabel("Port on this computer").fill("8888");
+      await page.getByRole("button", { name: "Publish port", exact: true }).click();
+      await page.getByText("gateway.example:35000", { exact: true }).waitFor();
       await shot("public");
-      await page
-        .getByRole("button", { name: "Edit access", exact: true })
-        .click();
+      await settingsSection("Access");
       await choose(page, "Access mode", "Selected PortHub machines and groups");
       const picker = page.getByRole("searchbox", {
         name: "Allowed machines and groups",
@@ -350,7 +351,7 @@ async function choose(page, label, option) {
         .waitFor();
       assert.equal(
         entry.public,
-        true,
+        false,
         "Failed edit leaves saved access intact",
       );
       assert.equal(creates, 1);
@@ -362,20 +363,23 @@ async function choose(page, label, option) {
       await page
         .getByRole("form", { name: "Edit access for Condor notebook", exact: true })
         .waitFor({ state: "hidden" });
-      await page.getByText("test.phub:24000", { exact: true }).waitFor();
+      await page.getByRole("dialog").getByText("condor-notebook.forwards.phub", { exact: true }).waitFor();
+      await settingsSection("Public ports");
+      await page.getByText("gateway.example:35000", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "Unpublish", exact: true }).click();
+      await page.getByText("No public ports.").waitFor();
+
       assert.deepEqual(entry.machineIds, [secondMachine]);
       assert.equal(entry.id, id);
       assert.equal(reveals, 1);
-      await page
-        .getByRole("button", { name: "Edit access", exact: true })
-        .click();
+      await settingsSection("Access");
       await choose(page, "Access mode", "Not published");
       await page
         .getByRole("button", { name: "Save access", exact: true })
         .click();
-      await page.getByText("Not published", { exact: true }).waitFor();
+      await page.getByRole("dialog").getByText("Choose machines or groups in Access to use this hostname.", { exact: true }).waitFor();
       assert.equal(
-        await page.getByText("test.phub:24000", { exact: true }).count(),
+        await page.getByText("condor-notebook.forwards.phub:24000", { exact: true }).count(),
         0,
       );
       await page
@@ -383,11 +387,11 @@ async function choose(page, label, option) {
         .waitFor({ state: "hidden" });
       assert.equal(creates, 1);
       assert.equal(reveals, 1);
-      assert.equal(updates, 4);
-      assert.equal(await command.textContent(), cleanCommand);
-      await page
-        .getByRole("button", { name: "Delete Condor notebook", exact: true })
-        .click();
+      assert.equal(updates, 3);
+      await page.getByRole("dialog").getByLabel("Profile name").fill("Renamed notebook");
+      await page.getByRole("button", { name: "Save name", exact: true }).click();
+      await page.getByRole("dialog", { name: "Renamed notebook" }).waitFor();
+      await page.getByRole("button", { name: "Delete profile", exact: true }).click();
       await page
         .getByRole("button", { name: "Delete forward", exact: true })
         .click();
@@ -398,6 +402,7 @@ async function choose(page, label, option) {
       await page
         .getByText("Advanced ports and direction", { exact: true })
         .click();
+      await choose(page, "Forwarding mode", "Specific ports");
       await page
         .getByLabel("Profile name", { exact: false })
         .fill("Support laptop");
@@ -466,9 +471,11 @@ async function choose(page, label, option) {
         true,
       );
       await shot("advanced");
-      await page
-        .getByRole("button", { name: "Hide credentials", exact: true })
-        .click();
+      await settingsSection("Access");
+      await choose(page, "Access mode", "Public address and port");
+      await page.getByRole("button", { name: "Save access", exact: true }).click();
+      await page.getByRole("dialog").getByText("gateway.example:24000", { exact: true }).waitFor();
+      await closeSettings();
       await pair.click();
       await tab.click();
       await page
@@ -499,7 +506,7 @@ async function choose(page, label, option) {
       assert.deepEqual(errors, []);
       await context.close();
       console.log(
-        `PASS clean isolated generation/download, same-ID audience edits/pills/error, advanced directions at ${width}px`,
+        `PASS host profile, private audience and independent public ports, rename, legacy mappings, search and pagination at ${width}px`,
       );
     }
   } finally {

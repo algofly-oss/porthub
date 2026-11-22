@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { IconChevronDown, IconCopy, IconPlus, IconTerminal2, IconTrash } from "@tabler/icons-react";
+import { useEffect, useRef, useState } from "react";
+import { IconChevronDown, IconCopy, IconPlus, IconServer, IconPlugConnected, IconAdjustmentsHorizontal, IconTerminal2, IconTrash } from "@tabler/icons-react";
+import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
 import {
@@ -221,34 +222,35 @@ function Commands({ credentials, profileName }) {
 
 function MappingAddress({ entry, mapping, machines }) {
   const local = mapping.direction === "local";
+  const wholeHost = mapping.direction === "host";
   const published =
-    entry.published ??
+    wholeHost ? !!entry.machineIds?.length || !!entry.groupIds?.length : entry.published ??
     (entry.public || !!entry.machineIds?.length || !!entry.groupIds?.length);
   const host = local
     ? "127.0.0.1"
-    : !published
+    : wholeHost ? entry.status?.privateHost : !published
       ? null
       : entry.public
         ? entry.status?.publicHost
         : entry.status?.privateHost;
   const port = local ? mapping.clientPort : mapping.gatewayPort;
   const address =
-    host && (host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`);
+    host && (wholeHost ? host : host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`);
   const destination = local
     ? machines.find((x) => x.id === mapping.machineId)?.name || mapping.target
     : null;
   return (
     <li className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-      <span className="text-muted-foreground">
+      {!wholeHost && <span className="text-muted-foreground">
         {local
           ? `Access ${destination}:${mapping.servicePort} from`
           : `${!published ? "Client" : entry.public ? "Public access to" : "Private access to"} port ${mapping.clientPort}`}
-      </span>
-      {!local && !published ? (
+      </span>}
+      {!local && !published && !wholeHost ? (
         <span>Not published</span>
       ) : address ? (
         <>
-          <code className="min-w-0 break-all">{address}</code>
+          <code className="min-w-0 max-w-full break-all font-mono text-xs text-foreground">{address}</code>
           <Button
             size="sm"
             variant="ghost"
@@ -266,9 +268,12 @@ function MappingAddress({ entry, mapping, machines }) {
           >
             <IconCopy size={14} />
           </Button>
+          {wholeHost && <p className="basis-full text-xs text-muted-foreground">{published
+            ? <>Append the service port, e.g. <code>:8888</code>.</>
+            : "Choose machines or groups in Access to use this hostname."}</p>}
         </>
       ) : (
-        <span>Address pending</span>
+        <span>{published ? "Address pending" : "Not published"}</span>
       )}
     </li>
   );
@@ -277,6 +282,7 @@ function MappingAddress({ entry, mapping, machines }) {
 function Builder({ machines, onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [mappings, setMappings] = useState([emptyMapping()]);
+  const [kind, setKind] = useState("host");
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -290,7 +296,7 @@ function Builder({ machines, onCreated, onCancel }) {
     setSaving(true);
     setError("");
     try {
-      const rows = mappings.flatMap((mapping) => {
+      const rows = kind === "host" ? [{ direction: "host" }] : mappings.flatMap((mapping) => {
         const ports = expandPortRange(mapping.ports);
         if (mapping.direction === "remote")
           return ports.map((clientPort) => ({
@@ -313,7 +319,7 @@ function Builder({ machines, onCreated, onCancel }) {
       if (rows.length > 32)
         throw new Error("Choose up to 32 port mappings per command.");
       const result = await request("", "POST", {
-        name: name.trim() || `Port ${mappings[0].ports.trim()}`,
+        name: name.trim() || (kind === "host" ? "Private host" : `Port ${mappings[0].ports.trim()}`),
         mappings: rows,
       });
       onCreated(result.id);
@@ -325,7 +331,7 @@ function Builder({ machines, onCreated, onCancel }) {
   }
   return (
     <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
+      <div className="grid gap-3">
       <label className={label}>
         Profile name{" "}
         <span className="font-normal text-muted-foreground">
@@ -336,33 +342,18 @@ function Builder({ machines, onCreated, onCancel }) {
           value={name}
           onChange={(event) => setName(event.target.value)}
           className={field}
-          placeholder="e.g. Condor notebook"
+          placeholder="e.g. devbox"
         />
       </label>
-      {!advanced &&
-        mappings.length === 1 &&
-        mappings[0].direction === "remote" && (
-          <label className={label}>
-            Port on this computer
-            <input
-              autoFocus
-              className={field}
-              value={mappings[0].ports}
-              required
-              placeholder="22 or 8000-8003"
-              onChange={(event) => update(0, "ports", event.target.value)}
-            />
-          </label>
-        )}
       </div>
-      {!advanced &&
-        (mappings.length > 1 || mappings[0].direction !== "remote") && (
-          <p className="text-sm">
-            {mappings.length} configured port mapping
-            {mappings.length === 1 ? "" : "s"}. Open advanced settings to review
-            them.
-          </p>
-        )}
+      {kind === "host" && (
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          The profile name supplies the private hostname. For example, <code>devbox.forwards.phub:8888</code> reaches port 8888 on this computer from an allowed machine.
+        </p>
+      )}
+      {!advanced && kind === "ports" && (
+        <p className="text-sm">{mappings.length} configured port mapping{mappings.length === 1 ? "" : "s"}. Open advanced settings to review them.</p>
+      )}
       <Button
         type="button"
         variant="ghost"
@@ -379,6 +370,14 @@ function Builder({ machines, onCreated, onCancel }) {
           id="advanced-port-mappings"
           className="space-y-4 border-t border-border pt-3"
         >
+          <label className={label}>
+            Forwarding mode
+            <SearchDropdown aria-label="Forwarding mode" className={field} value={kind} onChange={event => setKind(event.target.value)}>
+              <option value="host">Private host</option>
+              <option value="ports">Specific ports</option>
+            </SearchDropdown>
+          </label>
+          {kind === "ports" && <>
           {mappings.map((mapping, index) => (
             <fieldset key={index} className="border-t border-border pt-3">
               <legend className="pr-2 text-sm font-semibold">
@@ -492,6 +491,7 @@ function Builder({ machines, onCreated, onCancel }) {
             <IconPlus size={16} />
             Add mapping
           </Button>
+          </>}
         </div>
       )}
       {error && (
@@ -528,7 +528,7 @@ function AudienceEditor({
   onBusy,
 }) {
   const [audience, setAudience] = useState(
-    entry.public ? "public" : entry.published ? "private" : "isolated",
+    entry.public ? "public" : entry.machineIds?.length || entry.groupIds?.length ? "private" : "isolated",
   );
   const [selected, setSelected] = useState([
     ...(entry.machineIds || []).map((id) => "m:" + id),
@@ -574,11 +574,14 @@ function AudienceEditor({
     <form
       onSubmit={save}
       aria-label={`Edit access for ${entry.name}`}
-      className="mt-3 space-y-3 border-t border-border pt-3"
+      onKeyDown={event => {
+        if (event.key === "Escape" && event.target.matches("input")) event.stopPropagation();
+      }}
+      className="space-y-3"
     >
       <fieldset disabled={saving}>
         <legend className="mb-1 text-sm font-medium">
-          Who can reach this port?
+          {entry.mappings.some(m => m.direction === "host") ? "Who can reach this host?" : "Who can reach this port?"}
         </legend>
         <SearchDropdown
           aria-label="Access mode"
@@ -588,7 +591,7 @@ function AudienceEditor({
         >
           <option value="isolated">Not published</option>
           <option value="private">Selected PortHub machines and groups</option>
-          <option value="public">Public address and port</option>
+          {!entry.mappings.some(m => m.direction === "host") && <option value="public">Public address and port</option>}
         </SearchDropdown>
         {audience === "private" && (
           <div className="my-2">
@@ -652,6 +655,104 @@ function AudienceEditor({
   );
 }
 
+function PublicPorts({ entry }) {
+  const [ports, setPorts] = useState(null);
+  const [port, setPort] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const url = "/" + entry.id + "/public-ports";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setPorts(null);
+    setError("");
+    request(url, "GET", null, controller.signal)
+      .then(data => { if (!controller.signal.aborted) setPorts(data.ports); })
+      .catch(err => { if (!controller.signal.aborted) setError(err.message); });
+    return () => controller.abort();
+  }, [url, retry]);
+
+  async function change(clientPort, remove) {
+    if (pending) return;
+    setPending(true);
+    setError("");
+    try {
+      const data = await request(remove ? url + "/" + clientPort : url, remove ? "DELETE" : "POST", remove ? undefined : { clientPort });
+      setPorts((data ?? await request(url)).ports);
+      if (!remove) setPort("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPending(false);
+    }
+  }
+  return <section className="space-y-4">
+    <p className="text-sm text-muted-foreground">Publish individual TCP services on this computer to a public gateway address.</p>
+    {ports && <>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void change(Number(port), false); }}>
+        <label className={label}>Port on this computer
+          <input type="number" min={1} max={65535} required value={port} onChange={e => setPort(e.target.value)} className={field} placeholder="e.g. 8888" />
+        </label>
+        <Button type="submit" disabled={pending || !port}>Publish port</Button>
+      </form>
+      {!ports.length ? <p className="py-1 text-sm text-muted-foreground">No public ports.</p> :
+        <ul className="divide-y divide-border border-y border-border">{ports.map(item => {
+          const address = item.host.includes(":") && !item.host.startsWith("[") ? `[${item.host}]:${item.gatewayPort}` : `${item.host}:${item.gatewayPort}`;
+          return <li key={item.clientPort} className="flex flex-wrap items-center gap-2 py-2.5">
+            <div className="min-w-0 flex-1"><p className="text-xs text-muted-foreground">TCP {item.clientPort}</p><code className="break-all text-sm">{address}</code></div>
+            <Button variant="ghost" size="icon" aria-label={`Copy public address ${address}`} onClick={() => copyText(address).then(() => toast.success("Address copied")).catch(() => toast.error("Select and copy the address."))}><IconCopy size={16}/></Button>
+            <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => change(item.clientPort, true)}>Unpublish</Button>
+          </li>;
+        })}</ul>}
+    </>}
+    {!ports && !error && <p role="status">Loading public ports…</p>}
+    {error && <div role="alert" className="text-sm text-destructive">{error}{ports === null && <Button type="button" size="sm" variant="ghost" onClick={() => setRetry(n => n + 1)}>Retry</Button>}</div>}
+  </section>;
+}
+
+function ProfileSettings({ entry, machines, busy, onSaved, onRemove }) {
+  const [name, setName] = useState(entry.name);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  async function save(event) {
+    event.preventDefault();
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await request("/" + entry.id, "PATCH", { name: name.trim() });
+      onSaved(name.trim());
+      toast.success("Profile name saved");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <section className="space-y-5">
+    <form className="flex flex-wrap items-end gap-2" onSubmit={save}>
+      <label className={label + " flex-1"}>Profile name<input className={field} maxLength={80} required value={name} onChange={e => setName(e.target.value)} /></label>
+      <Button type="submit" disabled={saving || !name.trim() || name.trim() === entry.name}>Save name</Button>
+    </form>
+    <div><h3 className="mb-1 text-sm font-medium">Address</h3>
+      <ul className="space-y-1 text-sm">{entry.mappings.map((mapping, i) => <MappingAddress key={i} entry={entry} mapping={mapping} machines={machines} />)}</ul>
+    </div>
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    {entry.mappings.every(m => m.direction !== "host") && (
+      <p className="text-sm text-muted-foreground">This profile shares the ports listed above. To reach other services on their original ports, create a private host profile and run its SSH command.</p>
+    )}
+    <div className="border-t border-border pt-3">
+      {confirm ? <div role="group" aria-label="Confirm deletion" className="flex flex-wrap items-center gap-2">
+        <p className="w-full text-sm">Delete this forward and disconnect its client?</p>
+        <Button size="sm" variant="destructive" disabled={busy} onClick={onRemove}>Delete forward</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirm(false)}>Keep forward</Button>
+      </div> : <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => setConfirm(true)}><IconTrash size={15} />Delete profile</Button>}
+    </div>
+  </section>;
+}
+
 export default function PortForwards() {
   const demo = useDemo();
   if (demo)
@@ -674,16 +775,28 @@ function SavedForwards() {
     [error, setError] = useState(""),
     [building, setBuilding] = useState(false);
   const [shown, setShown] = useState(null),
-    [confirm, setConfirm] = useState(null),
+    [selectedId, setSelectedId] = useState(null),
     [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [editing, setEditing] = useState(null);
+  const [section, setSection] = useState("Profile");
+  const selected = data?.entries.find(entry => entry.id === selectedId);
+  function closeProfile() {
+    sequence.current++;
+    setSelectedId(null);
+    setShown(null);
+    setBusy(false);
+  }
+  function openProfile(id, sectionName = "Profile") {
+    setSelectedId(id);
+    setSection(sectionName);
+    if (sectionName === "SSH command" && shown?.id !== id) void reveal(id);
+  }
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const query = search.trim().toLowerCase();
   const matches = (data?.entries || []).filter(entry =>
-    [entry.name, ...entry.mappings.flatMap(m => [m.clientPort, m.gatewayPort, m.servicePort])]
+    [entry.name, entry.status?.privateHost, entry.status?.publicHost, ...entry.mappings.flatMap(m => [m.clientPort, m.gatewayPort, m.servicePort])]
       .some(value => value != null && String(value).toLowerCase().includes(query))
   );
   const pages = Math.max(1, Math.ceil(matches.length / pageSize));
@@ -741,9 +854,7 @@ function SavedForwards() {
     setError("");
     try {
       await request("/" + id, "DELETE");
-      setConfirm(null);
-      setEditing(null);
-      setShown(null);
+      closeProfile();
       setData((d) => ({ ...d, entries: d.entries.filter((x) => x.id !== id) }));
       setRevision((r) => r + 1);
     } catch (err) {
@@ -754,32 +865,24 @@ function SavedForwards() {
   }
   return (
     <div className={data?.entries.length && !building ? "flex min-h-0 w-full flex-1 flex-col" : "w-full p-4 sm:p-5"}>
-      <div className={`flex shrink-0 flex-wrap items-start justify-between gap-3 ${data?.entries.length && !building ? "px-3 pt-3 sm:px-4" : "mb-5"}`}>
-        <div>
-          <h2 className="text-base font-semibold">
-            {building || data?.entries.length === 0 ? "New port forward" : "Port forwards"}
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {building || data?.entries.length === 0
-              ? "Run the SSH command on the computer sharing the port, then choose who can connect."
-              : "Connect a computer using SSH. The computer running the command does not need a PortHub agent."}
-          </p>
-        </div>
-        {!building && data?.entries.length > 0 && (
-          <Button
-            size="sm"
-            disabled={busy}
-            onClick={() => {
-              setBuilding(true);
-              setShown(null);
-              setConfirm(null);
-            }}
-          >
-            <IconPlus size={16} />
-            New forward
-          </Button>
-        )}
-      </div>
+      {building || !data?.entries.length ? (
+        <header className="mb-5">
+          <h2 className="text-base font-semibold">New port forward</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Run the generated command on the computer you want to connect.</p>
+        </header>
+      ) : (
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-3 sm:px-4">
+          <h2 className="text-base font-semibold">Saved forwards</h2>
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+            <input type="search" aria-label="Search forwards" placeholder="Search forwards…" value={search}
+              onChange={event => { setSearch(event.target.value); setPage(1); }}
+              className="h-9 w-full min-w-20 max-w-64 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-primary" />
+            <Button size="sm" className="shrink-0" disabled={busy} onClick={() => {
+              setBuilding(true); closeProfile();
+            }}><IconPlus size={16} />New forward</Button>
+          </div>
+        </header>
+      )}
       {error && (
         <div
           role="alert"
@@ -813,119 +916,49 @@ function SavedForwards() {
               setSearch("");
               setPage(1);
               setRevision((r) => r + 1);
-              void reveal(id);
+              openProfile(id, "SSH command");
             }}
           />
         ) : (
           <div className="flex min-h-0 w-full flex-1 flex-col">
-            <div className="shrink-0 px-3 py-3 sm:px-4"><input type="search" aria-label="Search forwards" placeholder="Search by name or port" value={search}
-              onChange={event => { setSearch(event.target.value); setPage(1); }}
-              className={field} /></div>
             <div className="data-scroll">
-            <table aria-label="Saved port forwards" className="block w-full text-left text-sm sm:table">
-              <thead className="hidden border-y border-border text-xs text-muted-foreground sm:table-header-group">
-                <tr>{["Profile", "SSH client", "Actions"].map(heading =>
+            <table aria-label="Saved port forwards" className="block w-full text-left text-sm lg:table">
+              <thead className="hidden border-y border-border text-xs text-muted-foreground lg:table-header-group">
+                <tr>{["Profile", "Connection", "Address", "Actions"].map(heading =>
                   <th key={heading} scope="col" className={heading === "Actions" ? "px-3 py-2 text-right font-medium" : "px-3 py-2 font-medium"}>{heading}</th>)}</tr>
               </thead>
-              <tbody className="block sm:table-row-group">
-              {!matches.length && <tr><td colSpan={3} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
+              <tbody className="block lg:table-row-group">
+              {!matches.length && <tr><td colSpan={4} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
               {matches.slice((current - 1) * pageSize, current * pageSize).map(entry => {
                 const connected = entry.status?.connected ?? (entry.status?.ready ? true : null);
-                return <Fragment key={entry.id}><tr className="block border-t border-border sm:table-row">
-                  <td className="block px-2 pt-3 align-top sm:table-cell sm:pb-2">
-                    <h3 className="break-words font-semibold">{entry.name}</h3>
-                    <ul className="mt-1 space-y-1 text-xs">{entry.mappings.map((mapping, index) =>
-                      <MappingAddress key={index} entry={entry} mapping={mapping} machines={data.machines} />)}</ul>
+                return <tr key={entry.id} className="block border-t border-border hover:bg-accent/20 lg:table-row">
+                  <td className="block px-3 pt-3 align-middle lg:table-cell lg:py-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground lg:flex" aria-hidden="true">
+                        {entry.mappings.some(m => m.direction === "host") ? <IconServer size={17} /> : <IconPlugConnected size={17} />}
+                      </span>
+                      <div className="min-w-0">
+                        <h3 className="break-words font-semibold"><button type="button" className="text-left hover:underline focus-visible:outline-primary" onClick={() => openProfile(entry.id)}>{entry.name}</button></h3>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{entry.mappings.some(m => m.direction === "host") ? "Private host" : "Port mapping"}</p>
+                      </div>
+                    </div>
                   </td>
-                  <td className="block px-2 py-2 align-top sm:table-cell sm:pt-3">
+                  <td className="block px-3 py-1.5 align-middle lg:table-cell lg:py-2">
                     <span className="inline-flex items-center gap-2 text-xs font-medium">
                       <span aria-hidden="true" className={"h-2 w-2 shrink-0 rounded-full " + (connected ? "bg-emerald-500" : "bg-muted-foreground/50")} />
                       {connected ? "Connected" : connected === false ? "Disconnected" : "Status unavailable"}
                     </span>
-                    {entry.status?.reason && <p className="mt-1 text-xs text-muted-foreground">{entry.status.reason}</p>}
+                    {entry.status?.reason && !/waiting for .*ssh/i.test(entry.status.reason) && <p className="mt-1 text-xs text-muted-foreground">{entry.status.reason}</p>}
                   </td>
-                  <td className="block px-2 pb-2 align-top sm:table-cell sm:pt-2"><div className="flex flex-wrap gap-1 sm:justify-end">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() =>
-                        shown?.id === entry.id
-                          ? setShown(null)
-                          : reveal(entry.id)
-                      }
-                    >
-                      {shown?.id === entry.id
-                        ? "Hide credentials"
-                        : "Show command"}
-                    </Button>
-                    {entry.mappings.some(
-                      (mapping) => mapping.direction === "remote",
-                    ) && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() =>
-                          setEditing(editing === entry.id ? null : entry.id)
-                        }
-                      >
-                        Edit access
-                      </Button>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`Delete ${entry.name}`}
-                      disabled={busy}
-                      onClick={() => setConfirm(entry.id)}
-                    >
-                      <IconTrash size={16} />
-                    </Button>
-                  </div></td></tr>
-                {(editing === entry.id || confirm === entry.id || shown?.id === entry.id) && <tr className="block sm:table-row"><td colSpan={3} className="block px-2 pb-3 sm:table-cell">
-                {editing === entry.id && (
-                  <AudienceEditor
-                    entry={entry}
-                    machines={data.machines}
-                    groups={data.groups}
-                    onBusy={setBusy}
-                    onCancel={() => setEditing(null)}
-                    onSaved={() => {
-                      setEditing(null);
-                      setRevision((value) => value + 1);
-                    }}
-                  />
-                )}
-                {confirm === entry.id && (
-                  <div
-                    className="mt-3 flex flex-wrap items-center gap-2 text-sm"
-                    role="group"
-                    aria-label="Confirm deletion"
-                  >
-                    <span>Delete this forward and disconnect its clients?</span>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => remove(entry.id)}
-                    >
-                      Delete forward
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setConfirm(null)}
-                    >
-                      Keep forward
-                    </Button>
-                  </div>
-                )}
-                {shown?.id === entry.id && (
-                  <Commands credentials={shown.credentials} profileName={entry.name} />
-                )}
-                </td></tr>}
-              </Fragment>;
+                  <td className="block px-3 py-1.5 align-middle lg:table-cell lg:py-2">
+                    <ul className="space-y-1 text-xs">{entry.mappings.map((mapping, index) =>
+                      <MappingAddress key={index} entry={entry} mapping={mapping} machines={data.machines} />)}</ul>
+                  </td>
+                  <td className="block px-3 py-2 align-middle lg:table-cell"><div className="flex flex-wrap gap-1 lg:justify-end">
+                    <Button variant="ghost" size="icon" aria-label={`Show command for ${entry.name}`} title="Show SSH command" onClick={() => openProfile(entry.id, "SSH command")}><IconTerminal2 size={17} /></Button>
+                    <Button variant="outline" size="sm" onClick={() => openProfile(entry.id)} aria-label={`Configure ${entry.name}`}><IconAdjustmentsHorizontal size={15} />Configure</Button>
+                  </div></td>
+                </tr>;
               })}
               </tbody>
             </table>
@@ -934,6 +967,22 @@ function SavedForwards() {
               onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
           </div>
         ))}
+      {selected && <Dialog opened onClose={closeProfile} size="lg" title={selected.name} closeButtonProps={{ "aria-label": "Close forward settings" }}>
+        <div className="mb-4 flex flex-wrap gap-1 border-b border-border pb-2" role="group" aria-label="Forward settings sections">
+          {["Profile", ...(selected.mappings.some(m => m.direction !== "local") ? ["Access"] : []), ...(selected.mappings.some(m => m.direction === "host") ? ["Public ports"] : []), "SSH command"].map(title =>
+            <Button key={title} size="sm" variant={section === title ? "secondary" : "ghost"} aria-pressed={section === title} onClick={() => openProfile(selected.id, title)}>{title}</Button>)}
+        </div>
+        {section === "Profile" && <ProfileSettings key={selected.id} entry={selected} machines={data.machines} busy={busy} onRemove={() => remove(selected.id)}
+          onSaved={name => { setData(old => ({ ...old, entries: old.entries.map(e => e.id === selected.id ? { ...e, name } : e) })); setRevision(n => n + 1); }} />}
+        {section === "Access" && <AudienceEditor key={selected.id} entry={selected} machines={data.machines} groups={data.groups} onBusy={setBusy}
+          onCancel={() => setSection("Profile")} onSaved={() => { setSection("Profile"); setRevision(n => n + 1); }} />}
+        {section === "Public ports" && <PublicPorts key={selected.id} entry={selected} />}
+        {section === "SSH command" && (shown?.id === selected.id
+          ? <Commands credentials={shown.credentials} profileName={selected.name} />
+          : busy ? <p role="status" className="text-sm">Loading command…</p>
+          : <Button onClick={() => reveal(selected.id)}>Load SSH command</Button>)}
+        {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
+      </Dialog>}
     </div>
   );
 }
