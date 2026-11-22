@@ -3,6 +3,7 @@
 pub(crate) mod media_transport;
 pub(crate) mod cli;
 mod relay;
+mod native_probe;
 mod diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod direct;
@@ -787,10 +788,7 @@ async fn session(
     let direct = negotiate(&mut socket, source, allowed, &control).await?;
     // Exchange fresh kernel identifiers after replugging; retain the configured physical identity.
     let mut device = if source {
-        inventory_for(path)
-            .into_iter()
-            .find(|d| d.same_device(&plan.device))
-            .context("USB device unplugged or changed")?
+        source_device(&plan.device, relayed.as_ref().map(|(_, _, metadata)| &metadata.device)).await?
     } else {
         plan.device.clone()
     };
@@ -799,7 +797,17 @@ async fn session(
     if source {
         #[cfg(target_os="linux")] {
             if let Some((lease,stream,metadata))=relayed.take(){device=metadata.device;wire=Some(metadata.wire);prepared=Some((Handoff::RelaySource(lease),stream));}
-            else {wire=Some(protocol::local_device(&device)?);let(guard,stream)=linux::handoff(path,&device,true)?;prepared=Some((Handoff::Linux(guard),stream));}
+            else {
+                wire = Some(protocol::local_device(&device)?);
+                let profile = path.to_owned();
+                let selected = device.clone();
+                let runtime = tokio::runtime::Handle::current();
+                let (guard, stream) = native_probe::selected_claim(move |claim| {
+                    let _entered = runtime.enter();
+                    linux::handoff_source(&profile, &selected, &claim)
+                }).await??;
+                prepared = Some((Handoff::Linux(guard), stream));
+            }
         }
         #[cfg(target_os="macos")] {
             let(guard,stream,actual,bytes)=macos::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Mac(guard),stream));
@@ -1186,6 +1194,71 @@ async fn bridge_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         _ = revoked => Ok(()),
     }
 }
+fn choose_physical_device(
+    expected: &porthub_components::usb::Device,
+    devices: Vec<porthub_components::usb::Device>,
+) -> Result<porthub_components::usb::Device> {
+    let mut exact = devices
+        .iter()
+        .filter(|d| d.busid == expected.busid && d.same_device(expected));
+    if let Some(device) = exact.next() {
+        ensure!(exact.next().is_none(), "Ambiguous USB port identity");
+        ensure!(
+            device.blocked.is_none(),
+            "{}",
+            device
+                .blocked
+                .as_deref()
+                .unwrap_or("USB device unavailable")
+        );
+        return Ok(device.clone());
+    }
+    ensure!(
+        !expected.serial.is_empty(),
+        "USB device unplugged or changed"
+    );
+    let mut matches = devices.into_iter().filter(|d| d.same_device(expected));
+    let device = matches.next().context("USB device unplugged or changed")?;
+    ensure!(matches.next().is_none(), "Ambiguous serialized USB device");
+    ensure!(
+        device.blocked.is_none(),
+        "{}",
+        device
+            .blocked
+            .as_deref()
+            .unwrap_or("USB device unavailable")
+    );
+    Ok(device)
+}
+async fn source_device(
+    expected: &porthub_components::usb::Device,
+    relayed: Option<&porthub_components::usb::Device>,
+) -> Result<porthub_components::usb::Device> {
+    if let Some(device) = relayed {
+        // The claimed lease already bound the alias to authenticated upstream
+        // descriptors. Native bus IDs differ, including serial-less imports.
+        ensure!(
+            device.vendor == expected.vendor
+                && device.product == expected.product
+                && device.serial == expected.serial,
+            "USB relay identity changed"
+        );
+        return Ok(device.clone());
+    }
+    let expected = expected.clone();
+    native_probe::selected(move || {
+        #[cfg(target_os = "linux")]
+        {
+            linux::resolve_physical(&expected)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            choose_physical_device(&expected, inventory())
+        }
+    })
+    .await?
+}
+
 /// The OS-authenticated local broker keeps machine credentials inside the agent.
 pub(crate) async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     mut reader: tokio::io::BufReader<S>,
@@ -1197,7 +1270,15 @@ pub(crate) async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpi
     use tokio::io::AsyncWriteExt;
     let mut body = message;
     if body["action"] == "devices" {
-        let reply=json!({"devices":inventory_for(path)});
+        let profile = path.to_owned();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = native_probe::broker(move || inventory_for(&profile)) => result,
+        };
+        let reply = match result {
+            Ok(devices) => json!({"devices":devices}),
+            Err(error) => json!({"error":error.to_string()}),
+        };
         reader.get_mut().write_all(format!("{reply}\n").as_bytes()).await?;
         return Ok(());
     }
@@ -1695,3 +1776,82 @@ mod control_backpressure_tests {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod memory_benchmark;
+
+#[cfg(test)]
+mod selected_source_tests {
+    use super::*;
+    fn device(bus: &str, serial: &str) -> porthub_components::usb::Device {
+        porthub_components::usb::Device {
+            busid: bus.into(),
+            vendor: "1377".into(),
+            product: "1100".into(),
+            serial: serial.into(),
+            name: bus.into(),
+            busnum: 1,
+            devnum: 2,
+            speed: 2,
+            blocked: None,
+        }
+    }
+    #[test]
+    fn physical_selection_never_uses_first_duplicate_serial() -> Result<()> {
+        let expected = device("1-2", "same");
+        let other = device("1-3", "same");
+        assert_eq!(
+            choose_physical_device(&expected, vec![other.clone(), expected.clone()])?.busid,
+            "1-2"
+        );
+        let moved = device("1-9", "same");
+        assert!(choose_physical_device(&moved, vec![other.clone(), expected.clone()]).is_err());
+        assert_eq!(choose_physical_device(&moved, vec![other])?.busid, "1-3");
+        let mut blocked = expected.clone();
+        blocked.blocked = Some("Mounted storage device".into());
+        assert!(choose_physical_device(&expected, vec![blocked, device("1-3", "same")]).is_err());
+        assert!(choose_physical_device(&device("1-9", ""), vec![device("1-3", "")]).is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn authenticated_relay_metadata_skips_busy_physical_lookup_even_without_serial(
+    ) -> Result<()> {
+        let _held = native_probe::selection_slot().clone().try_acquire_owned()?;
+        for serial in ["same", ""] {
+            let expected = device("0-42", serial);
+            let actual = device("1-2", serial);
+            assert_eq!(source_device(&expected, Some(&actual)).await?, actual);
+            assert!(source_device(&expected, Some(&device("1-2", "wrong")))
+                .await
+                .is_err());
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn broker_busy_inventory_returns_error_without_scanning_or_blocking() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let _held = native_probe::broker_slot().clone().try_acquire_owned()?;
+        let control = Arc::new(Control::new(crate::profile::Profile {
+            format_version: 1,
+            server: "https://fixture.invalid".into(),
+            machine_id: "a".repeat(24),
+            token: "fixture".into(),
+            account_email: None,
+            fallback_servers: vec![],
+            setup_overrides: Default::default(),
+            allow_insecure_http_for_tests: false,
+        })?);
+        let (server, mut client) = tokio::io::duplex(4096);
+        serve(
+            tokio::io::BufReader::new(server),
+            control,
+            Path::new("unused"),
+            json!({"action":"devices"}),
+            CancellationToken::new(),
+        )
+        .await?;
+        let mut text = String::new();
+        client.read_to_string(&mut text).await?;
+        let value: Value = serde_json::from_str(&text)?;
+        assert!(value["error"].as_str().unwrap().contains("busy"));
+        assert!(value.get("devices").is_none());
+        Ok(())
+    }
+}

@@ -60,7 +60,10 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
                 windows_inventory(physical,daemon_devices(args.user,args.registration.as_deref())).await
             };
             #[cfg(target_os="linux")]
-            let devices = daemon_devices(args.user,args.registration.as_deref()).await.unwrap_or_else(|_|super::inventory());
+            let devices = match daemon_devices(args.user,args.registration.as_deref()).await {
+                Ok(devices) => devices,
+                Err(_) => super::native_probe::broker(super::inventory).await?,
+            };
             #[cfg(not(any(windows,target_os="linux")))]
             let devices = super::inventory();
             println!("{}", serde_json::to_string_pretty(&devices)?);

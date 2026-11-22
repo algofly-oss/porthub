@@ -201,6 +201,92 @@ pub(super) fn recover(profile: &Path) {
         }
     }
 }
+fn physical_at_port(sys: &Path, busid: &str, expected: &Device, mounts: &str) -> Option<Device> {
+    inventory_scan(sys, false, Some(busid), Some(mounts))
+        .into_iter()
+        .find(|d| d.same_device(expected))
+}
+fn available(device: Device) -> Result<Device> {
+    ensure!(
+        device.blocked.is_none(),
+        "{}",
+        device
+            .blocked
+            .as_deref()
+            .unwrap_or("USB device unavailable")
+    );
+    Ok(device)
+}
+pub(super) fn resolve_physical(expected: &Device) -> Result<Device> {
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo")?;
+    resolve_physical_at(Path::new("/sys"), expected, &mounts)
+}
+fn resolve_physical_at(sys: &Path, expected: &Device, mounts: &str) -> Result<Device> {
+    ensure!(
+        expected.valid() && !expected.busid.starts_with("0-"),
+        "Invalid physical USB identity"
+    );
+    std::fs::read_dir(sys.join("class/net"))?;
+    std::fs::read_dir(sys.join("class/block"))?;
+    if let Some(device) = physical_at_port(sys, &expected.busid, expected, mounts) {
+        return available(device);
+    }
+    ensure!(
+        !expected.serial.is_empty(),
+        "USB device unplugged or changed"
+    );
+    let mut selected = None;
+    for (count, entry) in std::fs::read_dir(sys.join("bus/usb/devices"))?.enumerate() {
+        ensure!(
+            count < 4096,
+            "USB identity search exceeds bounded inventory"
+        );
+        let entry = entry?;
+        let busid = entry.file_name().to_string_lossy().into_owned();
+        if !valid_busid(&busid) {
+            continue;
+        }
+        let path = std::fs::canonicalize(entry.path())?;
+        if path
+            .components()
+            .any(|p| p.as_os_str().to_string_lossy().starts_with("vhci_hcd"))
+        {
+            continue;
+        }
+        // Do not read unrelated manufacturers/names to find one fingerprint.
+        let attribute = |name: &str| -> Result<String> {
+            let text = std::fs::read_to_string(path.join(name))?;
+            let text = text.trim();
+            ensure!(text.len() <= 256, "USB identity attribute exceeds bounds");
+            Ok(text.to_owned())
+        };
+        if attribute("idVendor")? != expected.vendor || attribute("idProduct")? != expected.product
+        {
+            continue;
+        }
+        if attribute("serial")? != expected.serial {
+            continue;
+        }
+        ensure!(selected.is_none(), "Ambiguous serialized USB device");
+        selected = Some(busid);
+    }
+    let busid = selected.context("USB device unplugged or changed")?;
+    available(
+        physical_at_port(sys, &busid, expected, mounts)
+            .context("USB device changed during selection")?,
+    )
+}
+fn exact_physical(expected: &Device) -> Result<Device> {
+    let sys = Path::new("/sys");
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo")?;
+    std::fs::read_dir(sys.join("class/net"))?;
+    std::fs::read_dir(sys.join("class/block"))?;
+    available(
+        physical_at_port(sys, &expected.busid, expected, &mounts)
+            .context("Selected USB port changed identity")?,
+    )
+}
+
 fn selected_physical_device(device: &Device) -> Option<Device> {
     inventory_scan(Path::new("/sys"), false, Some(&device.busid), None)
         .into_iter()
@@ -308,7 +394,11 @@ impl Drop for Handoff {
 }
 // A UAS controller can retain stream state after its driver is detached. Reset
 // the selected, unmounted device before exporting its bulk-only alternate mode.
-fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
+fn prepare_storage(
+    path: &Path,
+    device: &Device,
+    claim: &super::native_probe::ClaimPermit,
+) -> Result<()> {
     let descriptors = std::fs::read(path.join("descriptors"))?;
     let mut bulk_interfaces = Vec::new();
     let mut offset = 0;
@@ -340,6 +430,7 @@ fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
     let unbind = || -> Result<()> {
         for (interface, _) in &interfaces {
             if interface.join("driver").exists() {
+                claim.check()?;
                 write(
                     interface.join("driver/unbind"),
                     interface.file_name().unwrap().as_encoded_bytes(),
@@ -355,26 +446,31 @@ fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
             "/dev/bus/usb/{:03}/{:03}",
             device.busnum, device.devnum
         ))?;
+    claim.check()?;
     unbind()?;
     // USBDEVFS_RESET, CLAIMINTERFACE, SETINTERFACE and RELEASEINTERFACE.
+    claim.check()?;
     if unsafe { libc::ioctl(usb.as_raw_fd(), 0x5514, 0) } < 0 {
         return Err(std::io::Error::last_os_error()).context("Reset USB storage before export");
     }
     unbind()?;
     for (_, number) in &interfaces {
+        claim.check()?;
         if unsafe { libc::ioctl(usb.as_raw_fd(), 0x8004550fu32 as _, number) } < 0 {
             return Err(std::io::Error::last_os_error()).context("Claim USB storage interface");
         }
         let alternate = [*number, 0u32];
-        let result =
-            unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u32 as _, alternate.as_ptr()) };
-        let error = std::io::Error::last_os_error();
+        let result = claim.check().and_then(|()| {
+            if unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u32 as _, alternate.as_ptr()) } < 0 {
+                Err(std::io::Error::last_os_error()).context("Select USB bulk storage interface")
+            } else {
+                Ok(())
+            }
+        });
         unsafe {
             libc::ioctl(usb.as_raw_fd(), 0x80045510u32 as _, number);
         }
-        if result < 0 {
-            return Err(error).context("Select USB bulk storage interface");
-        }
+        result?;
     }
     Ok(())
 }
@@ -383,6 +479,22 @@ pub(super) fn handoff(
     profile: &Path,
     device: &Device,
     source: bool,
+) -> Result<(Handoff, tokio::net::TcpStream)> {
+    ensure!(!source, "Physical USB source requires live claim authority");
+    handoff_checked(profile, device, false, None)
+}
+pub(super) fn handoff_source(
+    profile: &Path,
+    device: &Device,
+    claim: &super::native_probe::ClaimPermit,
+) -> Result<(Handoff, tokio::net::TcpStream)> {
+    handoff_checked(profile, device, true, Some(claim))
+}
+fn handoff_checked(
+    profile: &Path,
+    device: &Device,
+    source: bool,
+    claim: Option<&super::native_probe::ClaimPermit>,
 ) -> Result<(Handoff, tokio::net::TcpStream)> {
     ensure!(device.valid(), "Invalid USB device");
     // The kernel requires a TCP socket, so bridge over a private loopback pair.
@@ -404,49 +516,58 @@ pub(super) fn handoff(
         port: None,
     };
     if source {
-        let current = selected_physical_device(device)
-            .context("The selected USB device is unplugged or has changed identity")?;
-        ensure!(
-            current.blocked.is_none(),
-            "{}",
-            current.blocked.as_deref().unwrap_or("Device unavailable")
-        );
-        ensure!(
-            current.busnum == device.busnum
-                && current.devnum == device.devnum
-                && current.speed == device.speed,
-            "USB device was re-enumerated; waiting for updated inventory"
-        );
-        let path = Path::new("/sys/bus/usb/devices").join(&device.busid);
-        ensure!(
-            !path.join("usbip_sockfd").exists(),
-            "USB device is already owned by another exporter"
-        );
-        let journal = journal(profile, &device.busid);
-        crate::profile::write_private(
-            &journal,
-            &serde_json::to_vec(&Claim {
-                device: current.clone(),
-            })?,
-            true,
-        )?;
-        guard.device = Some(current);
-        guard.journal = Some(journal);
-        prepare_storage(&path, device)?;
-        write(
-            "/sys/bus/usb/drivers/usbip-host/match_busid",
-            format!("add {}", device.busid),
-        )?;
-        if path.join("driver").exists() {
-            write(path.join("driver/unbind"), device.busid.as_bytes())?;
-        }
-        write(
-            "/sys/bus/usb/drivers/usbip-host/bind",
-            device.busid.as_bytes(),
-        )?;
-        write(
-            path.join("usbip_sockfd"),
-            guard.kernel.as_raw_fd().to_string(),
+        let claim = claim.context("Live USB source claim missing")?;
+        claim.after_preflight(
+            || exact_physical(device),
+            |current| {
+                ensure!(
+                    current.blocked.is_none(),
+                    "{}",
+                    current.blocked.as_deref().unwrap_or("Device unavailable")
+                );
+                ensure!(
+                    current.busnum == device.busnum
+                        && current.devnum == device.devnum
+                        && current.speed == device.speed,
+                    "USB device was re-enumerated; waiting for updated inventory"
+                );
+                let path = Path::new("/sys/bus/usb/devices").join(&device.busid);
+                ensure!(
+                    !path.join("usbip_sockfd").exists(),
+                    "USB device is already owned by another exporter"
+                );
+                let journal = journal(profile, &device.busid);
+                crate::profile::write_private(
+                    &journal,
+                    &serde_json::to_vec(&Claim {
+                        device: current.clone(),
+                    })?,
+                    true,
+                )?;
+                guard.device = Some(current);
+                guard.journal = Some(journal);
+                prepare_storage(&path, device, claim)?;
+                claim.check()?;
+                write(
+                    "/sys/bus/usb/drivers/usbip-host/match_busid",
+                    format!("add {}", device.busid),
+                )?;
+                if path.join("driver").exists() {
+                    claim.check()?;
+                    write(path.join("driver/unbind"), device.busid.as_bytes())?;
+                }
+                claim.check()?;
+                write(
+                    "/sys/bus/usb/drivers/usbip-host/bind",
+                    device.busid.as_bytes(),
+                )?;
+                claim.check()?;
+                write(
+                    path.join("usbip_sockfd"),
+                    guard.kernel.as_raw_fd().to_string(),
+                )?;
+                Ok(())
+            },
         )?;
     } else {
         let status = std::fs::read_to_string("/sys/devices/platform/vhci_hcd.0/status")?;
@@ -478,6 +599,7 @@ fn attach_compatible(speed: u32, attach: impl Fn(u32) -> Result<()>) -> Result<(
     }
     Ok(())
 }
+
 fn free_port(status: &str, speed: u32) -> Option<u32> {
     status
         .lines()
@@ -593,5 +715,123 @@ mod tests {
         assert_eq!(free_port(status, 3), Some(1));
         assert_eq!(free_port(status, 5), Some(8));
         assert_eq!(speed("5000"), Some(5));
+    }
+}
+
+#[cfg(test)]
+mod physical_lookup_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+    fn device(sys: &Path, bus: &str, serial: &str) -> Result<Device> {
+        let p = sys.join("bus/usb/devices").join(bus);
+        std::fs::create_dir_all(&p)?;
+        std::fs::create_dir_all(sys.join("class/net"))?;
+        std::fs::create_dir_all(sys.join("class/block"))?;
+        let devnum = bus.split('-').nth(1).unwrap();
+        for (name, value) in [
+            ("speed", "480"),
+            ("busnum", "1"),
+            ("devnum", devnum),
+            ("bDeviceClass", "00"),
+            ("idVendor", "1377"),
+            ("idProduct", "1100"),
+            ("serial", serial),
+            ("manufacturer", "Fixture"),
+            ("product", "Mic"),
+        ] {
+            std::fs::write(p.join(name), value)?;
+        }
+        Ok(Device {
+            busid: bus.into(),
+            vendor: "1377".into(),
+            product: "1100".into(),
+            serial: serial.into(),
+            name: "Fixture Mic".into(),
+            busnum: 1,
+            devnum: devnum.parse()?,
+            speed: 3,
+            blocked: None,
+        })
+    }
+    #[test]
+    fn exact_port_and_unique_replug_do_not_open_unrelated_manufacturer() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let sys = temp.path();
+        let expected = device(sys, "1-2", "selected")?;
+        device(sys, "1-3", "unrelated")?;
+        let manufacturer = sys.join("bus/usb/devices/1-3/manufacturer");
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        ensure!(fd >= 0);
+        let watcher = unsafe { std::fs::File::from_raw_fd(fd) };
+        let name = std::ffi::CString::new(manufacturer.as_os_str().as_bytes())?;
+        ensure!(
+            unsafe { libc::inotify_add_watch(watcher.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) }
+                >= 0
+        );
+        assert_eq!(resolve_physical_at(sys, &expected, "")?.busid, "1-2");
+        let mut replug = expected.clone();
+        replug.busid = "1-9".into();
+        assert_eq!(resolve_physical_at(sys, &replug, "")?.busid, "1-2");
+        let mut events = [0u8; 128];
+        assert_eq!(
+            unsafe {
+                libc::read(
+                    watcher.as_raw_fd(),
+                    events.as_mut_ptr().cast(),
+                    events.len(),
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        Ok(())
+    }
+    #[test]
+    fn duplicate_serial_prefers_exact_port_but_replug_must_be_unique() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let sys = temp.path();
+        let expected = device(sys, "1-2", "same")?;
+        device(sys, "1-3", "same")?;
+        assert_eq!(resolve_physical_at(sys, &expected, "")?.busid, "1-2");
+        let mut moved = expected.clone();
+        moved.busid = "1-9".into();
+        assert!(resolve_physical_at(sys, &moved, "")
+            .unwrap_err()
+            .to_string()
+            .contains("Ambiguous"));
+        Ok(())
+    }
+    #[test]
+    fn selected_lookup_preserves_mounted_and_active_network_denials() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let sys = temp.path();
+        let expected = device(sys, "1-2", "selected")?;
+        let physical = sys.join("bus/usb/devices/1-2");
+        let block = physical.join("block/sdz");
+        std::fs::create_dir_all(&block)?;
+        std::fs::write(block.join("dev"), "8:96")?;
+        symlink(&block, sys.join("class/block/sdz"))?;
+        assert!(resolve_physical_at(
+            sys,
+            &expected,
+            "42 1 8:96 / /mnt/test rw - ext4 /dev/sdz rw"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Mounted"));
+        std::fs::remove_file(sys.join("class/block/sdz"))?;
+        let net = sys.join("class/net/fixture");
+        std::fs::create_dir_all(&net)?;
+        symlink(&physical, net.join("device"))?;
+        std::fs::write(net.join("operstate"), "up")?;
+        assert!(resolve_physical_at(sys, &expected, "")
+            .unwrap_err()
+            .to_string()
+            .contains("Active network"));
+        Ok(())
     }
 }
