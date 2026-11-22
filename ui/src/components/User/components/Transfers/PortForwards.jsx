@@ -713,6 +713,10 @@ function PublicPorts({ entry }) {
 
 function ProfileSettings({ entry, machines, busy, onSaved, onRemove }) {
   const [name, setName] = useState(entry.name);
+  const address = entry.status?.privateHost || "";
+  const [currentLabel, ...suffix] = address.split(".");
+  const [hostname, setHostname] = useState(currentLabel);
+  const hostnameChanged = Boolean(address) && hostname !== currentLabel;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [confirm, setConfirm] = useState(false);
@@ -722,9 +726,9 @@ function ProfileSettings({ entry, machines, busy, onSaved, onRemove }) {
     setSaving(true);
     setError("");
     try {
-      await request("/" + entry.id, "PATCH", { name: name.trim() });
+      await request("/" + entry.id, "PATCH", { name: name.trim(), ...(hostnameChanged ? { hostname } : {}) });
       onSaved(name.trim());
-      toast.success("Profile name saved");
+      toast.success("Profile saved");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -734,7 +738,12 @@ function ProfileSettings({ entry, machines, busy, onSaved, onRemove }) {
   return <section className="space-y-5">
     <form className="flex flex-wrap items-end gap-2" onSubmit={save}>
       <label className={label + " flex-1"}>Profile name<input className={field} maxLength={80} required value={name} onChange={e => setName(e.target.value)} /></label>
-      <Button type="submit" disabled={saving || !name.trim() || name.trim() === entry.name}>Save name</Button>
+      {address && <label className={label + " w-full"}>Private address
+        <span className="flex items-center gap-1"><input className={field + " min-w-0"} required maxLength={63}
+          aria-label="Private hostname" value={hostname} onChange={e => setHostname(e.target.value.toLowerCase())} />
+          <span className="text-sm text-muted-foreground">.{suffix.join(".")}</span></span>
+      </label>}
+      <Button type="submit" disabled={saving || !name.trim() || (!hostnameChanged && name.trim() === entry.name)}>Save changes</Button>
     </form>
     <div><h3 className="mb-1 text-sm font-medium">Address</h3>
       <ul className="space-y-1 text-sm">{entry.mappings.map((mapping, i) => <MappingAddress key={i} entry={entry} mapping={mapping} machines={machines} />)}</ul>
@@ -975,7 +984,7 @@ function SavedForwards() {
           {["Profile", ...(selected.mappings.some(m => m.direction !== "local") ? ["Access"] : []), ...(selected.mappings.some(m => m.direction === "host") ? ["Public ports"] : []), "SSH command"].map(title =>
             <Button key={title} size="sm" variant={section === title ? "secondary" : "ghost"} aria-pressed={section === title} onClick={() => openProfile(selected.id, title)}>{title}</Button>)}
         </div>
-        {section === "Profile" && <ProfileSettings key={selected.id} entry={selected} machines={data.machines} busy={busy} onRemove={() => remove(selected.id)}
+        {section === "Profile" && <ProfileSettings key={selected.id + (selected.status?.privateHost || "")} entry={selected} machines={data.machines} busy={busy} onRemove={() => remove(selected.id)}
           onSaved={name => { setData(old => ({ ...old, entries: old.entries.map(e => e.id === selected.id ? { ...e, name } : e) })); setRevision(n => n + 1); }} />}
         {section === "Access" && <AudienceEditor key={selected.id} entry={selected} machines={data.machines} groups={data.groups} onBusy={setBusy}
           onCancel={() => setSection("Profile")} onSaved={() => { setSection("Profile"); setRevision(n => n + 1); }} />}

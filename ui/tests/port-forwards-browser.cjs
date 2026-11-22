@@ -134,6 +134,8 @@ async function choose(page, label, option) {
           body = { id };
         } else if (path === `/api/port-forwards/${id}` && method === "PATCH") {
           entry.name = req.postDataJSON().name;
+          assert.equal(req.postDataJSON().hostname, "new-notebook");
+          entry.status.privateHost = "new-notebook.forwards.phub";
           body = { id };
         } else if (path.startsWith(`/api/port-forwards/${id}/public-ports`)) {
           if (method === "POST") {
@@ -393,7 +395,8 @@ async function choose(page, label, option) {
       assert.equal(reveals, 1);
       assert.equal(updates, 3);
       await page.getByRole("dialog").getByLabel("Profile name").fill("Renamed notebook");
-      await page.getByRole("button", { name: "Save name", exact: true }).click();
+      await page.getByLabel("Private hostname").fill("new-notebook");
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
       await page.getByRole("dialog", { name: "Renamed notebook" }).waitFor();
       await page.getByRole("button", { name: "Delete profile", exact: true }).click();
       await page

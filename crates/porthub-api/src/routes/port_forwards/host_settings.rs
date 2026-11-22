@@ -5,6 +5,7 @@ use crate::port_forward_bridge::host_public;
 #[serde(deny_unknown_fields)]
 pub(super) struct Rename {
     name: String,
+    hostname: Option<String>,
 }
 
 pub(super) async fn rename(
@@ -21,11 +22,33 @@ pub(super) async fn rename(
             "Enter a name of up to 80 characters.",
         ));
     }
+    let mut fields = doc! {"name":name};
+    let _allocation;
+    #[cfg(feature = "private-sparse")]
+    let _workspace;
+    if let Some(hostname) = input.hostname {
+        let hostname = hostname.trim().to_ascii_lowercase();
+        if hostname.is_empty() || hostname.len() > 63 || hostname.starts_with('-')
+            || hostname.ends_with('-') || porthub_forward_ssh::valid_id(&hostname)
+            || !hostname.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(ApiError::bad_request("Enter a valid private hostname label."));
+        }
+        _allocation = app.private_network_lock.lock().await;
+        #[cfg(feature = "private-sparse")]
+        { _workspace = crate::private_renumber::fence::stable_with_allocation(&app, owner).await?; }
+        if app.collection(COLLECTION).count_documents(
+            doc! {"workspace_id":owner,"_id":{"$ne":id},"dns_label":&hostname}
+        ).await? > 0 {
+            return Err(ApiError::new(StatusCode::CONFLICT, "That private hostname is already in use."));
+        }
+        fields.insert("dns_label", hostname);
+    }
     if app
         .collection(COLLECTION)
         .update_one(
             doc! {"_id":id,"workspace_id":owner,"state":"active"},
-            doc! {"$set":{"name":name}},
+            doc! {"$set":fields},
         )
         .await?
         .matched_count
