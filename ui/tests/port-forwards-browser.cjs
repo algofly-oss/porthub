@@ -512,6 +512,14 @@ async function choose(page, label, option) {
       else await page.getByRole("button", { name: "2", exact: true }).click();
       await table.getByRole("heading", { name: "Lab device 10", exact: true }).waitFor();
       await search.fill("Support laptop");
+      await table.getByRole("row", { name: "Configure Support laptop" }).click();
+      const session = page.getByRole("dialog");
+      await session.getByRole("status", { name: "SSH session: Connected", exact: true }).waitFor();
+      entry.status.connected = false;
+      await session.getByRole("status", { name: "SSH session: Disconnected", exact: true }).waitFor({ timeout: 10000 });
+      entry.status.connected = true;
+      await session.getByRole("status", { name: "SSH session: Connected", exact: true }).waitFor({ timeout: 10000 });
+      await closeSettings();
       entry.status.connected = false;
       await refreshStatus();
       await table.getByText("Disconnected", { exact: true }).waitFor();

@@ -31,6 +31,14 @@ const emptyMapping = () => ({
   machine: "",
 });
 
+function ConnectionStatus({ connected }) {
+  const label = connected === true ? "Connected" : connected === false ? "Disconnected" : "Status unavailable";
+  return <span role="status" aria-label={`SSH session: ${label}`} className="inline-flex items-center gap-2 text-xs font-medium">
+    <span aria-hidden="true" className={"h-2 w-2 shrink-0 rounded-full " + (connected === true ? "bg-emerald-500" : "bg-muted-foreground/50")} />
+    {label}
+  </span>;
+}
+
 async function request(suffix = "", method = "GET", body, signal) {
   const response = await fetch(api + suffix, {
     method,
@@ -838,7 +846,7 @@ function SavedForwards() {
       }
     }
     refresh();
-    const timer = setInterval(refresh, 20000);
+    const timer = setInterval(refresh, 5000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       controller.abort();
@@ -928,7 +936,6 @@ function SavedForwards() {
               <tbody className="block lg:table-row-group">
               {!matches.length && <tr><td colSpan={3} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
               {matches.slice((current - 1) * pageSize, current * pageSize).map(entry => {
-                const connected = entry.status?.connected ?? (entry.status?.ready ? true : null);
                 return <tr key={entry.id} id={`forward-row-${entry.id}`} tabIndex={0} aria-haspopup="dialog" aria-label={`Configure ${entry.name}`}
                   onClick={() => openProfile(entry.id)} onKeyDown={event => {
                     if (event.key === "Enter" || event.key === " ") {
@@ -949,10 +956,7 @@ function SavedForwards() {
                     </div>
                   </td>
                   <td className="block px-3 py-1.5 align-middle lg:table-cell lg:py-2">
-                    <span className="inline-flex items-center gap-2 text-xs font-medium">
-                      <span aria-hidden="true" className={"h-2 w-2 shrink-0 rounded-full " + (connected ? "bg-emerald-500" : "bg-muted-foreground/50")} />
-                      {connected ? "Connected" : connected === false ? "Disconnected" : "Status unavailable"}
-                    </span>
+                    <ConnectionStatus connected={entry.status?.connected} />
                     {entry.status?.reason && !/waiting for .*ssh/i.test(entry.status.reason) && <p className="mt-1 text-xs text-muted-foreground">{entry.status.reason}</p>}
                   </td>
                   <td className="block px-3 py-1.5 align-middle lg:table-cell lg:py-2">
@@ -980,6 +984,7 @@ function SavedForwards() {
           }} />
       </Dialog>}
       {selected && <Dialog opened onClose={closeProfile} size="lg" title={selected.name} closeButtonProps={{ "aria-label": "Close forward settings" }}>
+        <div className="mb-2"><ConnectionStatus connected={selected.status?.connected} /></div>
         <div className="mb-4 flex flex-wrap gap-1 border-b border-border pb-2" role="group" aria-label="Forward settings sections">
           {["Profile", ...(selected.mappings.some(m => m.direction !== "local") ? ["Access"] : []), ...(selected.mappings.some(m => m.direction === "host") ? ["Public ports"] : []), "SSH command"].map(title =>
             <Button key={title} size="sm" variant={section === title ? "secondary" : "ghost"} aria-pressed={section === title} onClick={() => openProfile(selected.id, title)}>{title}</Button>)}
