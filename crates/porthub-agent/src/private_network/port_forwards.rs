@@ -93,12 +93,17 @@ struct Entry {
 }
 #[derive(Default)]
 struct Entries {
+    fetched: bool,
     by_address: HashMap<Ipv4Addr, Arc<Entry>>,
     by_name: HashMap<String, Ipv4Addr>,
 }
 impl Entries {
-    fn reconcile(&mut self, catalog: Catalog) {
-        let mut current = Self::default();
+    fn reconcile(&mut self, catalog: Option<Catalog>) {
+        let mut current = Self {
+            fetched: catalog.is_some(),
+            ..Default::default()
+        };
+        let catalog = catalog.unwrap_or(Catalog { hosts: vec![] });
         for identity in catalog.hosts {
             let address = identity.address;
             current.by_name.insert(identity.host.clone(), address);
@@ -121,6 +126,7 @@ impl Entries {
             current.by_address.insert(address, entry);
         }
         for retired in self.by_address.values() {
+            tracing::debug!("SSH host catalog entry retired");
             retired.stop.cancel();
         }
         *self = current;
@@ -162,6 +168,7 @@ impl Generation {
         while let Ok(left) = self.remaining() {
             tokio::select! {_=self.stop.cancelled()=>break,_=tokio::time::sleep(left)=>{}}
         }
+        tracing::debug!(remaining=?self.remaining(), "SSH host catalog lease ended");
         self.stop.cancel();
     }
     async fn run(&self) {
@@ -174,7 +181,7 @@ impl Generation {
             self.entries
                 .write()
                 .expect("forward catalog")
-                .reconcile(fetched.unwrap_or(Catalog { hosts: vec![] }));
+                .reconcile(fetched.ok());
             if valid {
                 retry = Duration::from_secs(1);
                 if changes.changed().await.is_err() {
@@ -193,17 +200,29 @@ pub(super) struct Names {
     capture: Arc<RwLock<Capture>>,
 }
 impl Names {
+    pub(super) fn resolve(&self, name: &str) -> Result<Option<Ipv4Addr>> {
+        let current = self.current.read().expect("forward generation lock");
+        let g = current
+            .as_ref()
+            .context("private forward catalog pending")?;
+        g.remaining()?;
+        let entries = g.entries.read().expect("forward catalog");
+        ensure!(entries.fetched, "private forward catalog pending");
+        let Some(address) = entries.by_name.get(name.trim_end_matches('.')).copied() else {
+            return Ok(None);
+        };
+        ensure!(
+            self.capture
+                .read()
+                .expect("forward capture routes")
+                .allows(address),
+            "private forward route unavailable"
+        );
+        Ok(Some(address))
+    }
+    #[cfg(test)]
     pub(super) fn address(&self, name: &str) -> Option<Ipv4Addr> {
-        let current = self.current.read().ok()?;
-        let g = current.as_ref()?;
-        g.remaining().ok()?;
-        let target = *g
-            .entries
-            .read()
-            .ok()?
-            .by_name
-            .get(name.trim_end_matches('.'))?;
-        self.capture.read().ok()?.allows(target).then_some(target)
+        self.resolve(name).ok().flatten()
     }
     fn target(&self, address: Ipv4Addr) -> Option<Scope> {
         let current = self.current.read().ok()?;
@@ -264,6 +283,12 @@ impl Manager {
     pub(super) fn capture(&self, own: Option<Ipv4Addr>, pools: &[Network]) {
         let mut capture = self.names.capture.write().expect("forward capture routes");
         if capture.own != own || capture.pools != pools {
+            tracing::debug!(
+                have_own = own.is_some(),
+                previous_pools = capture.pools.len(),
+                pools = pools.len(),
+                "SSH host capture changed"
+            );
             capture.stop.cancel();
             *capture = Capture {
                 own,
@@ -285,12 +310,10 @@ impl Manager {
                         .is_ok_and(|r| r.is_some_and(|d| !d.is_zero()))
             });
         if let (Some(g), Some(((cursor, control), suffix))) = (current.as_ref(), wanted) {
+            // The workspace write fence protects machine-to-machine TCP replay. SSH
+            // grants have their own authenticated change cursor and server-side
+            // stream checks. Unrelated writes must not retire an active SSH host.
             if g.suffix == suffix
-                && g.lease
-                    .read()
-                    .expect("forward lease lock")
-                    .workspace_generation()
-                    == authority.workspace_generation()
                 && Arc::ptr_eq(&g.client.control, control)
                 && g.remaining().is_ok()
             {
@@ -307,6 +330,7 @@ impl Manager {
             }
         }
         if let Some(old) = current.take() {
+            tracing::debug!(remaining=?old.remaining(),renewed=wanted.is_some(),"SSH host catalog replaced");
             old.stop.cancel();
         }
         let Some(((cursor, control), suffix)) = wanted else {

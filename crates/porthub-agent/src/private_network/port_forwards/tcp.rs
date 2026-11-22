@@ -134,15 +134,15 @@ impl Native {
                 publish.send_replace(Some(pending.ingress()));
                 let conn = pending.established().await?;
                 publish.send_replace(Some(conn.ingress()));
-                bridge(conn, remote, &admitted).await
+                bridge(conn, remote, &admitted, flow).await
             };
             tokio::select! {
                 biased;
-                _ = admitted.g.stop.cancelled() => {},
-                _ = admitted.entry.stop.cancelled() => {},
-                _ = admitted.capture.cancelled() => {},
+                _ = admitted.g.stop.cancelled() => tracing::debug!(source_port=flow.source.port(),"SSH flow lost catalog"),
+                _ = admitted.entry.stop.cancelled() => tracing::debug!(source_port=flow.source.port(),"SSH flow lost entry"),
+                _ = admitted.capture.cancelled() => tracing::debug!(source_port=flow.source.port(),"SSH flow lost capture"),
                 result = run => { if let Err(error) = result {
-                    tracing::debug!(port=flow.destination.port(), %error, "private SSH host flow closed");
+                    tracing::debug!(source_port=flow.source.port(), port=flow.destination.port(), %error, "private SSH host flow closed");
                 } }
             }
         });
@@ -214,6 +214,7 @@ async fn bridge(
     conn: tagged::Connection,
     remote: porthub_egress::BoxStream,
     scope: &Scope,
+    flow: Flow,
 ) -> Result<()> {
     let (mut remote_read, mut remote_write) = tokio::io::split(remote);
     let to_remote = async {
@@ -224,6 +225,12 @@ async fn bridge(
             let writer = &mut remote_write;
             chunk
                 .deliver(|bytes, eof| async move {
+                    tracing::trace!(
+                        source_port = flow.source.port(),
+                        bytes = bytes.len(),
+                        eof,
+                        "SSH request native read"
+                    );
                     writer.write_all(&bytes).await?;
                     if eof {
                         writer.shutdown().await?;
@@ -250,6 +257,12 @@ async fn bridge(
                 std::task::Poll::Ready(anyhow::Ok((read.filled().len(), permit)))
             })
             .await?;
+            tracing::trace!(
+                source_port = flow.source.port(),
+                bytes = n,
+                offset,
+                "SSH response carrier read"
+            );
             let ack = if n == 0 {
                 conn.finish(id, offset, permit).await?
             } else {
@@ -258,6 +271,12 @@ async fn bridge(
             };
             conn.publish_receipt(ack, id, offset, n, || async { Ok(()) })
                 .await?;
+            tracing::trace!(
+                source_port = flow.source.port(),
+                bytes = n,
+                offset,
+                "SSH response native acknowledged"
+            );
             if n == 0 {
                 return anyhow::Ok(());
             }

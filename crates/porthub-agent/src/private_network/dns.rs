@@ -187,6 +187,10 @@ impl Zone {
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
         reply.add_query(q.clone());
         if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()) {
+            #[cfg(target_os="macos")]
+            if self.forward_suffix(&name) {
+                self.failed_lookups.lock().unwrap_or_else(|p|p.into_inner()).remember(&name,std::time::Instant::now());
+            }
             reply.metadata.response_code=ResponseCode::ServFail;
             return reply.to_vec().ok();
         }
@@ -198,14 +202,18 @@ impl Zone {
         }
         if query.metadata.op_code == OpCode::Query && self.forward_suffix(&name) {
             #[cfg(all(feature="private-sparse",feature="private-stream"))]
-            let address=self.forward_names.as_ref().and_then(|names|names.address(&name));
+            let resolved=self.forward_names.as_ref().map(|names|names.resolve(&name)).unwrap_or(Ok(None));
             #[cfg(not(all(feature="private-sparse",feature="private-stream")))]
-            let address:Option<Ipv4Addr>=None;
-            if let Some(ip)=address {
+            let resolved:Result<Option<Ipv4Addr>>=Ok(None);
+            if let Ok(Some(ip))=resolved {
                 if q.query_class()==DNSClass::IN && q.query_type()==RecordType::A {
                     reply.add_answer(Record::from_rdata(q.name().clone(),0,RData::A(A(ip))));
                 }
-            } else {reply.metadata.response_code=ResponseCode::NXDomain;}
+            } else {
+                #[cfg(target_os="macos")]
+                self.failed_lookups.lock().unwrap_or_else(|p|p.into_inner()).remember(&name,std::time::Instant::now());
+                reply.metadata.response_code=if resolved.is_err(){ResponseCode::ServFail}else{ResponseCode::NXDomain};
+            }
             return reply.to_vec().ok();
         }
         let code = if query.metadata.op_code != OpCode::Query {
@@ -600,7 +608,13 @@ pub(super) async fn maintain_macos_registration(zone: &RwLock<Zone>, registratio
     let zone = zone.read().await;
     let recovered = zone.sparse.as_ref().is_some_and(|sparse| {
         let mut failures = zone.failed_lookups.lock().unwrap_or_else(|p| p.into_inner());
-        failures.recovered(std::time::Instant::now(), |name| sparse.dns_name_record(name).is_some())
+        failures.recovered(std::time::Instant::now(), |name| {
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            if zone.forward_suffix(name) {
+                return zone.forward_names.as_ref().is_some_and(|names| matches!(names.resolve(name),Ok(Some(_))));
+            }
+            sparse.dns_name_record(name).is_some()
+        })
     });
     drop(zone);
     #[cfg(feature="private-sparse")]

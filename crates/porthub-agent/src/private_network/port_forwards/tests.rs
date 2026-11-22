@@ -77,9 +77,11 @@ async fn socket(
     })
 }
 fn authority(cursor: Option<Uuid>, control: &Arc<Control>) -> Result<Authority<()>> {
+    let mut window = RequestWindow::start(Arc::new(NativeClock))?;
+    window.workspace_generation = Some(Uuid::new_v4());
     let mut a = Authority::new(
         (),
-        Some(RequestWindow::start(Arc::new(NativeClock))?),
+        Some(window),
         chrono::Utc::now() + chrono::Duration::seconds(14),
     );
     a.forward_sync = cursor.map(|id| (id, control.clone()));
@@ -181,6 +183,12 @@ async fn exercise_http(use_tun: bool) -> Result<()> {
         query.add_query(Query::query(Name::from_ascii(name)?, RecordType::A));
         Ok(Dns::from_vec(&zone.answer(&query.to_vec()?).unwrap())?)
     };
+    manager.capture(None, &[]);
+    assert_eq!(
+        lookup(canonical)?.metadata.response_code,
+        hickory_proto::op::ResponseCode::ServFail
+    );
+    manager.capture(Some(source), &["10.203.0.0/24".parse()?]);
     for name in [canonical, HOST] {
         assert_eq!(lookup(name)?.answers[0].data, RData::A(A(target)));
     }
@@ -231,6 +239,7 @@ async fn exercise_http(use_tun: bool) -> Result<()> {
         #[allow(unreachable_code)]
         anyhow::Ok(())
     });
+    let cursor = Uuid::new_v4();
     for ephemeral in [40101, 40102] {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let port = listener.local_addr()?.port();
@@ -256,6 +265,7 @@ async fn exercise_http(use_tun: bool) -> Result<()> {
                         .await?,
                 )
             };
+            manager.update(&authority(Some(cursor), &control)?, Some("fixture.test"));
             s.write_all(b"GET /lab HTTP/1.0\r\nHost: notebook.forwards.fixture.test\r\n\r\n")
                 .await?;
             let mut response = vec![0; 41];
@@ -272,7 +282,12 @@ async fn exercise_http(use_tun: bool) -> Result<()> {
         Some("fixture.test"),
     );
     wait_for(|| names.address(HOST).is_none()).await?;
-    assert!(lookup(canonical)?.answers.is_empty());
+    let absent = lookup(canonical)?;
+    assert!(absent.answers.is_empty());
+    assert_eq!(
+        absent.metadata.response_code,
+        hickory_proto::op::ResponseCode::NXDomain
+    );
     stop.cancel();
     bridge.abort();
     gw.abort();
