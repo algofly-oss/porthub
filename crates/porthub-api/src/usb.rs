@@ -359,16 +359,14 @@ async fn make(
     app.collection("usb_forwards")
         .delete_one(doc! {"_id":&key,"persistent":false,"expires_at":{"$lte":DateTime::now()}})
         .await?;
-    if app
-        .collection("usb_forwards")
-        .insert_one(value)
-        .await
-        .is_err()
-    {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "This USB device already has a forwarding rule",
-        ));
+    if let Err(error) = app.collection("usb_forwards").insert_one(value).await {
+        if crate::store::duplicate(&error) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "This USB device already has a forwarding rule",
+            ));
+        }
+        return Err(error.into());
     }
     // Keep provenance outside the strict Forward document: old gateways and
     // receiving agents share this collection and must still decode the plan.
