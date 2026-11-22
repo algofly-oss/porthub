@@ -1,9 +1,9 @@
 import { MultiSelect } from "@mantine/core";
 import { IconChevronDown } from "@tabler/icons-react";
 
-export default function SearchMultiSelect({ label, value, onChange, options, ...props }) {
+export default function SearchMultiSelect({ label, value, onChange, options, maxDropdownHeight = 240, ...props }) {
   return <MultiSelect {...props} label={label} aria-label={label} searchable clearable value={value} onChange={onChange} data={options}
-    nothingFound="No matching machines or groups" maxDropdownHeight={240} withinPortal zIndex={400} dropdownPosition="flip"
+    nothingFound="No matching machines or groups" maxDropdownHeight={maxDropdownHeight} withinPortal zIndex={400} dropdownPosition="flip"
     rightSection={<IconChevronDown size={15} />} rightSectionWidth={32} classNames={{
       label: "!mb-2 !text-sm !font-medium !text-foreground",
       input: "!min-h-11 !rounded-lg !border-transparent !bg-control !text-sm !text-foreground",

@@ -28,7 +28,7 @@ def main():
     repository = Path(__file__).resolve().parents[1]
     scripts = ('keyboard-bluetooth-browser.cjs', 'keyboard-parity-browser.cjs', 'keyboard-microphone-browser.cjs', 'layout-settling.cjs', 'iphone-layout.cjs', 'iphone-safe-area.cjs',
                'iphone-native-media.cjs', 'native-media-browser.cjs',
-               'private-network-growth.cjs', 'boards-usb-lineage-browser.cjs')
+               'private-network-growth.cjs', 'boards-usb-lineage-browser.cjs', 'port-forwards-browser.cjs')
     with ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=str(root))) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

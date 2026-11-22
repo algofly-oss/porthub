@@ -10,6 +10,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   expandPortRange,
   forwardCommand,
+  forwardProfileCommand,
+  forwardProfileFiles,
 } from "../src/shared/transfers/port-forwards.mjs";
 
 const sample = {
@@ -37,6 +39,18 @@ test("one-line commands use independent keys and fail closed on first contact", 
       assert(command.includes(flag), flag);
     assert(!command.includes("accept-new"));
   }
+  const profile = forwardProfileFiles(sample);
+  assert.equal(forwardProfileCommand, "ssh -N -F ./porthub.conf forward");
+  assert.match(profile["porthub.conf"], /StrictHostKeyChecking yes/);
+  assert.match(
+    profile["porthub.conf"],
+    /RemoteForward 127.0.0.1:51000 127.0.0.1:22/,
+  );
+  assert.equal(
+    profile["porthub.known_hosts"],
+    "porthub-forward-gateway ssh-ed25519 AAAA\n",
+  );
+  assert(!forwardProfileCommand.includes(sample.privateKey));
   assert.deepEqual(expandPortRange("65534-65535"), [65534, 65535]);
   for (const invalid of ["0", "-1", "8000-7999", "0-40", "65536", "23;id"])
     assert.throws(() => expandPortRange(invalid));
@@ -88,7 +102,7 @@ async function retry(action) {
   throw err;
 }
 test(
-  "literal pasted command connects on first use with closed stdin",
+  "pasted command and extracted profile both forward with a fresh OpenSSH client",
   { skip: !process.env.PORTHUB_FORWARD_BROKER_TEST, timeout: 30000 },
   async () => {
     const root = await fs.mkdtemp(
@@ -169,8 +183,26 @@ test(
       const proc = start(entry);
       await retry(() => roundtrip(localPort));
       await retry(() => roundtrip(f.ingress_port));
+      const stopped = once(proc, "exit");
+      process.kill(-proc.pid, "SIGTERM");
+      await stopped;
+      for (const [filename, text] of Object.entries(
+        forwardProfileFiles(entry),
+      )) {
+        await fs.writeFile(path.join(root, filename), text, { mode: 0o600 });
+      }
+      const [ssh, ...args] = forwardProfileCommand.split(" ");
+      const profile = spawn(ssh, args, {
+        cwd: root,
+        stdio: "ignore",
+        detached: true,
+      });
+      clients.push(profile);
+      await retry(() => roundtrip(localPort));
+      await retry(() => roundtrip(f.ingress_port));
+      const revoked = once(profile, "exit");
       await fs.writeFile(path.join(brokerDir, "revoke"), "");
-      await once(proc, "exit");
+      await revoked;
       assert.deepEqual(
         await fs.readdir(home),
         [],

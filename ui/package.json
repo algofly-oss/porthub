@@ -45,6 +45,7 @@
     "embla-carousel-react": "^7.1.0",
     "eslint": "8.36.0",
     "eslint-config-next": "13.2.4",
+    "fflate": "0.8.2",
     "flowbite": "^1.6.4",
     "framer-motion": "^10.12.18",
     "next": "13.2.4",

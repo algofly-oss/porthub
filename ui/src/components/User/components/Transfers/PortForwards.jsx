@@ -5,10 +5,14 @@ import { copyText } from "@/shared/utils/clipboard";
 import {
   expandPortRange,
   forwardCommand,
+  downloadForwardProfile,
+  forwardProfileCommand,
 } from "@/shared/transfers/port-forwards.mjs";
 import toast from "react-hot-toast";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import uiRoutes from "@/shared/routes/uiRoutes";
+import SearchDropdown from "@/components/ui/search-dropdown";
+import SearchMultiSelect from "@/components/ui/search-multi-select";
 
 const api = "/api/port-forwards";
 const field =
@@ -48,6 +52,7 @@ async function request(suffix = "", method = "GET", body, signal) {
 }
 
 function Commands({ credentials }) {
+  const [downloadError, setDownloadError] = useState("");
   const [client, setClient] = useState(() =>
     navigator.userAgent.includes("Windows") ? "powershell" : "openssh",
   );
@@ -71,65 +76,122 @@ function Commands({ credentials }) {
   };
   return (
     <div className="mt-3 space-y-3 rounded-lg border border-border bg-background p-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <label className={label}>
-          Command for
-          <select
-            className={field}
-            value={client}
-            onChange={(e) => {
-              setClient(e.target.value);
-              setDraft(null);
-            }}
-          >
-            <option value="openssh">Linux / macOS · OpenSSH</option>
-            <option value="powershell">Windows · PowerShell / OpenSSH</option>
-          </select>
-        </label>
+      <p className="text-xs text-muted-foreground">
+        Download and extract the SSH profile into a private folder, then run
+        this command from that folder.
+      </p>
+      <label className={label}>
+        SSH command
+        <input
+          className={`${field} font-mono text-xs`}
+          aria-label="SSH command"
+          readOnly
+          value={forwardProfileCommand}
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          onClick={async () => {
+            try {
+              await downloadForwardProfile(credentials);
+              setDownloadError("");
+            } catch (error) {
+              setDownloadError(error.message);
+            }
+          }}
+        >
+          Download SSH profile
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={async () => {
+            try {
+              await copyText(forwardProfileCommand);
+              toast.success("SSH command copied");
+            } catch {
+              toast.error("Select and copy the command above.");
+            }
+          }}
+        >
+          <IconCopy size={16} />
+          Copy command
+        </Button>
       </div>
-      {problem ? (
-        <p role="alert">{problem}</p>
-      ) : (
-        <>
+      {downloadError && (
+        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {downloadError}
+        </p>
+      )}
+      <details>
+        <summary className="cursor-pointer py-2 text-sm text-muted-foreground">
+          Advanced: self-contained command
+        </summary>
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <label className={label}>
-            SSH command
-            <textarea
-              className="mt-1 block min-h-[7rem] w-full resize-y rounded-lg border border-input bg-surface p-3 font-mono text-xs leading-5 focus-visible:outline-primary"
-              aria-label="SSH command"
-              spellCheck={false}
-              value={command}
-              onChange={(e) => setDraft(e.target.value)}
-            />
-          </label>
-          <p className="text-xs text-muted-foreground">
-            Paste into a terminal on the computer sharing or receiving the port.
-            Keep it running. This command contains the private key for this
-            forward.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              disabled={!command.trim()}
-              onClick={async () => {
-                try {
-                  await copyText(command);
-                  toast.success("SSH command copied");
-                } catch {
-                  toast.error("Select and copy the command above.");
-                }
+            Command for
+            <SearchDropdown
+              className={field}
+              value={client}
+              onChange={(e) => {
+                setClient(e.target.value);
+                setDraft(null);
               }}
             >
-              <IconCopy size={16} />
-              Copy command
-            </Button>
-            {draft !== null && (
-              <Button variant="ghost" size="sm" onClick={() => setDraft(null)}>
-                Reset edits
+              <option value="openssh">Linux / macOS · OpenSSH</option>
+              <option value="powershell">Windows · PowerShell / OpenSSH</option>
+            </SearchDropdown>
+          </label>
+        </div>
+        {problem ? (
+          <p role="alert">{problem}</p>
+        ) : (
+          <>
+            <label className={label}>
+              Self-contained SSH command
+              <textarea
+                className="mt-1 block min-h-[7rem] w-full resize-y rounded-lg border border-input bg-surface p-3 font-mono text-xs leading-5 focus-visible:outline-primary"
+                aria-label="Self-contained SSH command"
+                spellCheck={false}
+                value={command}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Paste into a terminal on the computer sharing or receiving the
+              port. Keep it running. This command contains the private key for
+              this forward.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={!command.trim()}
+                onClick={async () => {
+                  try {
+                    await copyText(command);
+                    toast.success("SSH command copied");
+                  } catch {
+                    toast.error("Select and copy the command above.");
+                  }
+                }}
+              >
+                <IconCopy size={16} />
+                Copy self-contained command
               </Button>
-            )}
-          </div>
-        </>
-      )}
+              {draft !== null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDraft(null)}
+                >
+                  Reset edits
+                </Button>
+              )}
+            </div>
+          </>
+        )}
+      </details>
       <details className="text-sm">
         <summary className="cursor-pointer text-muted-foreground">
           Credentials for another SSH client
@@ -157,11 +219,16 @@ function Commands({ credentials }) {
 
 function MappingAddress({ entry, mapping, machines }) {
   const local = mapping.direction === "local";
+  const published =
+    entry.published ??
+    (entry.public || !!entry.machineIds?.length || !!entry.groupIds?.length);
   const host = local
     ? "127.0.0.1"
-    : entry.public
-      ? entry.status?.publicHost
-      : entry.status?.privateHost;
+    : !published
+      ? null
+      : entry.public
+        ? entry.status?.publicHost
+        : entry.status?.privateHost;
   const port = local ? mapping.clientPort : mapping.gatewayPort;
   const address =
     host && (host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`);
@@ -173,9 +240,11 @@ function MappingAddress({ entry, mapping, machines }) {
       <span className="text-muted-foreground">
         {local
           ? `Access ${destination}:${mapping.servicePort} from`
-          : `${entry.public ? "Public" : "Private"} access to port ${mapping.clientPort}`}
+          : `${!published ? "Client" : entry.public ? "Public access to" : "Private access to"} port ${mapping.clientPort}`}
       </span>
-      {address ? (
+      {!local && !published ? (
+        <span>Not published</span>
+      ) : address ? (
         <>
           <code className="min-w-0 break-all">{address}</code>
           <Button
@@ -203,61 +272,47 @@ function MappingAddress({ entry, mapping, machines }) {
   );
 }
 
-function Builder({ machines, groups, onCreated, onCancel }) {
+function Builder({ machines, onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [mappings, setMappings] = useState([emptyMapping()]);
-  const [isPublic, setPublic] = useState(false);
-  const [selected, setSelected] = useState([]);
+  const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const remote = mappings.some((m) => m.direction === "remote");
   const update = (index, key, value) =>
-    setMappings((ms) =>
-      ms.map((m, i) => (i === index ? { ...m, [key]: value } : m)),
+    setMappings((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)),
     );
-  async function submit(e) {
-    e.preventDefault();
+  async function submit(event) {
+    event.preventDefault();
     if (saving) return;
     setSaving(true);
     setError("");
     try {
-      const rows = mappings.flatMap((m) => {
-        const local = expandPortRange(m.ports);
-        if (m.direction === "remote")
-          return local.map((clientPort) => ({
+      const rows = mappings.flatMap((mapping) => {
+        const ports = expandPortRange(mapping.ports);
+        if (mapping.direction === "remote")
+          return ports.map((clientPort) => ({
             direction: "remote",
             clientPort,
           }));
-        const service = expandPortRange(m.service);
-        if (local.length !== service.length)
+        const services = expandPortRange(mapping.service);
+        if (ports.length !== services.length)
           throw new Error(
             "Use the same number of local and destination ports.",
           );
-        if (!m.machine) throw new Error("Select a destination machine.");
-        return local.map((clientPort, i) => ({
+        if (!mapping.machine) throw new Error("Select a destination machine.");
+        return ports.map((clientPort, i) => ({
           direction: "local",
           clientPort,
-          machineId: m.machine,
-          servicePort: service[i],
+          machineId: mapping.machine,
+          servicePort: services[i],
         }));
       });
       if (rows.length > 32)
         throw new Error("Choose up to 32 port mappings per command.");
-      if (remote && !isPublic && !selected.length)
-        throw new Error(
-          "Select at least one machine or group for private access.",
-        );
-      const access = remote && !isPublic ? selected : [];
       const result = await request("", "POST", {
-        name: name.trim(),
-        public: remote && isPublic,
+        name: name.trim() || `Port ${mappings[0].ports.trim()}`,
         mappings: rows,
-        machineIds: access
-          .filter((v) => v.startsWith("m:"))
-          .map((v) => v.slice(2)),
-        groupIds: access
-          .filter((v) => v.startsWith("g:"))
-          .map((v) => v.slice(2)),
       });
       onCreated(result.id);
     } catch (err) {
@@ -267,182 +322,176 @@ function Builder({ machines, groups, onCreated, onCancel }) {
     }
   }
   return (
-    <form onSubmit={submit} className="max-w-4xl space-y-5">
-      <label className={label}>
-        Forward name
-        <input
-          autoFocus
-          required
-          maxLength={80}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className={field}
-          placeholder="e.g. Support laptop"
-        />
-      </label>
-      {mappings.map((m, index) => (
-        <fieldset key={index} className="border-t border-border pt-3">
-          <legend className="pr-2 text-sm font-semibold">
-            {mappings.length === 1
-              ? "Port mapping"
-              : `Port mapping ${index + 1}`}
-          </legend>
-          <div className="grid items-end gap-3 sm:grid-cols-2">
-            <label className={label}>
-              Direction
-              <select
-                aria-label="Direction"
-                className={field}
-                value={m.direction}
-                onChange={(e) => {
-                  const direction = e.target.value;
-                  setMappings((ms) =>
-                    ms.map((row, i) =>
-                      i === index
-                        ? {
-                            ...row,
-                            direction,
-                            ports:
-                              direction === "local" && row.ports === "22"
-                                ? "2222"
-                                : row.ports,
-                          }
-                        : row,
-                    ),
-                  );
-                }}
-              >
-                {Object.entries(directionNames).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className={label}>
-              {m.direction === "remote"
-                ? "Port on this computer"
-                : "Local listening port"}
-              <input
-                className={field}
-                value={m.ports}
-                required
-                placeholder="22 or 8000-8003"
-                onChange={(e) => update(index, "ports", e.target.value)}
-              />
-            </label>
-            {m.direction === "local" && (
-              <>
-                <label className={label}>
-                  Destination machine
-                  <select
-                    aria-label="Destination machine"
-                    className={field}
-                    value={m.machine}
-                    required
-                    onChange={(e) => update(index, "machine", e.target.value)}
-                  >
-                    <option value="">Choose a machine</option>
-                    {machines.map((x) => (
-                      <option key={x.id} value={x.id}>
-                        {x.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className={label}>
-                  Destination port
-                  <input
-                    required
-                    className={field}
-                    value={m.service}
-                    onChange={(e) => update(index, "service", e.target.value)}
-                  />
-                </label>
-              </>
-            )}
-          </div>
-          {mappings.length > 1 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-1"
-              onClick={() =>
-                setMappings((ms) => ms.filter((_, i) => i !== index))
-              }
-            >
-              Remove mapping
-            </Button>
-          )}
-        </fieldset>
-      ))}
+    <form onSubmit={submit} className="max-w-2xl space-y-4">
+      {!advanced &&
+        mappings.length === 1 &&
+        mappings[0].direction === "remote" && (
+          <label className={label}>
+            Port on this computer
+            <input
+              autoFocus
+              className={field}
+              value={mappings[0].ports}
+              required
+              placeholder="22 or 8000-8003"
+              onChange={(event) => update(0, "ports", event.target.value)}
+            />
+          </label>
+        )}
+      <p className="text-sm text-muted-foreground">
+        Run the generated command on the computer sharing the port. Choose who
+        can reach it afterward.
+      </p>
+      {!advanced &&
+        (mappings.length > 1 || mappings[0].direction !== "remote") && (
+          <p className="text-sm">
+            {mappings.length} configured port mapping
+            {mappings.length === 1 ? "" : "s"}. Open advanced settings to review
+            them.
+          </p>
+        )}
       <Button
         type="button"
-        variant="outline"
+        variant="ghost"
         size="sm"
-        disabled={mappings.length >= 32}
-        onClick={() => setMappings((ms) => [...ms, emptyMapping()])}
+        aria-expanded={advanced}
+        aria-controls="advanced-port-mappings"
+        onClick={() => setAdvanced((open) => !open)}
       >
-        <IconPlus size={16} />
-        Add mapping
+        Advanced ports and direction
       </Button>
-      {remote && (
-        <fieldset className="border-t border-border pt-3">
-          <legend className="pr-2 text-sm font-semibold">
-            Who can reach the shared ports?
-          </legend>
-          <label className="flex items-center gap-2 text-sm">
+      {advanced && (
+        <div
+          id="advanced-port-mappings"
+          className="space-y-4 border-t border-border pt-3"
+        >
+          <label className={label}>
+            Forward name{" "}
+            <span className="font-normal text-muted-foreground">
+              (optional)
+            </span>
             <input
-              type="radio"
-              checked={!isPublic}
-              onChange={() => setPublic(false)}
+              maxLength={80}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              className={field}
+              placeholder="e.g. Support laptop"
             />
-            Selected PortHub machines and groups
           </label>
-          {!isPublic && (
-            <div className="my-2 max-h-44 overflow-y-auto rounded-lg border border-input px-3 py-1">
-              {[
-                ...machines.map((x) => ({ ...x, key: "m:" + x.id })),
-                ...groups.map((x) => ({ ...x, key: "g:" + x.id })),
-              ].map((x) => (
-                <label
-                  key={x.key}
-                  className="flex min-h-9 items-center gap-2 text-sm"
-                >
+          {mappings.map((mapping, index) => (
+            <fieldset key={index} className="border-t border-border pt-3">
+              <legend className="pr-2 text-sm font-semibold">
+                {mappings.length === 1
+                  ? "Port mapping"
+                  : `Port mapping ${index + 1}`}
+              </legend>
+              <div className="grid items-end gap-3 sm:grid-cols-2">
+                <label className={label}>
+                  Direction
+                  <SearchDropdown
+                    aria-label="Direction"
+                    className={field}
+                    value={mapping.direction}
+                    onChange={(event) => {
+                      const direction = event.target.value;
+                      setMappings((rows) =>
+                        rows.map((row, i) =>
+                          i === index
+                            ? {
+                                ...row,
+                                direction,
+                                ports:
+                                  direction === "local" && row.ports === "22"
+                                    ? "2222"
+                                    : row.ports,
+                              }
+                            : row,
+                        ),
+                      );
+                    }}
+                  >
+                    {Object.entries(directionNames).map(([key, text]) => (
+                      <option key={key} value={key}>
+                        {text}
+                      </option>
+                    ))}
+                  </SearchDropdown>
+                </label>
+                <label className={label}>
+                  {mapping.direction === "remote"
+                    ? "Port on this computer"
+                    : "Local listening port"}
                   <input
-                    type="checkbox"
-                    checked={selected.includes(x.key)}
-                    onChange={(e) =>
-                      setSelected((s) =>
-                        e.target.checked
-                          ? [...s, x.key]
-                          : s.filter((k) => k !== x.key),
-                      )
+                    className={field}
+                    value={mapping.ports}
+                    required
+                    placeholder="22 or 8000-8003"
+                    onChange={(event) =>
+                      update(index, "ports", event.target.value)
                     }
                   />
-                  {x.name}
-                  {x.key.startsWith("g:") && (
-                    <span className="text-xs text-muted-foreground">Group</span>
-                  )}
                 </label>
-              ))}
-              {!machines.length && !groups.length && (
-                <p className="py-2 text-sm text-muted-foreground">
-                  Register a machine or create a group to allow private access.
-                </p>
+                {mapping.direction === "local" && (
+                  <>
+                    <label className={label}>
+                      Destination machine
+                      <SearchDropdown
+                        aria-label="Destination machine"
+                        className={field}
+                        value={mapping.machine}
+                        required
+                        onChange={(event) =>
+                          update(index, "machine", event.target.value)
+                        }
+                      >
+                        <option value="">Choose a machine</option>
+                        {machines.map((machine) => (
+                          <option key={machine.id} value={machine.id}>
+                            {machine.name}
+                          </option>
+                        ))}
+                      </SearchDropdown>
+                    </label>
+                    <label className={label}>
+                      Destination port
+                      <input
+                        required
+                        className={field}
+                        value={mapping.service}
+                        onChange={(event) =>
+                          update(index, "service", event.target.value)
+                        }
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              {mappings.length > 1 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mt-1"
+                  onClick={() =>
+                    setMappings((rows) => rows.filter((_, i) => i !== index))
+                  }
+                >
+                  Remove mapping
+                </Button>
               )}
-            </div>
-          )}
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input
-              type="radio"
-              checked={isPublic}
-              onChange={() => setPublic(true)}
-            />
-            Anyone with the public address and port
-          </label>
-        </fieldset>
+            </fieldset>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={mappings.length >= 32}
+            onClick={() => setMappings((rows) => [...rows, emptyMapping()])}
+          >
+            <IconPlus size={16} />
+            Add mapping
+          </Button>
+        </div>
       )}
       {error && (
         <p className="text-sm text-red-600 dark:text-red-400" role="alert">
@@ -453,7 +502,142 @@ function Builder({ machines, groups, onCreated, onCancel }) {
         <Button disabled={saving} type="submit">
           {saving ? "Creating…" : "Generate command"}
         </Button>
+        {onCancel && (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={saving}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+    </form>
+  );
+}
+
+function AudienceEditor({
+  entry,
+  machines,
+  groups,
+  onSaved,
+  onCancel,
+  onBusy,
+}) {
+  const [audience, setAudience] = useState(
+    entry.public ? "public" : entry.published ? "private" : "isolated",
+  );
+  const [selected, setSelected] = useState([
+    ...(entry.machineIds || []).map((id) => "m:" + id),
+    ...(entry.groupIds || []).map((id) => "g:" + id),
+  ]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function save(event) {
+    event.preventDefault();
+    if (saving) return;
+    setError("");
+    if (audience === "private" && !selected.length) {
+      setError("Select at least one machine or group.");
+      return;
+    }
+    setSaving(true);
+    onBusy(true);
+    try {
+      await request("/" + entry.id + "/audience", "PUT", {
+        public: audience === "public",
+        machineIds:
+          audience === "private"
+            ? selected
+                .filter((id) => id.startsWith("m:"))
+                .map((id) => id.slice(2))
+            : [],
+        groupIds:
+          audience === "private"
+            ? selected
+                .filter((id) => id.startsWith("g:"))
+                .map((id) => id.slice(2))
+            : [],
+      });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+      onBusy(false);
+    }
+  }
+  return (
+    <form
+      onSubmit={save}
+      aria-label={`Edit access for ${entry.name}`}
+      className="mt-3 space-y-3 border-t border-border pt-3"
+    >
+      <fieldset disabled={saving}>
+        <legend className="mb-1 text-sm font-medium">
+          Who can reach this port?
+        </legend>
+        <SearchDropdown
+          aria-label="Access mode"
+          value={audience}
+          disabled={saving}
+          onChange={(event) => setAudience(event.target.value)}
+        >
+          <option value="isolated">Not published</option>
+          <option value="private">Selected PortHub machines and groups</option>
+          <option value="public">Public address and port</option>
+        </SearchDropdown>
+        {audience === "private" && (
+          <div className="my-2">
+            <SearchMultiSelect
+              label="Allowed machines and groups"
+              maxDropdownHeight={120}
+              placeholder="Search machines or groups…"
+              value={selected}
+              onChange={setSelected}
+              disabled={saving}
+              options={[
+                ...machines.map((machine) => ({
+                  value: "m:" + machine.id,
+                  label: machine.name,
+                })),
+                ...groups.map((group) => ({
+                  value: "g:" + group.id,
+                  label: group.name + " · Group",
+                })),
+              ]}
+            />
+            {!machines.length && !groups.length && (
+              <p className="py-2 text-sm text-muted-foreground">
+                Register a machine or create a group to allow private access.
+              </p>
+            )}
+          </div>
+        )}
+      </fieldset>
+      {audience === "public" && (
+        <p className="text-xs text-muted-foreground">
+          Publishes the assigned address and port. Your existing SSH command and
+          key stay the same.
+        </p>
+      )}
+      {audience === "isolated" && (
+        <p className="text-xs text-muted-foreground">
+          No private or public address is published.
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <Button size="sm" type="submit" disabled={saving}>
+          {saving ? "Saving…" : "Save access"}
+        </Button>
         <Button
+          size="sm"
           type="button"
           variant="ghost"
           disabled={saving}
@@ -491,6 +675,7 @@ function SavedForwards() {
     [confirm, setConfirm] = useState(null),
     [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [editing, setEditing] = useState(null);
   const sequence = useRef(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -545,6 +730,7 @@ function SavedForwards() {
     try {
       await request("/" + id, "DELETE");
       setConfirm(null);
+      setEditing(null);
       setShown(null);
       setData((d) => ({ ...d, entries: d.entries.filter((x) => x.id !== id) }));
       setRevision((r) => r + 1);
@@ -563,13 +749,14 @@ function SavedForwards() {
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
             {building
-              ? "Choose which TCP ports this SSH command can forward."
+              ? "Share a client port with one SSH command."
               : "Connect a computer using SSH. The computer running the command does not need a PortHub agent."}
           </p>
         </div>
-        {!building && data && (
+        {!building && data?.entries.length > 0 && (
           <Button
             size="sm"
+            disabled={busy}
             onClick={() => {
               setBuilding(true);
               setShown(null);
@@ -602,21 +789,19 @@ function SavedForwards() {
         </p>
       )}
       {data &&
-        (building ? (
+        (building || !data.entries.length ? (
           <Builder
             machines={data.machines}
             groups={data.groups}
-            onCancel={() => setBuilding(false)}
+            onCancel={
+              data.entries.length ? () => setBuilding(false) : undefined
+            }
             onCreated={(id) => {
               setBuilding(false);
               setRevision((r) => r + 1);
               void reveal(id);
             }}
           />
-        ) : !data.entries.length ? (
-          <div className="border-t border-border py-6 text-sm text-muted-foreground">
-            No saved forwards yet.
-          </div>
         ) : (
           <ul className="divide-y divide-border border-t border-border">
             {data.entries.map((entry) => (
@@ -647,6 +832,20 @@ function SavedForwards() {
                         ? "Hide credentials"
                         : "Show command"}
                     </Button>
+                    {entry.mappings.some(
+                      (mapping) => mapping.direction === "remote",
+                    ) && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() =>
+                          setEditing(editing === entry.id ? null : entry.id)
+                        }
+                      >
+                        Edit access
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -668,6 +867,19 @@ function SavedForwards() {
                     />
                   ))}
                 </ul>
+                {editing === entry.id && (
+                  <AudienceEditor
+                    entry={entry}
+                    machines={data.machines}
+                    groups={data.groups}
+                    onBusy={setBusy}
+                    onCancel={() => setEditing(null)}
+                    onSaved={() => {
+                      setEditing(null);
+                      setRevision((value) => value + 1);
+                    }}
+                  />
+                )}
                 {confirm === entry.id && (
                   <div
                     className="mt-3 flex flex-wrap items-center gap-2 text-sm"
@@ -693,7 +905,7 @@ function SavedForwards() {
                   </div>
                 )}
                 {shown?.id === entry.id && (
-                  <Commands key={entry.id} credentials={shown.credentials} />
+                  <Commands credentials={shown.credentials} />
                 )}
               </li>
             ))}

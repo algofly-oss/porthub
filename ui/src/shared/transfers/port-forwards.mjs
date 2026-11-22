@@ -35,7 +35,7 @@ function hostname(value) {
   return value;
 }
 
-export function forwardCommand(entry, client) {
+function forwardSettings(entry) {
   const gateway = hostname(entry.gateway);
   const port = tcpPort(entry.sshPort);
   if (!/^pf-[a-f\d]{24}$/.test(entry.username))
@@ -57,17 +57,37 @@ export function forwardCommand(entry, client) {
   ];
   if (!entry.mappings.length || entry.mappings.length > 32)
     throw new Error("Choose 1–32 port mappings.");
-  const rules = entry.mappings
-    .map((mapping) => {
-      const local = tcpPort(mapping.clientPort);
-      if (mapping.direction === "remote")
-        return `-R 127.0.0.1:${tcpPort(mapping.gatewayPort)}:127.0.0.1:${local}`;
-      if (mapping.direction === "local")
-        return `-L 127.0.0.1:${local}:${hostname(mapping.target)}:${tcpPort(mapping.servicePort)}`;
-      throw new Error("Unknown forwarding direction.");
-    })
-    .join(" ");
+  const bindings = entry.mappings.map((mapping) => {
+    const local = `127.0.0.1:${tcpPort(mapping.clientPort)}`;
+    if (mapping.direction === "remote")
+      return {
+        direction: "remote",
+        listen: `127.0.0.1:${tcpPort(mapping.gatewayPort)}`,
+        destination: local,
+      };
+    if (mapping.direction === "local") {
+      const target = hostname(mapping.target);
+      const host = target.includes(":") ? `[${target}]` : target;
+      return {
+        direction: "local",
+        listen: local,
+        destination: `${host}:${tcpPort(mapping.servicePort)}`,
+      };
+    }
+    throw new Error("Unknown forwarding direction.");
+  });
   const known = `porthub-forward-gateway ${entry.hostKey}`;
+  return { gateway, port, pem, known, bindings };
+}
+
+export function forwardCommand(entry, client) {
+  const { gateway, port, pem, known, bindings } = forwardSettings(entry);
+  const rules = bindings
+    .map(
+      ({ direction, listen, destination }) =>
+        `${direction === "remote" ? "-R" : "-L"} ${listen}:${destination}`,
+    )
+    .join(" ");
   const args = `-N -T -a -x -o BatchMode=yes -o NumberOfPasswordPrompts=0 -o PasswordAuthentication=no -o ConnectTimeout=10 -o CheckHostIP=no -o HostKeyAlgorithms=ssh-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o PreferredAuthentications=publickey -o ExitOnForwardFailure=yes -o HostKeyAlias=porthub-forward-gateway -o GlobalKnownHostsFile=none -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p ${port} -l ${entry.username} ${rules} ${gateway}`;
   if (client === "powershell") {
     // Windows PowerShell consumes embedded quotes in native command arguments.
@@ -90,4 +110,65 @@ export function forwardCommand(entry, client) {
   if (client !== "openssh") throw new Error("Choose an SSH client.");
   const script = `umask 077; d=$(mktemp -d) || exit 1; trap 'rm -f "$d/key" "$d/hosts"; rmdir "$d"' EXIT; trap 'exit 1' HUP INT TERM; printf '%s\\n' ${pem.map((x) => "'" + x + "'").join(" ")} > "$d/key" && printf '%s\\n' '${known}' > "$d/hosts" && ssh -F /dev/null -i "$d/key" -o "UserKnownHostsFile=\\"$d/hosts\\"" ${args}`;
   return "sh -c '" + script.replaceAll("'", "'\\''") + "'";
+}
+
+export const forwardProfileCommand = "ssh -N -F ./porthub.conf forward";
+
+export function forwardProfileFiles(entry) {
+  const { gateway, port, pem, known, bindings } = forwardSettings(entry);
+  const forwards = bindings.map(
+    ({ direction, listen, destination }) =>
+      `  ${direction === "remote" ? "RemoteForward" : "LocalForward"} ${listen} ${destination}`,
+  );
+  const config = [
+    "Host forward",
+    `  HostName ${gateway}`,
+    `  User ${entry.username}`,
+    `  Port ${port}`,
+    "  RequestTTY no",
+    "  BatchMode yes",
+    "  IdentityFile ./porthub.key",
+    "  IdentitiesOnly yes",
+    "  IdentityAgent none",
+    "  PreferredAuthentications publickey",
+    "  HostKeyAlias porthub-forward-gateway",
+    "  HostKeyAlgorithms ssh-ed25519",
+    "  UserKnownHostsFile ./porthub.known_hosts",
+    "  GlobalKnownHostsFile none",
+    "  StrictHostKeyChecking yes",
+    "  UpdateHostKeys no",
+    "  CheckHostIP no",
+    "  ExitOnForwardFailure yes",
+    "  ServerAliveInterval 15",
+    "  ServerAliveCountMax 3",
+    ...forwards,
+  ];
+  return {
+    "porthub.conf": config.join("\n") + "\n",
+    "porthub.key": pem.join("\n") + "\n",
+    "porthub.known_hosts": known + "\n",
+  };
+}
+
+export async function forwardProfileArchive(entry) {
+  const { zipSync, strToU8 } = await import("fflate");
+  const files = Object.entries(forwardProfileFiles(entry)).map(
+    ([name, content]) => [
+      name,
+      [strToU8(content), { os: 3, attrs: (0o100600 << 16) >>> 0 }],
+    ],
+  );
+  return zipSync(Object.fromEntries(files), { level: 0 });
+}
+
+export async function downloadForwardProfile(entry) {
+  const bytes = await forwardProfileArchive(entry);
+  const url = URL.createObjectURL(
+    new Blob([bytes], { type: "application/zip" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `porthub-${entry.username}.zip`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
