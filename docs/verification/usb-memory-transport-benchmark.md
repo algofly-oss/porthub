@@ -85,3 +85,17 @@ Source `5b0c5265f0a69f0f6559df5eb00a3c2376b13d1b` passed the same paired wired-L
 The same executable also passed seven USB TCP tests plus the bounded-family selection test, including preferred-path selection and stalled-preferred fallback. Production selection caps eight approved paths, giving the final candidate a maximum 1.4 s launch delay within the 4 s connection budget. The paired LAN run verifies carrier throughput on its selected route; it does not independently compare competing physical routes or establish SSD write throughput.
 
 During the benchmark Luna's legacy hardware `rx_errors` tally increased 6,160 while kernel RX/CRC errors stayed zero. A separate 2.02 s passive window received 530 packets with no tally increase; reported MAC receive/alignment/length errors and pause counts were zero. These observations do not explain the earlier delta or establish TCP drops, a cable fault, or an SSD bottleneck. Missing PHY/RMON/FCS-specific fields remain unknown. Qualified receipt: `/tmp/porthub-luna-passive-nic-interpretation.json`. No NIC settings or physical storage changed.
+
+## Wired retest on 2026-11-22
+
+On the 1 Gbit/s full-duplex Luna–Miro Ethernet link, the destination received
+**111.51 MiB/s from Luna** and the source received **111.76 MiB/s from Miro**
+simultaneously. Each receiver verified 128 MiB. Both actors exited successfully.
+PortHub selected the wired LAN addresses while Miro's Wi-Fi interface was also
+up. The test used the optimized agent fixture built from `e44fb03`, SHA-256
+`b40481228e43707854c92a18bfbd935419e98caa8f5b0edb116493947b422df7`.
+
+The signaling gateway carried zero payload bytes. Kernel receive-drop counters
+increased by two on each host, while kernel CRC counters did not increase.
+The observed result measures the in-memory USB transport. For physical SanDisk and JMicron
+reads and writes, see [the USB storage results](2026-11-16-usb-throughput.md).
