@@ -76,6 +76,17 @@ impl Master {
             &[owner, entry],
         )?)
     }
+    pub fn launcher_key(&self, owner: &str, entry: &str) -> Result<Zeroizing<[u8; 32]>> {
+        ensure!(
+            super::valid_id(owner) && super::valid_id(entry),
+            "invalid forwarding grant"
+        );
+        derive(
+            &self.seed,
+            b"porthub-forward-ssh/launcher/v1",
+            &[owner, entry],
+        )
+    }
     pub fn host_public_key(&self) -> Result<String> {
         Ok(self.host.public_key().to_openssh()?)
     }

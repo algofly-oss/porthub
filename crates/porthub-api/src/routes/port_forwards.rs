@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use std::{collections::HashSet, sync::Arc};
 
 mod host_settings;
+mod launcher;
 
 pub const COLLECTION: &str = "ssh_port_forwards";
 
@@ -30,6 +31,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/port-forwards/{id}", axum::routing::delete(remove).patch(host_settings::rename))
         .route("/api/port-forwards/{id}/public-ports", get(host_settings::list).post(host_settings::publish))
         .route("/api/port-forwards/{id}/public-ports/{port}", axum::routing::delete(host_settings::unpublish))
+        .route("/api/port-forwards/{id}/launcher", get(launcher::download))
         .route("/api/port-forwards/{id}/audience", axum::routing::put(update_audience))
         .route(
             "/api/port-forwards/{id}/credentials",
@@ -408,7 +410,7 @@ async fn reveal(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<impl axum::response::IntoResponse> {
     let owner = owner(&app, &headers, Method::POST).await?;
     let id = object_id(&id, "Invalid forward.")?;
     let row = app
@@ -424,11 +426,12 @@ async fn reveal(
         return Err(unavailable("forward signing key mismatch"));
     }
     let (gateway, port) = crate::port_forward_auth::endpoint(&app).map_err(unavailable)?;
-    Ok(Json(
-        json!({"gateway":gateway,"sshPort":port,"username":format!("pf-{}",id.to_hex()),
+    let launcher_token = launcher::token(master,owner,id)?;
+    Ok(([(axum::http::header::CACHE_CONTROL,"private, no-store")], Json(
+        json!({"launcherToken":launcher_token,"gateway":gateway,"sshPort":port,"username":format!("pf-{}",id.to_hex()),
         "hostKey":master.host_public_key().map_err(unavailable)?,"fingerprint":master.host_fingerprint(),
         "privateKey":pem.as_str(),"mappings":store::field(&row,"mappings")}),
-    ))
+    )))
 }
 
 pub(crate) async fn retire(app: &App, owner: ObjectId, id: ObjectId) -> ApiResult<()> {
