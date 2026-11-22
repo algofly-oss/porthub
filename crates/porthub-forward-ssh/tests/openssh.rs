@@ -201,6 +201,61 @@ async fn openssh_enforces_saved_mappings_and_live_revocation() -> Result<()> {
         }
     })
     .await?;
+    // A reverse dynamic listener is local to the authenticated exporter. Send
+    // binary payload immediately: protocol bytes must never reach its service.
+    let mut dynamic = command()
+        .args([
+            "-N",
+            "-o",
+            "PermitRemoteOpen=127.0.0.1:*",
+            "-R",
+            "127.0.0.1:22002",
+            &dest,
+        ])
+        .spawn()?;
+    timeout(Duration::from_secs(6), async {
+        while !f.auth.grant.is_listening(22002) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    for payload in [b"one service", b"another one"] {
+        let target = TcpListener::bind("127.0.0.1:0").await?;
+        let port = target.local_addr()?.port();
+        let (mut reader, wire) = tokio::io::duplex(4096);
+        let service = async {
+            let (mut stream, _) = target.accept().await?;
+            let mut received = [0; 11];
+            stream.read_exact(&mut received).await?;
+            assert_eq!(&received, payload);
+            stream.write_all(b"served").await?;
+            stream.shutdown().await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let browser = async {
+            reader.write_all(payload).await?;
+            let mut response = [0; 6];
+            reader.read_exact(&mut response).await?;
+            assert_eq!(&response, b"served");
+            reader.shutdown().await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        timeout(Duration::from_secs(8), async {
+            tokio::try_join!(
+                f.auth.grant.forward_host(22002, port, wire),
+                service,
+                browser
+            )
+        })
+        .await??;
+    }
+    dynamic.kill().await?;
+    timeout(Duration::from_secs(6), async {
+        while f.auth.grant.has_session() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     let mut ssh = command()
         .args([
             "-N",

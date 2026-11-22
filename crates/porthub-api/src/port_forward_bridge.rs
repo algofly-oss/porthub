@@ -1,5 +1,6 @@
 //! TCP service admission for persisted, owner-scoped SSH forwarding entries.
 pub(crate) mod private;
+pub(crate) mod host_public;
 use crate::{
     error::{ApiError, ApiResult},
     routes::port_forwards::COLLECTION,
@@ -243,14 +244,23 @@ pub(crate) async fn sync_reservation(app: &App, connection: &Document) -> ApiRes
     ) else {
         return Ok(());
     };
-    let public = app
-        .collection(COLLECTION)
-        .count_documents(
-            doc! {"_id":id,"workspace_id":owner,"state":"active","public":true,
-            "mappings":{"$elemMatch":{"direction":"remote","gatewayPort":i32::from(port)}}},
-        )
-        .await?
-        > 0;
+    let entries = app.collection(COLLECTION);
+    let public = if connection.contains_key("host_public_state") {
+        let reservation = connection.get_object_id("_id")
+            .map_err(|_| ApiError::bad_request("Invalid public port reservation"))?;
+        let published = app.collection("connections").count_documents(doc! {
+            "_id":reservation, "host_public_state":"active", "forward_owner":owner,
+            "forward_reservation":id, "external_port":i32::from(port)
+        }).await? > 0;
+        published && entries.count_documents(doc! {
+            "_id":id,"workspace_id":owner,"state":"active","mappings.direction":"host"
+        }).await? > 0
+    } else {
+        entries.count_documents(doc! {
+            "_id":id,"workspace_id":owner,"state":"active","public":true,
+            "mappings":{"$elemMatch":{"direction":"remote","gatewayPort":i32::from(port)}}
+        }).await? > 0
+    };
     policy(app, port, public).await.map_err(|_| {
         ApiError::new(
             StatusCode::BAD_GATEWAY,
@@ -265,6 +275,7 @@ async fn public_worker(
     port: u16,
     stop: CancellationToken,
     ready: Arc<std::sync::atomic::AtomicBool>,
+    publication: Option<host_public::Publication>,
 ) {
     let mut sessions = tokio::task::JoinSet::new();
     loop {
@@ -277,6 +288,13 @@ async fn public_worker(
         ready.store(result.is_ok(), std::sync::atomic::Ordering::Release);
         match result {
             Ok(Some(stream)) if sessions.len() < 32 => {
+                if let Some(publication) = publication {
+                    let app = app.clone();
+                    sessions.spawn(async move {
+                        let _ = publication.serve(&app, stream).await;
+                    });
+                    continue;
+                }
                 if let Some(grant) = app
                     .forward_registry
                     .get(&id.to_hex())
@@ -344,6 +362,7 @@ pub async fn activate(app: &Arc<App>, owner: ObjectId, id: ObjectId) -> Result<(
                     port,
                     stop.clone(),
                     ready.clone(),
+                    None,
                 ));
                 Worker { stop, ready }
             });
@@ -389,6 +408,7 @@ pub async fn deactivate(app: &App, owner: ObjectId, id: ObjectId) -> Result<()> 
             true
         }
     });
+    host_public::withdraw_all(app, owner, id).await?;
     if let Some(row) = row {
         if row.get_bool("public") == Ok(true) || row.get_bool("audience_cleanup_pending") == Ok(true) {
             edge(app)
@@ -432,7 +452,7 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
     let public = row.get_bool("public") == Ok(true);
     let ports: Vec<_> = mappings(&row)?
         .into_iter()
-        .filter(|m| m.get_str("direction") == Ok("remote"))
+        .filter(|m| matches!(m.get_str("direction"), Ok("remote" | "host")))
         .map(|m| number(m, "gatewayPort"))
         .collect::<Result<_>>()?;
     let grant = app.forward_registry.get(&id.to_hex());
@@ -460,8 +480,9 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
     } else {
         None
     };
-    let private_host = if !public && selected && !ports.is_empty() {
-        Some(format!("{id}.forwards.{suffix}"))
+    let private_host = if !public && !ports.is_empty() {
+        let label = row.get_str("dns_label").map(str::to_owned).unwrap_or_else(|_|id.to_hex());
+        Some(format!("{label}.forwards.{suffix}"))
     } else {
         None
     };
@@ -544,6 +565,10 @@ async fn reap(app: &Arc<App>) -> Result<()> {
         {
             continue;
         }
+        if row.contains_key("host_public_state") {
+            host_public::withdraw(app, &row).await?;
+            continue;
+        }
         // This reserved port cannot be reused until the edge confirms its old
         // listener has closed and any previous firewall allowance is gone.
         edge(app)
@@ -605,13 +630,16 @@ async fn recover_public(app: &Arc<App>) -> Result<()> {
         .into_iter()
         .filter_map(|(id, p)| ObjectId::parse_str(id).ok().map(|id| (id, p)))
         .collect();
+    let published = host_public::recover(app, &existing).await?;
     let workers: HashSet<_> = app.forward_bridge.workers().keys().copied().collect();
     let stale: HashSet<_> = existing
         .union(&workers)
-        .filter(|key| !wanted.contains_key(key))
+        .filter(|key| !wanted.contains_key(key) && !published.contains(key))
         .map(|(id, _)| *id)
         .collect();
     for id in stale {
+        let _connections = app.connection_lock.lock().await;
+        if app.collection("connections").count_documents(doc!{"_id":id,"host_public_state":"active"}).await? > 0 { continue; }
         let _guard = app.forward_bridge.changes.lock().await;
         if app
             .collection(COLLECTION)
@@ -733,6 +761,31 @@ mod recovery_tests {
             assert!(TcpListener::bind(("0.0.0.0",port)).await.is_ok());
             assert!(app.forward_bridge.workers().is_empty());
             assert_eq!(app.collection("connections").count_documents(doc!{"forward_owner":owner}).await?,0);
+            // Private host grants keep independent, explicitly published service ports.
+            let host = ObjectId::new();
+            let internal = 35004;
+            app.collection(COLLECTION).insert_one(doc!{"_id":host,"workspace_id":owner,"state":"active","public":false,"mappings":[{"direction":"host","gatewayPort":internal}]}).await?;
+            let mut published = Vec::new();
+            for destination in [8888, 3000] {
+                let socket=TcpListener::bind("127.0.0.1:0").await?;
+                let port=socket.local_addr()?.port();drop(socket);
+                let key=ObjectId::new();
+                let row=doc!{"_id":key,"forward_owner":owner,"forward_reservation":host,"enabled":false,"external_port":i32::from(port),"host_client_port":destination,"host_public_state":"active"};
+                app.collection("connections").insert_one(&row).await?;
+                host_public::activate(&app,&row).await?;
+                published.push((key,port,row));
+            }
+            assert_eq!(list().await?.len(),2);
+            http.delete(format!("{BASE}/public/{}",published[0].0)).send().await?.error_for_status()?;
+            recover_public(&app).await?;
+            assert_eq!(list().await?.len(),2);
+            host_public::withdraw(&app,&published[0].2).await?;
+            recover_public(&app).await?;
+            assert_eq!(list().await?,vec![(published[1].0.to_hex(),published[1].1)]);
+            assert!(TcpListener::bind(("0.0.0.0",published[0].1)).await.is_ok());
+            crate::routes::port_forwards::retire(&app,owner,host).await.map_err(api)?;
+            assert!(list().await?.is_empty());
+            assert_eq!(app.collection("connections").count_documents(doc!{"forward_reservation":host}).await?,0);
             Ok::<_,anyhow::Error>(())
         }.await;
         server.abort();

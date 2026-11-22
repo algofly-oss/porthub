@@ -117,7 +117,7 @@ fn saved_routes(entry: &Document) -> Result<(ImportRoutes, HashSet<u16>)> {
             .as_document()
             .context("invalid forwarding mapping")?;
         match d.get_str("direction")? {
-            "remote" => {
+            "remote" | "host" => {
                 ensure!(
                     remote.insert(port(d, "gatewayPort")?),
                     "duplicate remote binding"

@@ -20,12 +20,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashSet, sync::Arc};
 
+mod host_settings;
+
 pub const COLLECTION: &str = "ssh_port_forwards";
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/port-forwards", get(list).post(create))
-        .route("/api/port-forwards/{id}", axum::routing::delete(remove))
+        .route("/api/port-forwards/{id}", axum::routing::delete(remove).patch(host_settings::rename))
+        .route("/api/port-forwards/{id}/public-ports", get(host_settings::list).post(host_settings::publish))
+        .route("/api/port-forwards/{id}/public-ports/{port}", axum::routing::delete(host_settings::unpublish))
         .route("/api/port-forwards/{id}/audience", axum::routing::put(update_audience))
         .route(
             "/api/port-forwards/{id}/credentials",
@@ -48,6 +52,7 @@ struct NewEntry {
 #[derive(Deserialize)]
 #[serde(tag = "direction", rename_all = "lowercase", deny_unknown_fields)]
 enum Mapping {
+    Host {},
     Remote {
         #[serde(rename = "clientPort")]
         client_port: u16,
@@ -104,6 +109,10 @@ fn validate(input: &NewEntry) -> ApiResult<()> {
     if !(1..=32).contains(&input.mappings.len()) {
         return Err(ApiError::bad_request("Choose 1–32 port mappings."));
     }
+    let host_mode = input.mappings.iter().any(|m| matches!(m, Mapping::Host {}));
+    if host_mode && (input.mappings.len() != 1 || input.public) {
+        return Err(ApiError::bad_request("A host forward uses one private host mapping."));
+    }
     let mut local = HashSet::new();
     let mut remote = HashSet::new();
     for mapping in &input.mappings {
@@ -129,7 +138,7 @@ fn validate(input: &NewEntry) -> ApiResult<()> {
         }
     }
     let selected = !input.machine_ids.is_empty() || !input.group_ids.is_empty();
-    if remote.is_empty() && (input.public || selected) {
+    if !host_mode && remote.is_empty() && (input.public || selected) {
         return Err(ApiError::bad_request(
             "Exposure applies only to ports shared from this computer.",
         ));
@@ -219,6 +228,9 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
 // Use the same unique index as ordinary agent port mappings. The disabled
 // reservations have no machine or user id, so they never enter tunnel configs.
 async fn reserve(app: &App, owner: ObjectId, id: ObjectId, count: usize) -> ApiResult<Vec<u16>> {
+    reserve_with(app, owner, id, count, &Document::new()).await
+}
+async fn reserve_with(app: &App, owner: ObjectId, id: ObjectId, count: usize, fields: &Document) -> ApiResult<Vec<u16>> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -228,7 +240,9 @@ async fn reserve(app: &App, owner: ObjectId, id: ObjectId, count: usize) -> ApiR
     candidates.shuffle(&mut rand::thread_rng());
     let mut result = Vec::new();
     for port in candidates {
-        match app.collection("connections").insert_one(doc!{"external_port":i32::from(port),"enabled":false,"forward_reservation":id,"forward_owner":owner}).await {
+        let mut reservation = fields.clone();
+        reservation.extend(doc!{"external_port":i32::from(port),"enabled":false,"forward_reservation":id,"forward_owner":owner});
+        match app.collection("connections").insert_one(reservation).await {
             Ok(_) => {result.push(port); if result.len() == count {return Ok(result);} }
             Err(e) if store::duplicate(&e) => continue,
             Err(e) => return Err(e.into()),
@@ -269,7 +283,7 @@ async fn create(
     let count = input
         .mappings
         .iter()
-        .filter(|m| matches!(m, Mapping::Remote { .. }))
+        .filter(|m| matches!(m, Mapping::Remote { .. } | Mapping::Host {}))
         .count();
     let guard = app.connection_lock.lock().await;
     if app
@@ -286,9 +300,13 @@ async fn create(
     app.collection(COLLECTION).insert_one(doc!{"_id":id, "workspace_id":owner, "state":"provisioning","created_at":DateTime::now(),
         "public_key":key, "name":input.name.trim(), "public":input.public,"machine_ids":clients,"group_ids":groups}).await?;
     let saved = async {
+        if count > 0 {
+            crate::port_forward_bridge::private::ensure_identity(&app,owner,&doc!{"_id":id},&[]).await?;
+        }
         let ports = reserve(&app,owner,id,count).await?;
         let mut ports = ports.into_iter();
         let mappings:Vec<_> = input.mappings.into_iter().map(|m|match m {
+            Mapping::Host{}=>doc!{"direction":"host","gatewayPort":i32::from(ports.next().expect("one reserved port per host mapping"))},
             Mapping::Remote{client_port}=>doc!{"direction":"remote","clientPort":i32::from(client_port),"gatewayPort":i32::from(ports.next().expect("one reserved port per remote mapping"))},
             Mapping::Local{client_port,service_port,machine_id}=>doc!{"direction":"local","clientPort":i32::from(client_port),"servicePort":i32::from(service_port),"target":format!("host-{}",machine_id.to_lowercase()),"machineId":machine_id.to_lowercase()},
         }).collect();
@@ -340,9 +358,14 @@ async fn update_audience(
     check_inventory(&app, "machines", owner, &clients).await?;
     check_inventory(&app, "machine_groups", owner, &groups).await?;
 
+    let host_mode = row.get_array("mappings").is_ok_and(|items| items.iter().any(|m|
+        m.as_document().is_some_and(|m| m.get_str("direction") == Ok("host"))));
+    if host_mode && input.public {
+        return Err(ApiError::bad_request("Publish individual host ports separately."));
+    }
     let remote = row.get_array("mappings").is_ok_and(|items| items.iter().any(|m|
         m.as_document().is_some_and(|m| m.get_str("direction") == Ok("remote"))));
-    if !remote && (input.public || !clients.is_empty() || !groups.is_empty()) {
+    if !host_mode && !remote && (input.public || !clients.is_empty() || !groups.is_empty()) {
         return Err(ApiError::bad_request("Exposure applies only to ports shared from this computer."));
     }
     let same_ids = |key: &str, expected: &[ObjectId]| {
@@ -441,6 +464,16 @@ async fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_profiles_accept_only_an_isolated_private_host_mapping() {
+        let valid=|body| validate(&serde_json::from_value::<NewEntry>(body).unwrap()).is_ok();
+        assert!(valid(json!({"name":"Lab","mappings":[{"direction":"host"}]})));
+        assert!(valid(json!({"name":"Lab","machineIds":["1234567890abcdef12345678"],"mappings":[{"direction":"host"}]})));
+        assert!(!valid(json!({"name":"Lab","public":true,"mappings":[{"direction":"host"}]})));
+        assert!(!valid(json!({"name":"Lab","mappings":[{"direction":"host"},{"direction":"remote","clientPort":22}]})));
+        assert!(serde_json::from_value::<NewEntry>(json!({"name":"Lab","mappings":[{"direction":"host","target":"10.0.0.1"}]})).is_err());
+    }
 
     #[test]
     fn unpublished_remote_mapping_and_audience_edit_contract() {

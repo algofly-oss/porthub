@@ -115,6 +115,13 @@ pub(crate) async fn allocate_locked(
     machine: &str,
     used: &HashSet<String>,
 ) -> ApiResult<String> {
+    let mut used = used.clone();
+    let workspace = mongodb::bson::oid::ObjectId::parse_str(owner)
+        .map_err(|_| ApiError::bad_request("Invalid workspace"))?;
+    for value in app.collection(crate::routes::port_forwards::COLLECTION)
+        .distinct("private_ip", doc! {"workspace_id":workspace}).await? {
+        if let Some(ip) = value.as_str() { used.insert(ip.to_owned()); }
+    }
     let document = ensure_locked(app, owner).await?;
     let current = pools(&document)?;
     let lans = workspace_lans(app, owner).await?;
@@ -122,7 +129,7 @@ pub(crate) async fn allocate_locked(
         if !avoids_lans(*pool, &lans) {
             continue;
         }
-        if let Some(ip) = pool.available_address(machine, used) {
+        if let Some(ip) = pool.available_address(machine, &used) {
             return Ok(ip);
         }
     }
@@ -132,7 +139,7 @@ pub(crate) async fn allocate_locked(
         .parent()
         .filter(|p| available(*p, &foreign, &addresses) && avoids_lans(*p, &lans))
     {
-        if let Some(ip) = parent.available_address(machine, used) {
+        if let Some(ip) = parent.available_address(machine, &used) {
             app.collection("private_networks").update_one(doc! {"_id":owner},
                 doc! {"$set":{"cidr":parent.cidr(),"updated_at":mongodb::bson::DateTime::now()}}).await?;
             return Ok(ip);
@@ -150,7 +157,7 @@ pub(crate) async fn allocate_locked(
                 "All available RFC1918 private address pools are occupied",
             )
         })?;
-    let ip = next.available_address(machine, used).ok_or_else(|| {
+    let ip = next.available_address(machine, &used).ok_or_else(|| {
         ApiError::new(
             StatusCode::CONFLICT,
             "Private address pool allocation changed; retry",
@@ -204,6 +211,12 @@ async fn occupied(app: &App, owner: &str) -> ApiResult<(Vec<Network>, Vec<Ipv4Ad
         if let Ok(ip) = store::string(&peer, "ip").parse() {
             addresses.push(ip);
         }
+    }
+    let workspace = mongodb::bson::oid::ObjectId::parse_str(owner)
+        .map_err(|_| ApiError::bad_request("Invalid workspace"))?;
+    for value in app.collection(crate::routes::port_forwards::COLLECTION)
+        .distinct("private_ip", doc! {"workspace_id":{"$ne":workspace}}).await? {
+        if let Some(ip) = value.as_str().and_then(|v| v.parse().ok()) { addresses.push(ip); }
     }
     {let(retired_ranges,retired_addresses)=crate::private_retired_sources::occupied(app).await?;ranges.extend(retired_ranges);addresses.extend(retired_addresses);}
     Ok((ranges, addresses))
