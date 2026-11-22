@@ -149,6 +149,7 @@ mod tests {
     async fn blocked_native_scan_does_not_suspend_heartbeat_or_cancellation() {
         let (release, held) = std::sync::mpsc::channel();
         let (heartbeat, observed) = std::sync::mpsc::channel();
+        let (canceled, observed_cancel) = std::sync::mpsc::channel();
         let (entered, began) = std::sync::mpsc::channel();
         let observer = std::thread::spawn(move || {
             began
@@ -157,33 +158,56 @@ mod tests {
             let alive = observed
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .is_ok();
+            // Keep the native probe blocked until cancellation also runs on
+            // the same executor. The old inline path times out before either.
+            let cancellation = alive
+                && observed_cancel
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .is_ok();
             release.send(()).unwrap();
-            alive
+            (alive, cancellation)
         });
         let cancel = tokio_util::sync::CancellationToken::new();
         let worker_cancel = cancel.clone();
+        let (probe_entered, probe_started) = tokio::sync::oneshot::channel();
+        let heartbeat_ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ready = heartbeat_ready.clone();
         let heartbeat_task = tokio::spawn(async move {
+            probe_started.await.unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             let _ = heartbeat.send(());
+            ready.notify_one();
             worker_cancel.cancelled().await;
+            let _ = canceled.send(());
         });
         let mut sampler = Sampler::default();
         let _ = sampler.sample_with(true, Instant::now(), move || {
             entered.send(()).unwrap();
+            let _ = probe_entered.send(());
             held.recv_timeout(std::time::Duration::from_secs(3))
                 .unwrap();
             7u8
         });
         // This must remain runnable even while the native probe is blocked.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            heartbeat_ready.notified(),
+        )
+        .await
+        .unwrap();
         cancel.cancel();
         tokio::time::timeout(std::time::Duration::from_millis(100), heartbeat_task)
             .await
             .unwrap()
             .unwrap();
+        let (heartbeat_progressed, cancellation_progressed) = observer.join().unwrap();
         assert!(
-            observer.join().unwrap(),
+            heartbeat_progressed,
             "native disk probe blocked the control heartbeat executor"
+        );
+        assert!(
+            cancellation_progressed,
+            "native disk probe blocked cancellation on the control executor"
         );
     }
     async fn finish<T: Clone + Send + 'static>(sampler: &mut Sampler<T>, now: Instant) {
