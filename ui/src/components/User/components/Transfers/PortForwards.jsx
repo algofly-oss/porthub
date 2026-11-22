@@ -874,7 +874,6 @@ function SavedForwards() {
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-3 sm:px-4">
-        <h2 className="text-base font-semibold">Saved forwards</h2>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           {!!data?.entries.length && <input type="search" aria-label="Search forwards" placeholder="Search forwards…" value={search}
             onChange={event => { setSearch(event.target.value); setPage(1); }}
