@@ -788,7 +788,11 @@ async fn session(
     let direct = negotiate(&mut socket, source, allowed, &control).await?;
     // Exchange fresh kernel identifiers after replugging; retain the configured physical identity.
     let mut device = if source {
-        source_device(&plan.device, relayed.as_ref().map(|(_, _, metadata)| &metadata.device)).await?
+        #[cfg(any(target_os = "linux", windows))]
+        let relay_device = relayed.as_ref().map(|(_, _, metadata)| &metadata.device);
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let relay_device = None;
+        source_device(&plan.device, relay_device).await?
     } else {
         plan.device.clone()
     };
