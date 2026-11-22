@@ -5,7 +5,10 @@ use russh::server::{self, ChannelOpenHandle, Msg, Session};
 use russh::Channel;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::{
@@ -23,6 +26,7 @@ pub struct Dial {
 pub struct Grant {
     local: HashMap<(String, u16), String>,
     remote: HashSet<u16>,
+    sessions: AtomicUsize,
     channels: Arc<Semaphore>,
     jobs: mpsc::Sender<Dial>,
     open: Mutex<HashMap<u16, server::Handle>>,
@@ -47,10 +51,15 @@ impl Grant {
             local,
             remote,
             jobs,
+            sessions: AtomicUsize::new(0),
             channels: Arc::new(Semaphore::new(32)),
             open: Mutex::new(HashMap::new()),
             cancel: CancellationToken::new(),
         }))
+    }
+
+    pub fn has_session(&self) -> bool {
+        !self.cancel.is_cancelled() && self.sessions.load(Ordering::Relaxed) > 0
     }
 
     pub fn is_listening(&self, port: u16) -> bool {
@@ -94,6 +103,7 @@ pub struct ForwardSession {
 }
 impl ForwardSession {
     pub fn new(grant: Arc<Grant>) -> Self {
+        grant.sessions.fetch_add(1, Ordering::Relaxed);
         Self {
             grant,
             registered: Default::default(),
@@ -184,9 +194,29 @@ impl ForwardSession {
 }
 impl Drop for ForwardSession {
     fn drop(&mut self) {
+        self.grant.sessions.fetch_sub(1, Ordering::Relaxed);
         let mut active = self.grant.open.lock().unwrap();
         for port in self.registered.drain() {
             active.remove(&port);
         }
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn presence_tracks_sessions_even_when_another_owner_retains_the_grant() {
+        let (jobs, _) = mpsc::channel(1);
+        let grant = Grant::new(HashMap::new(), HashSet::from([24000]), jobs).unwrap();
+        assert!(!grant.has_session());
+        let first = ForwardSession::new(grant.clone());
+        let second = ForwardSession::new(grant.clone());
+        assert!(grant.has_session());
+        drop(first);
+        assert!(grant.has_session());
+        drop(second);
+        assert!(!grant.has_session());
     }
 }

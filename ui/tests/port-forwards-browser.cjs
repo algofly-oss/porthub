@@ -38,6 +38,7 @@ async function choose(page, label, option) {
       });
       const page = await context.newPage(),
         state = makeDemoData();
+      let extraEntries = [];
       let entry,
         reveals = 0,
         creates = 0,
@@ -53,7 +54,7 @@ async function choose(page, label, option) {
         let body = {};
         if (path === "/api/port-forwards" && method === "GET") {
           body = {
-            entries: entry ? [entry] : [],
+            entries: entry ? [entry, ...extraEntries] : [],
             machines: [
               { id: machine, name: "Condor" },
               { id: secondMachine, name: "Miro" },
@@ -93,6 +94,7 @@ async function choose(page, label, option) {
                 : { target: "host-" + machine }),
             })),
             status: {
+              connected: false,
               ready: false,
               privateHost: "test.phub",
               publicHost: "gateway.example",
@@ -463,6 +465,26 @@ async function choose(page, label, option) {
         .waitFor();
       assert.equal(reveals, 2);
       assert.equal(await command.count(), 0);
+      extraEntries = Array.from({ length: 10 }, (_, index) => ({
+        ...entry, id: String(index), name: `Lab device ${index + 1}`,
+      }));
+      entry.status = { ...entry.status, connected: true, ready: false };
+      const refreshStatus = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await refreshStatus();
+      const table = page.getByRole("table", { name: "Saved port forwards" });
+      await table.getByText("Connected", { exact: true }).waitFor();
+      const search = page.getByRole("searchbox", { name: "Search forwards" });
+      await search.fill("Lab device 10");
+      await table.getByRole("heading", { name: "Lab device 10", exact: true }).waitFor();
+      assert.equal(await table.getByRole("heading").count(), 1);
+      await search.fill("");
+      if (width === 402) await page.getByRole("button", { name: "Next page" }).click();
+      else await page.getByRole("button", { name: "2", exact: true }).click();
+      await table.getByRole("heading", { name: "Lab device 10", exact: true }).waitFor();
+      await search.fill("Support laptop");
+      entry.status.connected = false;
+      await refreshStatus();
+      await table.getByText("Disconnected", { exact: true }).waitFor();
       assert.deepEqual(errors, []);
       await context.close();
       console.log(

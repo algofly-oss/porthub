@@ -418,6 +418,7 @@ pub async fn deactivate(app: &App, owner: ObjectId, id: ObjectId) -> Result<()> 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeStatus {
+    connected: bool,
     ready: bool,
     pub private_host: Option<String>,
     pub public_host: Option<String>,
@@ -465,6 +466,7 @@ pub fn status_from_row(app: &App, row: &Document, suffix: &str) -> Result<Bridge
         None
     };
     Ok(BridgeStatus {
+        connected: grant.as_ref().is_some_and(|g| g.has_session()),
         ready,
         private_host,
         public_host: if public {

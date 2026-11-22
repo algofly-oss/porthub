@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { IconChevronDown, IconCopy, IconPlus, IconTerminal2, IconTrash } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
@@ -11,6 +11,7 @@ import {
 import toast from "react-hot-toast";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import uiRoutes from "@/shared/routes/uiRoutes";
+import ResultsPagination from "@/components/ui/results-pagination";
 import SearchDropdown from "@/components/ui/search-dropdown";
 import SearchMultiSelect from "@/components/ui/search-multi-select";
 
@@ -677,6 +678,16 @@ function SavedForwards() {
     [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState(null);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const query = search.trim().toLowerCase();
+  const matches = (data?.entries || []).filter(entry =>
+    [entry.name, ...entry.mappings.flatMap(m => [m.clientPort, m.gatewayPort, m.servicePort])]
+      .some(value => value != null && String(value).toLowerCase().includes(query))
+  );
+  const pages = Math.max(1, Math.ceil(matches.length / pageSize));
+  const current = Math.min(page, pages);
   const sequence = useRef(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -799,26 +810,40 @@ function SavedForwards() {
             }
             onCreated={(id) => {
               setBuilding(false);
+              setSearch("");
+              setPage(1);
               setRevision((r) => r + 1);
               void reveal(id);
             }}
           />
         ) : (
-          <ul className="divide-y divide-border border-t border-border">
-            {data.entries.map((entry) => (
-              <li key={entry.id} className="py-4">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="break-words text-sm font-semibold">
-                      {entry.name}
-                    </h3>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {entry.status?.ready
-                        ? "Connected"
-                        : entry.status?.reason || "Waiting for SSH connection"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-1">
+          <div>
+            <input type="search" aria-label="Search forwards" placeholder="Search by name or port" value={search}
+              onChange={event => { setSearch(event.target.value); setPage(1); }}
+              className={field + " mb-3 sm:max-w-xs"} />
+            <table aria-label="Saved port forwards" className="block w-full text-left text-sm sm:table">
+              <thead className="hidden border-y border-border text-xs text-muted-foreground sm:table-header-group">
+                <tr>{["Profile", "SSH client", "Actions"].map(heading =>
+                  <th key={heading} scope="col" className="px-2 py-2 font-medium">{heading}</th>)}</tr>
+              </thead>
+              <tbody className="block sm:table-row-group">
+              {!matches.length && <tr><td colSpan={3} className="p-3 text-muted-foreground">No matching forwards.</td></tr>}
+              {matches.slice((current - 1) * pageSize, current * pageSize).map(entry => {
+                const connected = entry.status?.connected ?? (entry.status?.ready ? true : null);
+                return <Fragment key={entry.id}><tr className="block border-t border-border sm:table-row">
+                  <td className="block px-2 pt-3 align-top sm:table-cell sm:pb-2">
+                    <h3 className="break-words font-semibold">{entry.name}</h3>
+                    <ul className="mt-1 space-y-1 text-xs">{entry.mappings.map((mapping, index) =>
+                      <MappingAddress key={index} entry={entry} mapping={mapping} machines={data.machines} />)}</ul>
+                  </td>
+                  <td className="block px-2 py-2 align-top sm:table-cell sm:pt-3">
+                    <span className="inline-flex items-center gap-2 text-xs font-medium">
+                      <span aria-hidden="true" className={"h-2 w-2 shrink-0 rounded-full " + (connected ? "bg-emerald-500" : "bg-muted-foreground/50")} />
+                      {connected ? "Connected" : connected === false ? "Disconnected" : "Status unavailable"}
+                    </span>
+                    {entry.status?.reason && <p className="mt-1 text-xs text-muted-foreground">{entry.status.reason}</p>}
+                  </td>
+                  <td className="block px-2 pb-2 align-top sm:table-cell sm:pt-2"><div className="flex flex-wrap gap-1">
                     <Button
                       variant="outline"
                       size="sm"
@@ -856,18 +881,8 @@ function SavedForwards() {
                     >
                       <IconTrash size={16} />
                     </Button>
-                  </div>
-                </div>
-                <ul className="mt-2 space-y-1 text-xs">
-                  {entry.mappings.map((m, i) => (
-                    <MappingAddress
-                      key={i}
-                      entry={entry}
-                      mapping={m}
-                      machines={data.machines}
-                    />
-                  ))}
-                </ul>
+                  </div></td></tr>
+                {(editing === entry.id || confirm === entry.id || shown?.id === entry.id) && <tr className="block sm:table-row"><td colSpan={3} className="block px-2 pb-3 sm:table-cell">
                 {editing === entry.id && (
                   <AudienceEditor
                     entry={entry}
@@ -908,9 +923,14 @@ function SavedForwards() {
                 {shown?.id === entry.id && (
                   <Commands credentials={shown.credentials} profileName={entry.name} />
                 )}
-              </li>
-            ))}
-          </ul>
+                </td></tr>}
+              </Fragment>;
+              })}
+              </tbody>
+            </table>
+            <ResultsPagination noun="Forwards" count={matches.length} page={current} pages={pages} pageSize={pageSize}
+              onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
+          </div>
         ))}
     </div>
   );
