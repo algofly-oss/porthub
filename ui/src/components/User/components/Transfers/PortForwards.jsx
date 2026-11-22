@@ -927,9 +927,9 @@ function SavedForwards() {
           </div>
         ) : (
           <div className="flex min-h-0 w-full flex-1 flex-col">
-            <div className="data-scroll">
+            <div className="data-scroll !bg-none">
             <table aria-label="Saved port forwards" className="block w-full text-left text-sm lg:table">
-              <thead className="hidden border-y border-border text-xs text-muted-foreground lg:table-header-group">
+              <thead className="hidden border-y border-border bg-muted text-xs text-muted-foreground lg:table-header-group">
                 <tr>{["Profile", "Connection", "Address"].map(heading =>
                   <th key={heading} scope="col" className="px-3 py-2 font-medium">{heading}</th>)}</tr>
               </thead>
