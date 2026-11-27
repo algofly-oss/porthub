@@ -65,8 +65,8 @@ export default function HostItem({ name, hostname, kind, via, enabled, privateDo
           <span className="flex min-w-0 items-center gap-1">
             <span aria-hidden="true" className={`mr-2 h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
             <button type="button" className="min-w-0 truncate rounded text-left text-[15px] font-medium" aria-label={`Configure ${name}`}>{name}</button>
-            {privateDomain && <button type="button" onClick={event => copyValue(event, `http://${privateDomain}`, "PortHub domain address")}
-              aria-label={`Copy PortHub address http://${privateDomain}`} title={`Copy http://${privateDomain}`}
+            {privateDomain && <button type="button" onClick={event => copyValue(event, privateDomain, "PortHub hostname")}
+              aria-label={`Copy PortHub hostname ${privateDomain}`} title={`Copy ${privateDomain}`}
               className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">
               <IconCopy size={14} />
             </button>}

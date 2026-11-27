@@ -2231,9 +2231,9 @@ export default function HostConfigPopup({
                 </Badge>
                 {clientOsLabel && <Badge color="blue" variant="light" leftSection={<MachineOsIcon os={host.clientOs} distribution={host.clientOsId} size={13} />} className={getInfoBadgeClassName(isDark)} title={clientOsLabel}>{clientOsLabel}</Badge>}
                 {privateDomain && <Badge component="button" type="button" color="blue" variant="light"
-                  onClick={() => handleCopy("PortHub domain address", `http://${privateDomain}`)}
-                  aria-label={`Copy PortHub address http://${privateDomain}`}
-                  title={`Copy http://${privateDomain}`}
+                  onClick={() => handleCopy("PortHub hostname", privateDomain)}
+                  aria-label={`Copy PortHub hostname ${privateDomain}`}
+                  title={`Copy ${privateDomain}`}
                   rightSection={<IconCopy size={12} />}
                   className={`${getInfoBadgeClassName(isDark)} cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}>
                   HOST: {privateDomain}
